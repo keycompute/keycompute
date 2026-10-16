@@ -82,8 +82,8 @@ pub(crate) fn validate_account_priority(priority: Option<i32>) -> Result<()> {
 #[derive(Debug, Serialize)]
 pub struct AccountInfo {
     pub id: Uuid,
-    /// 所属租户 ID
-    pub tenant_id: Uuid,
+    /// 所属租户 ID；None 表示平台共享账号。
+    pub tenant_id: Option<Uuid>,
     /// 所属租户是否处于活跃状态
     pub tenant_active: bool,
     pub name: String,
@@ -108,7 +108,7 @@ pub struct AccountInfo {
     pub last_probe_status: Option<String>,
     pub last_probe_error_code: Option<String>,
     pub priority: i32,
-    /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
+    /// 兼容展示字段，由 tenant_id 派生，客户端不可设置。
     pub visibility: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
@@ -337,10 +337,8 @@ pub async fn list_accounts(
 
 /// 创建账号请求
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateAccountRequest {
-    /// Required for a platform-root request; tenant admins are bound to their
-    /// verified selected tenant.
-    pub tenant_id: Option<Uuid>,
     pub name: String,
     pub provider: String,
     pub api_key: String,
@@ -352,15 +350,8 @@ pub struct CreateAccountRequest {
     pub rpm_limit: Option<i32>,
     pub tpm_limit: Option<i32>,
     pub priority: Option<i32>,
-    /// 可见性：'tenant' = 仅本租户可见（默认），'global' = 所有租户可见
-    #[serde(default = "default_visibility")]
-    pub visibility: String,
     #[serde(default)]
     pub pool_enabled: Option<bool>,
-}
-
-fn default_visibility() -> String {
-    "tenant".to_string()
 }
 
 fn default_api_capabilities(protocol: ProtocolType) -> Vec<String> {
@@ -432,25 +423,9 @@ pub async fn create_account(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
     let tenant_id = match scope {
-        AccountManagementScope::Tenant(scope) => {
-            if req.tenant_id.is_some_and(|id| id != scope.tenant_id()) {
-                return Err(ApiError::Forbidden(
-                    "Account tenant must match the selected tenant".into(),
-                ));
-            }
-            scope.tenant_id()
-        }
-        AccountManagementScope::Platform(_) => {
-            req.tenant_id.filter(|id| !id.is_nil()).ok_or_else(|| {
-                ApiError::BadRequest("tenant_id is required for platform creation".into())
-            })?
-        }
+        AccountManagementScope::Tenant(scope) => Some(scope.tenant_id()),
+        AccountManagementScope::Platform(_) => None,
     };
-    if !matches!(req.visibility.as_str(), "tenant" | "global") {
-        return Err(ApiError::BadRequest(
-            "visibility must be tenant or global".into(),
-        ));
-    }
 
     // 校验协议类型：系统仅支持 openai / anthropic 两种协议，
     // 任何厂商（DeepSeek、Ollama、vLLM 等）通过协议 + base_url 接入
@@ -513,7 +488,6 @@ pub async fn create_account(
         priority: req.priority,
         models_supported: models,
         api_capabilities,
-        visibility: Some(req.visibility.clone()),
         pool_enabled: req.pool_enabled,
     };
 
@@ -533,7 +507,6 @@ pub async fn create_account(
             Account::create_platform(
                 pool,
                 scope,
-                tenant_id,
                 &db_req,
                 &audit,
                 ProviderAuthzSnapshot::platform(auth.token_version),
@@ -550,8 +523,8 @@ pub async fn create_account(
 
 /// 更新账号请求
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAccountRequest {
-    pub tenant_id: Option<Uuid>,
     pub name: Option<String>,
     pub api_key: Option<String>,
     /// 自定义 Base URL（Provider 端点地址）
@@ -562,8 +535,6 @@ pub struct UpdateAccountRequest {
     pub tpm_limit: Option<i32>,
     pub is_active: Option<bool>,
     pub priority: Option<i32>,
-    /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
-    pub visibility: Option<String>,
     pub pool_enabled: Option<bool>,
 }
 
@@ -586,15 +557,6 @@ pub async fn update_account(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    if req
-        .visibility
-        .as_deref()
-        .is_some_and(|value| !matches!(value, "tenant" | "global"))
-    {
-        return Err(ApiError::BadRequest(
-            "visibility must be tenant or global".into(),
-        ));
-    }
     let audit = audit_context(&auth, request_id);
     let existing = Account::prepare_update(
         pool,
@@ -662,7 +624,6 @@ pub async fn update_account(
     };
 
     let db_req = DbUpdateAccountRequest {
-        tenant_id: req.tenant_id,
         name: req.name.clone(),
         endpoint: api_base,
         upstream_api_key_encrypted: encrypted_key,
@@ -673,7 +634,6 @@ pub async fn update_account(
         enabled: req.is_active,
         models_supported,
         api_capabilities,
-        visibility: req.visibility.clone(),
         pool_enabled: req.pool_enabled,
     };
 
@@ -1513,7 +1473,6 @@ pub(crate) fn refresh_models_update_request(
     models_supported: Vec<String>,
 ) -> DbUpdateAccountRequest {
     DbUpdateAccountRequest {
-        tenant_id: None,
         name: None,
         endpoint: None,
         upstream_api_key_encrypted: None,
@@ -1524,7 +1483,6 @@ pub(crate) fn refresh_models_update_request(
         enabled: None,
         models_supported: Some(models_supported),
         api_capabilities: None,
-        visibility: None,
         pool_enabled: None,
     }
 }
@@ -1598,6 +1556,25 @@ mod tests {
             validate_account_rate_limits(None, Some(0)),
             Err(ApiError::BadRequest(message)) if message.contains("tpm_limit")
         ));
+    }
+
+    #[test]
+    fn account_write_contract_rejects_client_selected_ownership_and_visibility() {
+        let create = serde_json::json!({
+            "name": "local ollama",
+            "provider": "openai",
+            "api_key": "ollama-local",
+            "api_base": "http://ollama:11434/v1",
+            "models": ["gemma3:270m"],
+            "tenant_id": Uuid::new_v4(),
+        });
+        assert!(serde_json::from_value::<CreateAccountRequest>(create).is_err());
+
+        let update = serde_json::json!({
+            "name": "local ollama",
+            "visibility": "global",
+        });
+        assert!(serde_json::from_value::<UpdateAccountRequest>(update).is_err());
     }
 
     #[test]

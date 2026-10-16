@@ -145,10 +145,11 @@ impl NodeControlScope {
                 Ok(())
             }
             Authority::Tenant(_, _) => Ok(()),
-            Authority::Platform(s, _) if s.platform_role() == PlatformRole::Root => Ok(()),
             Authority::Platform(s, _)
-                if s.platform_role() == PlatformRole::Operator
-                    && matches!(action, NodeAction::Exclude | NodeAction::Recover) =>
+                if matches!(
+                    s.platform_role(),
+                    PlatformRole::Root | PlatformRole::Operator
+                ) =>
             {
                 Ok(())
             }
@@ -245,11 +246,6 @@ fn filters(
     filter: &NodeFilter,
     id: Option<Uuid>,
 ) -> Result<(String, Vec<Value>), DbError> {
-    if matches!(kind, NodeResource::Token)
-        && matches!(scope.authority,Authority::Platform(s,_) if s.platform_role()==PlatformRole::Operator)
-    {
-        return Err(denied());
-    }
     if filter.archived.is_some() && !matches!(kind, NodeResource::Task) {
         return Err(invalid("archive filter applies only to tasks"));
     }
@@ -908,7 +904,7 @@ mod tests {
         assert!(!q.sql.contains("result_json"));
     }
     #[test]
-    fn operator_actions_are_an_explicit_small_allowlist() {
+    fn operator_has_platform_node_control_actions() {
         let s = NodeControlScope::platform(
             PlatformScope::checked(Uuid::new_v4(), PlatformRole::Operator).unwrap(),
             Uuid::new_v4(),
@@ -928,7 +924,7 @@ mod tests {
             NodeAction::CancelTask,
             NodeAction::ArchiveTask,
         ] {
-            assert!(s.require_action(a).is_err());
+            assert!(s.require_action(a).is_ok());
         }
         assert!(
             query(
@@ -939,7 +935,7 @@ mod tests {
                 None,
                 false
             )
-            .is_err()
+            .is_ok()
         );
     }
     #[test]

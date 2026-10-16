@@ -204,11 +204,11 @@ impl Tenant {
                 ..*actor
             }
         } else {
-            actor.require_root(tx).await?
+            actor.require_platform_admin(tx).await?
         };
         super::user::User::find_by_id_for_no_key_update(tx, owner_user_id)
             .await?
-            .filter(|user| user.status == "active")
+            .filter(|user| user.status == "active" && user.platform_role == "none")
             .ok_or_else(|| DbError::Other("active tenant owner required".into()))?;
         let tenant = Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,

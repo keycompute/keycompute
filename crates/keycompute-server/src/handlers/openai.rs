@@ -4363,7 +4363,7 @@ mod tests {
         let now = chrono::Utc::now();
         Account {
             id: uuid::Uuid::new_v4(),
-            tenant_id: uuid::Uuid::new_v4(),
+            tenant_id: Some(uuid::Uuid::new_v4()),
             provider: provider.to_string(),
             name: format!("{provider}-account"),
             endpoint: "https://example.com/v1".to_string(),

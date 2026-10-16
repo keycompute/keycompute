@@ -1938,7 +1938,7 @@ mod tests {
     ) -> Account {
         Account {
             id,
-            tenant_id: Uuid::new_v4(),
+            tenant_id: Some(Uuid::new_v4()),
             provider: "openai".to_string(),
             name: "health-test".to_string(),
             endpoint: "https://health-test.example/v1".to_string(),

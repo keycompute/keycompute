@@ -15,7 +15,7 @@ pub enum DistributionScope {
 }
 const ACTIVE: &str = "EXISTS (SELECT 1 FROM tenant_memberships am JOIN users au ON au.id=am.user_id JOIN tenants at ON at.id=am.tenant_id WHERE am.tenant_id=$1 AND am.user_id=$2 AND am.status='active' AND au.status='active' AND at.status='active')";
 const ADMIN: &str = "EXISTS (SELECT 1 FROM tenant_memberships am JOIN users au ON au.id=am.user_id JOIN tenants at ON at.id=am.tenant_id WHERE am.tenant_id=$1 AND am.user_id=$2 AND am.tenant_role='admin' AND am.status='active' AND au.status='active' AND at.status='active')";
-const ROOT: &str = "EXISTS (SELECT 1 FROM users au WHERE au.id=$2 AND au.platform_role='root' AND au.status='active')";
+const ROOT: &str = "EXISTS (SELECT 1 FROM users au WHERE au.id=$2 AND au.platform_role IN ('root','operator') AND au.status='active')";
 fn invalid(message: &str) -> DbError {
     DbError::Other(format!("invalid distribution input: {message}"))
 }
@@ -35,7 +35,12 @@ impl DistributionScope {
             Self::Tenant(s) if s.tenant_role() == TenantRole::Admin => {
                 (s.tenant_id(), s.user_id(), ADMIN)
             }
-            Self::Platform(s, t) if s.platform_role() == PlatformRole::Root => {
+            Self::Platform(s, t)
+                if matches!(
+                    s.platform_role(),
+                    PlatformRole::Root | PlatformRole::Operator
+                ) =>
+            {
                 (t, s.user_id(), ROOT)
             }
             _ => return Err(denied()),
@@ -385,7 +390,7 @@ mod tests {
             assert!(rule_query(s, &RuleFilter::default(), None, false, None).is_err());
         }
         let operator = PlatformScope::checked(u, PlatformRole::Operator).unwrap();
-        assert!(DistributionScope::Platform(operator, t).parts().is_err());
+        assert!(DistributionScope::Platform(operator, t).parts().is_ok());
     }
     #[test]
     fn invalid_filters_fail_before_query_execution() {

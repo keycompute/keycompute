@@ -105,8 +105,9 @@ impl User {
         Ok(root)
     }
 
-    /// Security changes are separate from profile edits and require a current
-    /// root session. Invariants are checked on final transaction state.
+    /// Security changes are separate from profile edits. Operators may manage
+    /// ordinary identities; only root may manage operator lifecycle, and root
+    /// authority itself is immutable.
     async fn set_security_state(
         tx: &DatabaseTransaction,
         id: Uuid,
@@ -115,7 +116,7 @@ impl User {
         actor: &AuditContext,
     ) -> Result<(AuditContext, Self, Self), DbError> {
         lock_identity_admin(tx).await?;
-        let actor = actor.require_root(tx).await?;
+        let actor = actor.require_platform_admin(tx).await?;
         tx.query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT id FROM tenants WHERE owner_user_id=$1 ORDER BY id FOR UPDATE",
@@ -125,6 +126,15 @@ impl User {
         let before = Self::find_by_id_for_update(tx, id)
             .await?
             .ok_or_else(|| DbError::not_found("User", id))?;
+        let before_role = before.platform_role()?;
+        if before_role == PlatformRole::Root
+            || (before_role == PlatformRole::Operator
+                && actor.actor_platform_role != PlatformRole::Root)
+            || role == PlatformRole::Root
+            || (role == PlatformRole::Operator && actor.actor_platform_role != PlatformRole::Root)
+        {
+            return Err(DbError::Other("protected_platform_identity".into()));
+        }
         let user = Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE users SET platform_role=$2,status=$3 WHERE id=$1 RETURNING *",

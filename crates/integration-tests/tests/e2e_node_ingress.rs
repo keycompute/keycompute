@@ -183,18 +183,7 @@ impl Fixture {
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "nt-consumer", &run).await;
-        let mut user = create_test_user(&db, tenant.id, "nt-consumer", &run).await;
-        db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
-            [user.id.into()],
-        ))
-        .await
-        .unwrap();
-        user.user = keycompute_db::User::find_by_id(&db, user.id)
-            .await
-            .unwrap()
-            .unwrap();
+        let user = create_test_user(&db, tenant.id, "nt-consumer", &run).await;
         UserBalance::recharge(
             &db,
             user.tenant_id,
@@ -227,7 +216,7 @@ impl Fixture {
                 Account::create(
                     &db,
                     &CreateAccountRequest {
-                        tenant_id: user.tenant_id,
+                        tenant_id: Some(user.tenant_id),
                         provider: "openai".into(),
                         name: format!("nt-{channel}-{run}"),
                         endpoint: format!("http://{address}/{channel}/v1"),
@@ -243,7 +232,6 @@ impl Fixture {
                         models_supported: vec![shared.clone(), pool_only.clone()],
                         api_capabilities: vec!["chat_completions".into()],
                         pool_enabled: Some(true),
-                        visibility: Some("tenant".into()),
                     },
                 )
                 .await

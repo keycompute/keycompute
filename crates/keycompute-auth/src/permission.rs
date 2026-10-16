@@ -155,6 +155,9 @@ pub fn permissions_for(
     platform: PlatformRole,
     tenant: Option<TenantRole>,
 ) -> Vec<Permission> {
+    if platform != PlatformRole::None && tenant.is_some() {
+        return Vec::new();
+    }
     // API keys are inference credentials only.  They receive one capability
     // after the validator has proved their fixed tenant membership; a global
     // API-key identity never receives a capability at all.
@@ -202,6 +205,10 @@ pub fn permissions_for(
                 Permission::PlatformAuditRead,
             ]),
             PlatformRole::Operator => out.extend([
+                Permission::ManageUsers,
+                Permission::ManagePricing,
+                Permission::ManageProviders,
+                Permission::ManageSystemSettings,
                 Permission::PlatformTenantHealth,
                 Permission::PlatformDiagnostics,
                 Permission::PlatformAggregateStats,
@@ -228,7 +235,9 @@ fn platform_allowed(role: PlatformRole, action: AuthorizationAction) -> bool {
         ),
         PlatformRole::Operator => matches!(
             action,
-            AuthorizationAction::ReadTenantHealth
+            AuthorizationAction::View
+                | AuthorizationAction::ManagePlatform
+                | AuthorizationAction::ReadTenantHealth
                 | AuthorizationAction::Diagnostics
                 | AuthorizationAction::AggregateStats
                 | AuthorizationAction::NodeOperations
@@ -246,6 +255,12 @@ pub fn authorize(
     resource: ResourceScope,
 ) -> AuthorizationDecision {
     if subject.user_id.is_nil() || subject.tenant_id.is_some_and(|id| id.is_nil()) {
+        return AuthorizationDecision::Deny;
+    }
+    if (subject.platform_role != PlatformRole::None
+        && (subject.tenant_id.is_some() || subject.tenant_role.is_some()))
+        || subject.tenant_id.is_some() != subject.tenant_role.is_some()
+    {
         return AuthorizationDecision::Deny;
     }
     // A malformed identifier is never a platform/global scope or an anonymous
@@ -403,7 +418,10 @@ mod tests {
                             owner_user_id: other,
                         },
                     );
-                    if credential == CredentialKind::Jwt && tr.is_some() {
+                    if credential == CredentialKind::Jwt
+                        && platform == PlatformRole::None
+                        && tr.is_some()
+                    {
                         assert_eq!(tv, AuthorizationDecision::Allow);
                         assert_eq!(po, AuthorizationDecision::Allow);
                     } else {
@@ -412,7 +430,10 @@ mod tests {
                     }
                     assert_eq!(
                         oo,
-                        if credential == CredentialKind::Jwt && tr == Some(TenantRole::Admin) {
+                        if credential == CredentialKind::Jwt
+                            && platform == PlatformRole::None
+                            && tr == Some(TenantRole::Admin)
+                        {
                             AuthorizationDecision::Allow
                         } else {
                             AuthorizationDecision::Deny
@@ -430,18 +451,39 @@ mod tests {
                         AuthorizationAction::ReadPlatformAudit,
                         ResourceScope::Platform,
                     );
-                    let expected = if credential == CredentialKind::Jwt
-                        && matches!(platform, PlatformRole::Root | PlatformRole::Operator)
-                    {
-                        AuthorizationDecision::Allow
-                    } else {
-                        AuthorizationDecision::Deny
-                    };
-                    assert_eq!(ph, expected);
-                    assert_eq!(audit, expected);
+                    assert_eq!(ph, AuthorizationDecision::Deny);
+                    assert_eq!(audit, AuthorizationDecision::Deny);
                 }
             }
         }
+    }
+
+    #[test]
+    fn platform_admins_require_an_unselected_global_identity() {
+        for role in [PlatformRole::Root, PlatformRole::Operator] {
+            let subject = AuthorizationSubject::platform(Uuid::new_v4(), role);
+            assert_eq!(
+                authorize(
+                    CredentialKind::Jwt,
+                    subject,
+                    AuthorizationAction::ManagePlatform,
+                    ResourceScope::Platform,
+                ),
+                AuthorizationDecision::Allow
+            );
+        }
+    }
+
+    #[test]
+    fn operator_has_platform_operations_without_protected_identity_authority() {
+        let permissions = permissions_for(CredentialKind::Jwt, PlatformRole::Operator, None);
+        assert!(permissions.contains(&Permission::ManageUsers));
+        assert!(permissions.contains(&Permission::ManageProviders));
+        assert!(permissions.contains(&Permission::ManageSystemSettings));
+        assert!(!permissions.contains(&Permission::ManageProtectedUsers));
+
+        let root = permissions_for(CredentialKind::Jwt, PlatformRole::Root, None);
+        assert!(root.contains(&Permission::ManageProtectedUsers));
     }
     #[test]
     fn api_key_root_denied_console_and_membership() {

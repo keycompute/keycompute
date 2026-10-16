@@ -4,7 +4,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use integration_tests::db::{create_test_pool, create_test_tenant, create_test_user};
+use integration_tests::db::{create_test_pool, create_test_tenant};
 use keycompute_db::{DbRouter, Tenant, TenantMembership, User};
 use keycompute_server::{AppState, create_router};
 use sea_orm::{
@@ -17,7 +17,6 @@ use uuid::Uuid;
 struct Fixture {
     db: DatabaseConnection,
     state: AppState,
-    source: Tenant,
     target: Tenant,
     root: Uuid,
     database_url: String,
@@ -44,21 +43,12 @@ impl Fixture {
     async fn new(db: DatabaseConnection, database_url: String) -> Self {
         keycompute_db::initialize_schema(&db).await.unwrap();
         let boot = db.begin().await.unwrap();
-        User::bootstrap_root(&boot, "pricing-proof-bootstrap@fixture.invalid", None)
+        let root = User::bootstrap_root(&boot, "pricing-proof-bootstrap@fixture.invalid", None)
             .await
             .unwrap();
         boot.commit().await.unwrap();
         let run = Uuid::new_v4().to_string();
-        let source = create_test_tenant(&db, "pricing-proof-source", &run).await;
         let target = create_test_tenant(&db, "pricing-proof-target", &run).await;
-        let actor = create_test_user(&db, source.id, "pricing-proof-root", &run).await;
-        db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
-            [actor.id.into()],
-        ))
-        .await
-        .unwrap();
         let state = AppState::with_pool(DbRouter::single(db.clone()));
         db.execute_unprepared(r#"
             CREATE SEQUENCE pricing_proof_marker;
@@ -83,9 +73,8 @@ impl Fixture {
         Self {
             db,
             state,
-            source,
             target,
-            root: actor.id,
+            root: root.id,
             database_url,
         }
     }
@@ -118,7 +107,7 @@ impl Fixture {
     fn actor(&self, scope: Scope) -> (Uuid, Option<Uuid>) {
         match scope {
             Scope::Tenant => (self.target.owner_user_id, Some(self.target.id)),
-            Scope::PlatformTenant => (self.root, Some(self.source.id)),
+            Scope::PlatformTenant => (self.root, None),
             Scope::PlatformGlobal => (self.root, None),
         }
     }
@@ -348,7 +337,7 @@ impl Fixture {
         );
     }
 
-    async fn regranted_selected_membership(&self) {
+    async fn renewed_platform_token_does_not_revalidate_queued_authority(&self) {
         use sea_orm::ConnectOptions;
         use std::time::Duration;
         let mut options = ConnectOptions::new(self.database_url.clone());
@@ -369,10 +358,10 @@ impl Fixture {
             .unwrap();
         let mut state = self.state.clone();
         state.pool = Some(DbRouter::single(connection.clone()));
-        let (token, _) = self.token(self.root, Some(self.source.id), 3600).await;
-        let body = self.create_body(Scope::PlatformTenant, "queued-original-selected-proof");
+        let (token, _) = self.token(self.root, None, 3600).await;
+        let body = self.create_body(Scope::PlatformTenant, "queued-original-platform-proof");
         let before = self.fingerprints().await;
-        let original = TenantMembership::find(&self.db, self.source.id, self.root)
+        let original = User::find_by_id(&self.db, self.root)
             .await
             .unwrap()
             .unwrap();
@@ -391,49 +380,47 @@ impl Fixture {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.expect("exact pricing backend must wait on identity fence after authenticating");
-        for status in ["suspended", "active"] {
-            blocker
-                .execute(Statement::from_sql_and_values(
-                    DbBackend::Postgres,
-                    "UPDATE tenant_memberships SET status=$3 WHERE tenant_id=$1 AND user_id=$2",
-                    [self.source.id.into(), self.root.into(), status.into()],
-                ))
-                .await
-                .unwrap();
-        }
+        blocker
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE users SET token_version=token_version+1 WHERE id=$1",
+                [self.root.into()],
+            ))
+            .await
+            .unwrap();
         let version = blocker
             .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT authz_version FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2",
-                [self.source.id.into(), self.root.into()],
+                "SELECT token_version FROM users WHERE id=$1",
+                [self.root.into()],
             ))
             .await
             .unwrap()
             .unwrap()
-            .try_get::<i64>("", "authz_version")
+            .try_get::<i32>("", "token_version")
             .unwrap();
-        assert!(version > original.authz_version);
+        assert!(version > original.token_version);
         blocker.commit().await.unwrap();
         let (status, value) = request.await.unwrap();
         connection.close().await.unwrap();
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
-            "selected membership regrant cannot renew a queued root proof: {value}"
+            "token renewal cannot renew queued platform authority: {value}"
         );
         assert_eq!(self.fingerprints().await, before);
-        let fresh = self.token(self.root, Some(self.source.id), 3600).await.0;
+        let fresh = self.token(self.root, None, 3600).await.0;
         let (status, value) = self
             .request(
                 "POST",
                 "/api/v1/platform/pricing",
                 &fresh,
-                self.create_body(Scope::PlatformTenant, "fresh-selected-proof"),
+                self.create_body(Scope::PlatformTenant, "fresh-platform-proof"),
             )
             .await;
         assert!(
             status.is_success(),
-            "fresh cross-tenant root request: {status} {value}"
+            "fresh cross-tenant platform request: {status} {value}"
         );
         assert!(
             TenantMembership::find_any(&self.db, self.target.id, self.root)
@@ -488,7 +475,8 @@ async fn isolated(scope: Scope, scenario: &'static str) {
     let outcome = tokio::spawn(async move {
         let f = Fixture::new(db, url.to_string()).await;
         if scenario == "race" {
-            f.regranted_selected_membership().await;
+            f.renewed_platform_token_does_not_revalidate_queued_authority()
+                .await;
         } else if scenario == "reads" {
             f.expired_read(scope, false).await;
             if !scope.platform() {
@@ -524,7 +512,7 @@ async fn root_global_pricing_mutations_reject_expiry_after_audit_wait() {
     isolated(Scope::PlatformGlobal, "writes").await;
 }
 #[tokio::test]
-async fn queued_root_pricing_does_not_adopt_a_regranted_selected_membership() {
+async fn queued_platform_pricing_does_not_adopt_a_renewed_token() {
     isolated(Scope::PlatformTenant, "race").await;
 }
 

@@ -1454,7 +1454,7 @@ mod tests {
         let now = chrono::Utc::now();
         Account {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: Some(Uuid::new_v4()),
             provider: provider.to_string(),
             name: format!("{}-account", provider),
             endpoint: endpoint.to_string(),

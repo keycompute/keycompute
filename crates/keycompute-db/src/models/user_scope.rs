@@ -21,9 +21,12 @@ pub struct TenantMemberRecord {
 }
 
 fn require_platform_root(scope: PlatformScope) -> Result<(), DbError> {
-    if scope.platform_role() != PlatformRole::Root {
+    if !matches!(
+        scope.platform_role(),
+        PlatformRole::Root | PlatformRole::Operator
+    ) {
         return Err(DbError::Other(
-            "root platform identity scope required".into(),
+            "platform administrator identity scope required".into(),
         ));
     }
     Ok(())
@@ -43,7 +46,7 @@ fn platform_query(
         .filter(|s| !s.is_empty())
         .map(escape_like_pattern);
     let mut sql = format!("SELECT {select} FROM users u WHERE
-        EXISTS (SELECT 1 FROM users actor WHERE actor.id=$1 AND actor.platform_role='root' AND actor.status='active')
+        EXISTS (SELECT 1 FROM users actor WHERE actor.id=$1 AND actor.platform_role IN ('root','operator') AND actor.status='active')
         AND ($2::text IS NULL OR u.platform_role=$2)
         AND ($3::text IS NULL OR u.email ILIKE '%'||$3||'%' ESCAPE '\\' OR COALESCE(u.name,'') ILIKE '%'||$3||'%' ESCAPE '\\')
         AND ($4::uuid IS NULL OR u.id=$4)");
@@ -209,7 +212,7 @@ impl User {
     ) -> Result<Option<Self>, DbError> {
         require_platform_root(scope)?;
         Ok(Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT u.* FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.status='active' AND EXISTS (SELECT 1 FROM users actor WHERE actor.id=$3 AND actor.platform_role='root' AND actor.status='active')",
+            "SELECT u.* FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.status='active' AND EXISTS (SELECT 1 FROM users actor WHERE actor.id=$3 AND actor.platform_role IN ('root','operator') AND actor.status='active')",
             [tenant_id.into(), user_id.into(), scope.user_id().into()])).one(db).await?)
     }
     pub async fn count_memberships_platform(
@@ -227,7 +230,7 @@ impl User {
             return Ok(Default::default());
         }
         let rows = Count::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT tenant_id,COUNT(*) AS count FROM tenant_memberships WHERE tenant_id=ANY($1) AND status='active' AND EXISTS (SELECT 1 FROM users actor WHERE actor.id=$2 AND actor.platform_role='root' AND actor.status='active') GROUP BY tenant_id",
+            "SELECT tenant_id,COUNT(*) AS count FROM tenant_memberships WHERE tenant_id=ANY($1) AND status='active' AND EXISTS (SELECT 1 FROM users actor WHERE actor.id=$2 AND actor.platform_role IN ('root','operator') AND actor.status='active') GROUP BY tenant_id",
             [tenant_ids.to_vec().into(), scope.user_id().into()])).all(db).await?;
         Ok(rows
             .into_iter()
@@ -276,10 +279,10 @@ mod tests {
         assert!(!MEMBER_COLUMNS.contains("token_version"));
     }
     #[test]
-    fn platform_and_tenant_queries_refuse_insufficient_scope() {
+    fn platform_operator_is_valid_but_tenant_member_is_not_admin() {
         let id = Uuid::new_v4();
         let operator = PlatformScope::checked(id, PlatformRole::Operator).unwrap();
-        assert!(platform_query(operator, "u.*", None, None, None, None).is_err());
+        assert!(platform_query(operator, "u.*", None, None, None, None).is_ok());
         let member = TenantScope::checked(Uuid::new_v4(), id, TenantRole::Member).unwrap();
         assert!(member_query(member, MEMBER_COLUMNS, None, None, None, None).is_err());
     }

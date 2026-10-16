@@ -482,7 +482,7 @@ mod tests {
     }
 
     /// Execution reservations are tenant-scoped even when they use a global
-    /// account owned by another tenant.  Deleting the source tenant must not
+    /// platform-owned account. Deleting the source tenant must not
     /// cascade the reservation while the request can still release it or
     /// replace it with its durable affinity.
     #[tokio::test]
@@ -494,11 +494,10 @@ mod tests {
             .expect("global reservation cleanup should succeed");
 
         let source = create_test_tenant(&pool, "global-reservation-source", &test_id).await;
-        let owner = create_test_tenant(&pool, "global-reservation-owner", &test_id).await;
         let account = Account::create(
             &pool,
             &CreateAccountRequest {
-                tenant_id: owner.id,
+                tenant_id: None,
                 provider: "openai".to_string(),
                 name: format!("global-reservation-account-{test_id}"),
                 endpoint: "https://example.invalid/v1".to_string(),
@@ -510,7 +509,6 @@ mod tests {
                 models_supported: vec!["gpt-test".to_string()],
                 api_capabilities: vec!["responses".to_string()],
                 pool_enabled: None,
-                visibility: Some("global".to_string()),
             },
         )
         .await
@@ -560,11 +558,7 @@ mod tests {
         account
             .delete(&pool)
             .await
-            .expect("global account owner should remain independently deletable");
-        owner
-            .delete(&pool)
-            .await
-            .expect("global account owner tenant should delete");
+            .expect("platform account should remain independently deletable");
         cleanup_test_data(&pool, &test_id)
             .await
             .expect("global reservation cleanup should succeed");
@@ -586,7 +580,7 @@ mod tests {
         let account = Account::create(
             &pool,
             &CreateAccountRequest {
-                tenant_id: tenant.id,
+                tenant_id: Some(tenant.id),
                 provider: "openai".to_string(),
                 name: format!("responses-lock-race-{test_id}"),
                 endpoint: "https://example.invalid/v1".to_string(),
@@ -598,7 +592,6 @@ mod tests {
                 models_supported: vec!["gpt-test".to_string()],
                 api_capabilities: vec!["responses".to_string()],
                 pool_enabled: None,
-                visibility: None,
             },
         )
         .await
@@ -731,7 +724,7 @@ mod tests {
         let account = Account::create(
             &pool,
             &CreateAccountRequest {
-                tenant_id: tenant.id,
+                tenant_id: Some(tenant.id),
                 provider: "openai".to_string(),
                 name: format!("account-lock-order-{test_id}"),
                 endpoint: "https://example.invalid/v1".to_string(),
@@ -743,7 +736,6 @@ mod tests {
                 models_supported: vec!["gpt-test".to_string()],
                 api_capabilities: vec!["responses".to_string()],
                 pool_enabled: None,
-                visibility: None,
             },
         )
         .await
@@ -779,7 +771,6 @@ mod tests {
         )
         .unwrap();
         let request = keycompute_server::handlers::admin_account::UpdateAccountRequest {
-            tenant_id: Some(tenant.id),
             name: Some("updated-lock-order".to_string()),
             api_key: None,
             api_base: None,
@@ -790,7 +781,6 @@ mod tests {
             is_active: Some(true),
             priority: Some(0),
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         };
         let reservation_pid: i32 = reservation_tx
             .query_one(Statement::from_string(

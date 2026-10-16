@@ -1,4 +1,4 @@
-//! Root-only platform settings. Global means platform-owned, not tenant-owned.
+//! Platform-administrator settings. Global means platform-owned, not tenant-owned.
 use super::{SystemSetting, setting_keys as keys};
 use crate::{AuditContext, DbError, TenantAuditEvent, models::financial_scope::FinancialScope};
 use keycompute_types::{AuditResult, AuditScopeType};
@@ -148,7 +148,7 @@ impl SystemSetting {
         db: &impl ConnectionTrait,
         scope: FinancialScope,
     ) -> Result<Vec<Self>, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         let projection = safe_projection();
         let sql = format!(
             "SELECT (SELECT COALESCE(jsonb_agg(to_jsonb(s) ORDER BY s.key),'[]'::jsonb) FROM (SELECT {projection} FROM system_settings WHERE {VISIBLE}) s) AS settings WHERE {}",
@@ -170,7 +170,7 @@ impl SystemSetting {
         scope: FinancialScope,
         key: &str,
     ) -> Result<Option<Self>, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         let projection = safe_projection();
         let mut values = scope.values();
         values.push(key.into());
@@ -194,7 +194,7 @@ impl SystemSetting {
         settings: &HashMap<String, String>,
         policy: SettingsPolicy,
     ) -> Result<Vec<Self>, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         let projection = safe_projection();
         if settings.len() > 64
             || settings
@@ -248,7 +248,7 @@ impl SystemSetting {
                 let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,sql,values)).one(&tx).await?
                     .ok_or_else(||invalid("financial_authority_invalid"))?;
                 TenantAuditEvent::append(&tx,AuditScopeType::Platform,None,&actor,"settings.update","system_setting",Some(key),AuditResult::Success,
-                    serde_json::json!({"changed":true,"updated_at":row.updated_at,"reason":"root platform configuration update"})).await?;
+                    serde_json::json!({"changed":true,"updated_at":row.updated_at,"reason":"platform administrator configuration update"})).await?;
                 updated.push(row);
             }
             scope.current_actor(&tx).await?;

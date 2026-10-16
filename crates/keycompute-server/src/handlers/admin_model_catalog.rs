@@ -206,14 +206,14 @@ async fn account_pool_catalog(
       WITH local AS (SELECT * FROM jsonb_to_recordset($7::JSONB) AS h(id UUID,status TEXT,updated_at TIMESTAMPTZ,generation BIGINT,configuration_updated_at TIMESTAMPTZ)),
       candidates AS (
         SELECT DISTINCT a.id,m.model,a.enabled,
-          (owner.status='active' AND ($1::UUID IS NULL OR EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active'))) AS active,
+          (COALESCE(owner.status='active',TRUE) AND ($1::UUID IS NULL OR EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active'))) AS active,
           (CASE WHEN h.id IS NOT NULL THEN h.status ELSE a.health_status END <> 'unhealthy') AS healthy,
           NOT(a.id=ANY($8::UUID[])) AS not_cooling
-        FROM accounts a JOIN tenants owner ON owner.id=a.tenant_id
+        FROM accounts a LEFT JOIN tenants owner ON owner.id=a.tenant_id
         CROSS JOIN LATERAL unnest(a.models_supported) AS m(model)
         LEFT JOIN local h ON h.id=a.id AND (h.configuration_updated_at IS NULL OR h.configuration_updated_at=a.upstream_config_version)
           AND (h.updated_at>a.health_updated_at OR (h.updated_at=a.health_updated_at AND h.generation>=a.health_generation))
-        WHERE (a.tenant_id=$1 OR a.visibility='global') AND a.pool_enabled
+        WHERE (a.tenant_id=$1 OR a.tenant_id IS NULL) AND a.pool_enabled
           AND a.provider=$2 AND a.api_capabilities @> ARRAY[$3]::TEXT[]
           AND m.model<>''
           AND ($4::TEXT IS NULL OR m.model ILIKE '%'||$4||'%' ESCAPE '\')
@@ -227,9 +227,11 @@ async fn account_pool_catalog(
     "#;
     let account_scope = tenant
         .map(|_| keycompute_db::models::upstream_access::non_pt_predicate("a", "$1"))
-        .unwrap_or_else(|| "a.enabled AND owner.status='active' AND a.pool_enabled".into());
+        .unwrap_or_else(|| {
+            "a.enabled AND COALESCE(owner.status='active',TRUE) AND a.pool_enabled".into()
+        });
     let sql = sql.replace(
-        "(a.tenant_id=$1 OR a.visibility='global') AND a.pool_enabled",
+        "(a.tenant_id=$1 OR a.tenant_id IS NULL) AND a.pool_enabled",
         &account_scope,
     );
     let result = tokio::time::timeout(
@@ -364,12 +366,12 @@ async fn passthrough_catalog(
                         COUNT(DISTINCT pb.id) FILTER (
                             WHERE pb.pool_enabled
                               AND a.enabled
-                              AND owner.status='active'
+                              AND COALESCE(owner.status='active',TRUE)
                               AND t.status='active'
                         )::BIGINT AS eligible_targets
                  FROM passthrough_bindings pb
                  JOIN accounts a ON a.id=pb.account_id
-                 JOIN tenants owner ON owner.id=a.tenant_id
+                 LEFT JOIN tenants owner ON owner.id=a.tenant_id
                  JOIN tenants t ON t.id=pb.tenant_id
                  CROSS JOIN LATERAL unnest(a.models_supported) AS m(model)
                  WHERE a.provider=$1 AND a.api_capabilities @> ARRAY[$2]::TEXT[]

@@ -109,7 +109,11 @@ fn personal_actions_never_expand_for_tenant_or_platform_administrators() {
                             owner_user_id: user
                         }
                     ),
-                    AuthorizationDecision::Allow
+                    if platform == PlatformRole::None {
+                        AuthorizationDecision::Allow
+                    } else {
+                        AuthorizationDecision::Deny
+                    }
                 );
                 assert_eq!(
                     authorize(

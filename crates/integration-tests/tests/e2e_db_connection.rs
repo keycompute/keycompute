@@ -70,23 +70,33 @@ mod tests {
 
     async fn create_responses_test_tenant(pool: &DatabaseConnection, label: &str) -> Uuid {
         let tx = pool.begin().await.expect("tenant transaction should begin");
-        let existing = tx.query_one(Statement::from_string(DbBackend::Postgres,
-            "SELECT id FROM users WHERE platform_role='root' AND status='active' ORDER BY id LIMIT 1".to_string(),
-        )).await.unwrap();
-        let owner = if let Some(row) = existing {
-            keycompute_db::User::find_by_id(&tx, row.try_get_by_index::<Uuid>(0).unwrap())
-                .await
-                .unwrap()
-                .unwrap()
-        } else {
+        if tx
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT id FROM users WHERE platform_role='root' AND status='active' LIMIT 1"
+                    .to_string(),
+            ))
+            .await
+            .unwrap()
+            .is_none()
+        {
             keycompute_db::User::bootstrap_root(
                 &tx,
                 &format!("root-{}@example.test", Uuid::new_v4().simple()),
                 Some("Responses test root"),
             )
             .await
-            .unwrap()
-        };
+            .expect("Responses test root should be created");
+        }
+        let owner = keycompute_db::User::create(
+            &tx,
+            &keycompute_db::CreateUserRequest {
+                email: format!("responses-owner-{}@example.test", Uuid::new_v4().simple()),
+                name: Some("Responses test owner".to_string()),
+            },
+        )
+        .await
+        .expect("Responses test owner should be created");
         let tenant = keycompute_db::Tenant::create_owned(
             &tx,
             &keycompute_db::CreateTenantRequest {
@@ -99,8 +109,8 @@ mod tests {
             owner.id,
             &keycompute_db::AuditContext {
                 actor_user_id: owner.id,
-                credential_kind: keycompute_types::CredentialKind::System,
-                actor_platform_role: keycompute_types::PlatformRole::Root,
+                credential_kind: keycompute_types::CredentialKind::Jwt,
+                actor_platform_role: keycompute_types::PlatformRole::None,
                 actor_tenant_role: None,
                 request_id: None,
             },
@@ -137,7 +147,7 @@ mod tests {
         keycompute_db::Account::create(
             pool,
             &keycompute_db::CreateAccountRequest {
-                tenant_id,
+                tenant_id: Some(tenant_id),
                 provider: "openai".to_string(),
                 name: name.to_string(),
                 endpoint: format!("https://{}.example/v1", name.to_ascii_lowercase()),
@@ -149,7 +159,6 @@ mod tests {
                 models_supported: vec!["gpt-test".to_string()],
                 api_capabilities: vec!["responses".to_string()],
                 pool_enabled: None,
-                visibility: Some("tenant".to_string()),
             },
         )
         .await
@@ -282,7 +291,7 @@ mod tests {
             create_responses_test_account(&pool, other_tenant_id, "other-tenant", 7).await;
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE accounts SET visibility = 'global' WHERE id = $1",
+            "UPDATE accounts SET tenant_id = NULL, visibility = 'global' WHERE id = $1",
             [global.id.into()],
         ))
         .await
@@ -326,14 +335,14 @@ mod tests {
             expected_ids
         );
         assert!(candidates.iter().all(|account| {
-            account.tenant_id == tenant_id
-                && account.visibility == "tenant"
+            account.tenant_id == Some(tenant_id)
                 && account.enabled
                 && account
                     .api_capabilities
                     .iter()
                     .any(|capability| capability == "responses")
         }));
+        assert!(!candidates.iter().any(|account| account.id == global.id));
 
         drop(pool);
         drop_isolated_schema(&admin, &schema).await;
@@ -350,7 +359,7 @@ mod tests {
         let account = keycompute_db::Account::create(
             &pool,
             &keycompute_db::CreateAccountRequest {
-                tenant_id,
+                tenant_id: Some(tenant_id),
                 provider: "openai".to_string(),
                 name: format!("probe-race-{}", Uuid::new_v4()),
                 endpoint: "https://old.example/v1".to_string(),
@@ -362,7 +371,6 @@ mod tests {
                 models_supported: vec!["test-model".to_string()],
                 api_capabilities: vec!["chat_completions".to_string()],
                 pool_enabled: None,
-                visibility: Some("tenant".to_string()),
             },
         )
         .await
@@ -508,7 +516,7 @@ mod tests {
         let account = keycompute_db::Account::create(
             &pool,
             &keycompute_db::CreateAccountRequest {
-                tenant_id,
+                tenant_id: Some(tenant_id),
                 provider: "openai".to_string(),
                 name: format!("runtime-health-{}", Uuid::new_v4()),
                 endpoint: "https://runtime-health.example/v1".to_string(),
@@ -520,7 +528,6 @@ mod tests {
                 models_supported: vec!["test-model".to_string()],
                 api_capabilities: vec!["chat_completions".to_string()],
                 pool_enabled: None,
-                visibility: Some("tenant".to_string()),
             },
         )
         .await
@@ -625,7 +632,7 @@ mod tests {
         let account = keycompute_db::Account::create(
             &pool,
             &keycompute_db::CreateAccountRequest {
-                tenant_id,
+                tenant_id: Some(tenant_id),
                 provider: "openai".to_string(),
                 name: format!("configuration-fence-{}", Uuid::new_v4()),
                 endpoint: "https://old-config.example/v1".to_string(),
@@ -637,7 +644,6 @@ mod tests {
                 models_supported: vec!["test-model".to_string()],
                 api_capabilities: vec!["chat_completions".to_string()],
                 pool_enabled: None,
-                visibility: Some("tenant".to_string()),
             },
         )
         .await
@@ -647,7 +653,6 @@ mod tests {
             .update(
                 &pool,
                 &keycompute_db::UpdateAccountRequest {
-                    tenant_id: None,
                     name: None,
                     endpoint: Some("https://new-config.example/v1".to_string()),
                     upstream_api_key_encrypted: Some("new-encrypted-key".to_string()),
@@ -659,7 +664,6 @@ mod tests {
                     models_supported: None,
                     api_capabilities: None,
                     pool_enabled: None,
-                    visibility: None,
                 },
             )
             .await
@@ -708,7 +712,7 @@ mod tests {
         let account = keycompute_db::Account::create(
             &pool,
             &keycompute_db::CreateAccountRequest {
-                tenant_id,
+                tenant_id: Some(tenant_id),
                 provider: "openai".to_string(),
                 name: format!("provider-health-reset-{}", Uuid::new_v4()),
                 endpoint: "https://provider-health-reset.example/v1".to_string(),
@@ -720,7 +724,6 @@ mod tests {
                 models_supported: vec!["test-model".to_string()],
                 api_capabilities: vec!["chat_completions".to_string()],
                 pool_enabled: None,
-                visibility: Some("tenant".to_string()),
             },
         )
         .await
@@ -1832,7 +1835,6 @@ mod tests {
             .update(
                 &txn,
                 &keycompute_db::UpdateAccountRequest {
-                    tenant_id: None,
                     name: None,
                     endpoint: Some("https://replacement.example/v1".to_string()),
                     upstream_api_key_encrypted: None,
@@ -1844,7 +1846,6 @@ mod tests {
                     models_supported: None,
                     api_capabilities: None,
                     pool_enabled: None,
-                    visibility: None,
                 },
             )
             .await

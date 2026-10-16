@@ -142,30 +142,30 @@ async fn test_membership_remove_retains_history_and_blocks_session() {
 async fn test_platform_role_values_are_global_and_typed() {
     let pool = create_test_pool().await;
     let run = generate_test_id();
-    let root = User::create(
+    let operator = User::create(
         &pool,
         &CreateUserRequest {
-            email: format!("platform-root-{run}@example.com"),
-            name: Some("Root".into()),
+            email: format!("platform-operator-{run}@example.com"),
+            name: Some("Operator".into()),
         },
     )
     .await
     .unwrap();
     pool.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE users SET platform_role='root' WHERE id=$1",
-        [root.id.into()],
+        "UPDATE users SET platform_role='operator' WHERE id=$1",
+        [operator.id.into()],
     ))
     .await
     .unwrap();
-    let loaded = User::find_by_id(&pool, root.id).await.unwrap().unwrap();
-    assert_eq!(loaded.platform_role().unwrap(), PlatformRole::Root);
-    assert_eq!(loaded.token_version, root.token_version + 1);
+    let loaded = User::find_by_id(&pool, operator.id).await.unwrap().unwrap();
+    assert_eq!(loaded.platform_role().unwrap(), PlatformRole::Operator);
+    assert_eq!(loaded.token_version, operator.token_version + 1);
     let bad = pool
         .execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE users SET platform_role='tenant_admin' WHERE id=$1",
-            [root.id.into()],
+            [operator.id.into()],
         ))
         .await;
     assert!(bad.is_err());

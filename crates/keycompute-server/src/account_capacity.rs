@@ -47,7 +47,7 @@ impl AccountCapacityPolicy for ServerAccountCapacity {
             ));
         };
         // Route snapshots and affinity picks do not authorize future attempts.
-        // Re-read enabled state, visibility, protocol, model and quota on writer.
+        // Re-read enabled state, ownership scope, protocol, model and quota on writer.
         let (policy,binding_id,binding_revision) = match target.account_selection() {
             Some(keycompute_types::AccountSelection::PassthroughBinding {binding_id,binding_revision}) => (
                 "a.enabled AND EXISTS(SELECT 1 FROM passthrough_bindings access_grant JOIN tenants anchor ON anchor.id=access_grant.tenant_id AND anchor.status='active' WHERE access_grant.id=$3 AND access_grant.revision=$4 AND access_grant.account_id=a.id AND (access_grant.tenant_id=$2 OR access_grant.is_global))".to_string(),binding_id,binding_revision),
@@ -57,7 +57,7 @@ impl AccountCapacityPolicy for ServerAccountCapacity {
         let account = tokio::time::timeout(
             Duration::from_secs(3),
             Account::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-                format!("SELECT a.* FROM accounts a JOIN tenants owner ON owner.id=a.tenant_id WHERE a.id=$1 AND owner.status='active' AND EXISTS(SELECT 1 FROM tenants caller WHERE caller.id=$2 AND caller.status='active') AND {policy}"),
+                format!("SELECT a.* FROM accounts a LEFT JOIN tenants owner ON owner.id=a.tenant_id WHERE a.id=$1 AND COALESCE(owner.status='active',TRUE) AND EXISTS(SELECT 1 FROM tenants caller WHERE caller.id=$2 AND caller.status='active') AND {policy}"),
                 [(*account_id).into(),ctx.tenant_id.into(),binding_id.into(),binding_revision.into()])).one(self.db.write_conn()),
         ).await.map_err(|_|KeyComputeError::ServiceUnavailable("account configuration lookup timed out".into()))?
          .map_err(|_|KeyComputeError::ServiceUnavailable("account configuration unavailable".into()))?

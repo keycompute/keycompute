@@ -177,7 +177,7 @@ impl TenantInvitation {
         .await?;
         let current = super::user::User::find_by_id(tx, user)
             .await?
-            .filter(|user| user.status == "active")
+            .filter(|user| user.status == "active" && user.platform_role == "none")
             .ok_or_else(invalid)?;
         let verified = tx
             .query_one(Statement::from_sql_and_values(

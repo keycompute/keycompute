@@ -10,7 +10,7 @@ use integration_tests::{
     db::{TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_billing::balance::BalanceService;
-use keycompute_db::{DbError, DbRouter, Tenant, UserBalance};
+use keycompute_db::{DbError, DbRouter, Tenant, User, UserBalance};
 use keycompute_server::{AppState, create_router};
 use keycompute_types::{TenantRole, TenantScope};
 use rust_decimal::Decimal;
@@ -38,35 +38,35 @@ impl Fixture {
         let id = generate_test_id();
         let guard = TestDataGuard::new(pool.clone(), id.clone());
         let tenant = create_test_tenant(&pool, "display", &id).await;
-        let mut user = create_test_user(&pool, tenant.id, "display", &id).await;
-        if admin {
-            pool.execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "UPDATE users SET platform_role='root' WHERE id=$1",
-                [user.id.into()],
-            ))
-            .await
-            .unwrap();
-            user.user = keycompute_db::User::find_by_id(&pool, user.id)
+        let user = create_test_user(&pool, tenant.id, "display", &id).await;
+        let service = BalanceService::new(DbRouter::single(pool.clone()));
+        let state = AppState::with_pool(DbRouter::single(pool.clone()));
+        let token = if admin {
+            let root = User::find_by_email(&pool, "tenant-test-root@fixture.invalid")
                 .await
                 .unwrap()
                 .unwrap();
-        }
-        let service = BalanceService::new(DbRouter::single(pool.clone()));
-        let state = AppState::with_pool(DbRouter::single(pool.clone()));
-        let token = state
-            .auth
-            .get_jwt_validator()
-            .unwrap()
-            .generate_identity_token(
-                user.id,
-                Some(tenant.id),
-                user.token_version,
-                Some(1),
-                Some(1),
-                3600,
-            )
-            .unwrap();
+            state
+                .auth
+                .get_jwt_validator()
+                .unwrap()
+                .generate_identity_token(root.id, None, root.token_version, None, None, 3600)
+                .unwrap()
+        } else {
+            state
+                .auth
+                .get_jwt_validator()
+                .unwrap()
+                .generate_identity_token(
+                    user.id,
+                    Some(tenant.id),
+                    user.token_version,
+                    Some(1),
+                    Some(1),
+                    3600,
+                )
+                .unwrap()
+        };
         Self {
             pool,
             guard,

@@ -43,7 +43,7 @@ pub(crate) fn global_scope(ctx: &AuthContext) -> Result<FinancialScope> {
         ctx.require_platform(AuthorizationAction::ManagePlatform)?,
         session(ctx)?,
     )
-    .map_err(|_| ApiError::Forbidden("Current root authority required".into()))
+    .map_err(|_| ApiError::Forbidden("Current platform authority required".into()))
 }
 pub(crate) fn root_scope(ctx: &AuthContext, tenant_id: Uuid) -> Result<FinancialScope> {
     FinancialScope::platform_tenant(

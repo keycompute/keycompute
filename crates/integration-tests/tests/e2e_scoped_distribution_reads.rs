@@ -324,14 +324,23 @@ async fn forged_roles_stale_memberships_and_inference_credentials_never_read_rep
     ] {
         assert_eq!(get(&f.state, &raw, &path).await.0, StatusCode::FORBIDDEN);
     }
+    let operator = User::create(
+        &f.db,
+        &keycompute_db::CreateUserRequest {
+            email: format!("distribution-operator-{}@fixture.invalid", f.run),
+            name: Some("distribution-operator".into()),
+        },
+    )
+    .await
+    .unwrap();
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE users SET platform_role='operator' WHERE id=$1",
-        [f.member.into()],
+        [operator.id.into()],
     ))
     .await
     .unwrap();
-    let op = token(&f.state, &f.db, f.member, None).await;
+    let op = token(&f.state, &f.db, operator.id, None).await;
     assert_eq!(
         get(
             &f.state,
@@ -340,7 +349,7 @@ async fn forged_roles_stale_memberships_and_inference_credentials_never_read_rep
         )
         .await
         .0,
-        StatusCode::FORBIDDEN
+        StatusCode::OK
     );
     let current = token(&f.state, &f.db, f.member, Some(f.a.id)).await;
     f.db.execute(Statement::from_sql_and_values(

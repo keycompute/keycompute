@@ -268,12 +268,12 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("passthrough.diagnostic", "诊断");
     m.insert(
         "passthrough.delete_warning",
-        "删除只撤销本条账号—租户授权；其他授权仍可能生效。账号不会自动重新加入账号池。",
+        "删除只撤销本条账号—租户授权；其他授权和账号自身的账号池开关不受影响。",
     );
     m.insert("passthrough.confirm_delete", "确认撤销");
     m.insert(
         "accounts.pool_managed_by_passthrough",
-        "此账号已有透传绑定，账号池参与权由绑定管理，不能在账号编辑中覆盖。",
+        "此账号已有透传绑定。透传授权与账号自身的账号池开关相互独立。",
     );
     m.insert("accounts.view_passthrough_bindings", "查看透传绑定");
     m.insert("page.pricing", "定价管理");
@@ -1519,6 +1519,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.user", "用户");
     m.insert("users.tenant", "租户");
     m.insert("users.memberships_suffix", "个成员关系");
+    m.insert(
+        "users.platform_identity_no_tenant",
+        "平台身份（无所属租户）",
+    );
     m.insert("users.select_wallet_tenant", "请选择租户以查看对应余额");
     m.insert("users.tenant_unknown", "未知租户");
     m.insert("users.tenant_keep", "保持当前租户");
@@ -1546,6 +1550,17 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.role_none", "none（无平台权限）");
     m.insert("users.role_operator", "operator（平台运营）");
     m.insert("users.role_root", "root（平台最高权限）");
+    m.insert("users.platform_role", "平台角色");
+    m.insert(
+        "users.platform_role_hint",
+        "operator 必须没有任何有效租户成员关系；root 角色不能通过页面授予。",
+    );
+    m.insert("users.account_status", "账号状态");
+    m.insert("users.status_active", "正常");
+    m.insert("users.status_suspended", "已停用");
+    m.insert("users.security_reason", "安全变更原因");
+    m.insert("users.security_reason_placeholder", "角色或状态变更时必填");
+    m.insert("users.security_reason_required", "请填写角色或状态变更原因");
     m.insert("users.delete_confirm_title", "确认删除");
     m.insert("users.delete_confirm_prefix", "确定要删除用户");
     m.insert("users.delete_confirm_suffix", "吗？此操作不可撤销。");
@@ -1851,6 +1866,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "路由和连接测试只会使用这里声明的上游接口",
     );
     m.insert("accounts.api_key", "API Key *");
+    m.insert(
+        "accounts.ollama_api_key_hint",
+        "Ollama 本身不校验该值；平台仍要求非空，默认使用 ollama-local。",
+    );
     m.insert("accounts.custom_base_url", "自定义 Base URL");
     m.insert("accounts.edit_title", "编辑 LLM 渠道");
     m.insert("accounts.new_api_key", "新 API Key（留空则不修改）");
@@ -1858,18 +1877,13 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("accounts.custom_base_url_optional", "自定义 Base URL");
     m.insert("accounts.reset_base_url", "重置为协议默认端点");
     m.insert("accounts.enable_channel", "启用渠道");
-    m.insert("accounts.global_visibility", "全局可见");
+    m.insert("accounts.account_scope", "账号范围");
+    m.insert("accounts.scope_platform_shared", "平台共享");
+    m.insert("accounts.scope_tenant_private", "租户私有");
     m.insert(
-        "accounts.global_visibility_hint",
-        "开启后，所有租户的 API Key 均可路由到此渠道账号",
+        "accounts.platform_scope_hint",
+        "平台管理员创建的渠道自动归属平台，并对所有活跃租户可用；归属和可见范围无需手动选择。",
     );
-    m.insert("accounts.tenant_id", "租户ID");
-    m.insert("accounts.tenant_id_label", "所属租户 ID");
-    m.insert(
-        "accounts.tenant_id_hint",
-        "更改后此渠道账号将归属到新的租户",
-    );
-    m.insert("accounts.tenant_id_keep", "-- 保持当前租户 --");
     m.insert("accounts.delete_confirm_title", "确认删除");
     m.insert("accounts.delete_confirm_prefix", "确定要删除渠道「");
     m.insert("accounts.delete_confirm_suffix", "」吗？该操作不可恢复。");

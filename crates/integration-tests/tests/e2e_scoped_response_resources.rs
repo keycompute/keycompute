@@ -306,7 +306,7 @@ impl Fixture {
             let account = Account::create(
                 &db,
                 &CreateAccountRequest {
-                    tenant_id: tenant.id,
+                    tenant_id: Some(tenant.id),
                     provider: provider.into(),
                     name: format!("native-{provider}-{run}"),
                     endpoint: format!("http://{address}/{provider}/v1"),
@@ -326,7 +326,6 @@ impl Fixture {
                         vec!["messages".into()]
                     },
                     pool_enabled: Some(true),
-                    visibility: Some("tenant".into()),
                 },
             )
             .await

@@ -24,7 +24,10 @@ impl Scope {
                 Ok((scope.tenant_id(), scope.user_id()))
             }
             Self::Platform(scope, t)
-                if scope.platform_role() == PlatformRole::Root && !t.is_nil() =>
+                if matches!(
+                    scope.platform_role(),
+                    PlatformRole::Root | PlatformRole::Operator
+                ) && !t.is_nil() =>
             {
                 Ok((t, scope.user_id()))
             }
@@ -42,7 +45,7 @@ fn statement(scope: Scope, owners: Vec<Uuid>) -> Result<Statement, DbError> {
             "EXISTS (SELECT 1 FROM tenant_memberships am JOIN users au ON au.id=am.user_id JOIN tenants at ON at.id=am.tenant_id WHERE am.tenant_id=$1 AND am.user_id=$2 AND am.tenant_role='admin' AND am.status='active' AND au.status='active' AND at.status='active')"
         }
         Scope::Platform(_, _) => {
-            "EXISTS (SELECT 1 FROM users au WHERE au.id=$2 AND au.status='active' AND au.platform_role='root')"
+            "EXISTS (SELECT 1 FROM users au WHERE au.id=$2 AND au.status='active' AND au.platform_role IN ('root','operator'))"
         }
     };
     Ok(Statement::from_sql_and_values(
@@ -145,13 +148,13 @@ mod tests {
         }
     }
     #[test]
-    fn member_operator_and_nil_tenant_do_not_form_management_scopes() {
+    fn member_and_nil_tenant_fail_but_operator_has_platform_scope() {
         let t = Uuid::new_v4();
         let u = Uuid::new_v4();
         let member = TenantScope::checked(t, u, TenantRole::Member).unwrap();
         assert!(statement(Scope::Tenant(member), vec![u]).is_err());
         let operator = PlatformScope::checked(u, PlatformRole::Operator).unwrap();
-        assert!(statement(Scope::Platform(operator, t), vec![u]).is_err());
+        assert!(statement(Scope::Platform(operator, t), vec![u]).is_ok());
         let root = PlatformScope::checked(u, PlatformRole::Root).unwrap();
         assert!(statement(Scope::Platform(root, Uuid::nil()), vec![u]).is_err());
     }

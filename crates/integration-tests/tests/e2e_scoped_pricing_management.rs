@@ -58,7 +58,7 @@ impl Fixture {
         .unwrap();
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
             [second_root.id.into()],
         ))
         .await
@@ -456,7 +456,7 @@ async fn forged_scope_actor_and_non_jwt_credentials_fail_before_mutation() {
 }
 
 #[tokio::test]
-async fn platform_root_works_without_tenant_and_operator_does_not_manage() {
+async fn platform_root_and_operator_manage_pricing_without_tenant_membership() {
     let mut fixture = Fixture::new().await;
     let platform = fixture.platform_scope(fixture.root);
     let row = {
@@ -500,37 +500,35 @@ async fn platform_root_works_without_tenant_and_operator_does_not_manage() {
         .unwrap();
     let operator_scope =
         PlatformPricingScope::checked(operator.id, CredentialKind::Jwt, 0).unwrap();
-    assert!(
-        PricingModel::find_platform_filtered(
-            &fixture.db,
-            operator_scope,
-            PricingTarget::Platform,
-            None,
-            10,
-            0,
-        )
-        .await
-        .unwrap()
-        .is_empty()
-    );
+    let rows = PricingModel::find_platform_filtered(
+        &fixture.db,
+        operator_scope,
+        PricingTarget::Platform,
+        None,
+        10,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, row.id);
     let tx = fixture.db.begin().await.unwrap();
-    assert!(
-        PricingModel::update_platform(
-            &tx,
-            operator_scope,
-            PricingTarget::Platform,
-            row.id,
-            &UpdatePricingRequest {
-                input_price_per_1k: Some("3".parse().unwrap()),
-                output_price_per_1k: None,
-                effective_until: None,
-                expected_version: row.version,
-            },
-            &fixture.audit(operator.id, PlatformRole::Operator, None),
-        )
-        .await
-        .is_err()
-    );
+    let changed = PricingModel::update_platform(
+        &tx,
+        operator_scope,
+        PricingTarget::Platform,
+        row.id,
+        &UpdatePricingRequest {
+            input_price_per_1k: Some("3".parse().unwrap()),
+            output_price_per_1k: None,
+            effective_until: None,
+            expected_version: row.version,
+        },
+        &fixture.audit(operator.id, PlatformRole::Operator, None),
+    )
+    .await
+    .unwrap();
+    assert!(changed.version > row.version);
     tx.commit().await.unwrap();
     fixture.guard.cleanup().await.unwrap();
 }

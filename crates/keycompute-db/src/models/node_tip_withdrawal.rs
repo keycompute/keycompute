@@ -466,7 +466,7 @@ impl NodeTipWithdrawal {
         actor: &AuditContext,
         command: &CompleteWithdrawal,
     ) -> Result<WithdrawalView, DbError> {
-        scope.require_root_tenant()?;
+        scope.require_platform_tenant()?;
         let why = reason(&command.reason)?;
         let reference = reason(&command.payout_reference)?;
         if command.id.is_nil() || command.expected_revision <= 0 {
@@ -499,7 +499,7 @@ impl NodeTipWithdrawal {
         id: Uuid,
         why: &str,
     ) -> Result<PayoutSecrets, DbError> {
-        scope.require_root_tenant()?;
+        scope.require_platform_tenant()?;
         let why = reason(why)?;
         let tx = begin(db).await?;
         let result = async {

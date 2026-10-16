@@ -287,9 +287,9 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("passthrough.required", "Account and tenant are required");
     m.insert("passthrough.diagnostic", "Diagnostic");
-    m.insert("passthrough.delete_warning", "Revoke this account-to-tenant grant only; other grants may remain effective. The account will not automatically rejoin the pool.");
+    m.insert("passthrough.delete_warning", "Revoke this account-to-tenant grant only; other grants and the account's own pool setting are unchanged.");
     m.insert("passthrough.confirm_delete", "Revoke grant");
-    m.insert("accounts.pool_managed_by_passthrough", "This account has passthrough bindings; pool participation is authoritative there and cannot be overridden here.");
+    m.insert("accounts.pool_managed_by_passthrough", "This account has passthrough bindings. Passthrough grants and the account's own pool setting are independent.");
     m.insert(
         "accounts.view_passthrough_bindings",
         "View passthrough bindings",
@@ -1743,6 +1743,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.tenant", "Tenant");
     m.insert("users.memberships_suffix", "memberships");
     m.insert(
+        "users.platform_identity_no_tenant",
+        "Platform identity (no tenant)",
+    );
+    m.insert(
         "users.select_wallet_tenant",
         "Select a wallet tenant to view its balance",
     );
@@ -1778,6 +1782,23 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.role_none", "none (no platform authority)");
     m.insert("users.role_operator", "operator (platform operations)");
     m.insert("users.role_root", "root (platform security)");
+    m.insert("users.platform_role", "Platform role");
+    m.insert(
+        "users.platform_role_hint",
+        "An operator must have no retained tenant membership; root cannot be assigned here.",
+    );
+    m.insert("users.account_status", "Account status");
+    m.insert("users.status_active", "Active");
+    m.insert("users.status_suspended", "Suspended");
+    m.insert("users.security_reason", "Security change reason");
+    m.insert(
+        "users.security_reason_placeholder",
+        "Required when changing role or status",
+    );
+    m.insert(
+        "users.security_reason_required",
+        "Enter a reason for the role or status change",
+    );
     m.insert("users.delete_confirm_title", "Confirm Deletion");
     m.insert("users.delete_confirm_prefix", "Delete user");
     m.insert(
@@ -2164,6 +2185,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Routing and connection tests only use the upstream APIs declared here",
     );
     m.insert("accounts.api_key", "API Key *");
+    m.insert(
+        "accounts.ollama_api_key_hint",
+        "Ollama does not validate this value; the platform requires a non-empty key and defaults to ollama-local.",
+    );
     m.insert("accounts.custom_base_url", "Custom Base URL");
     m.insert("accounts.edit_title", "Edit LLM Channel");
     m.insert(
@@ -2180,18 +2205,13 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Reset to protocol default endpoint",
     );
     m.insert("accounts.enable_channel", "Enable channel");
-    m.insert("accounts.global_visibility", "Global Visibility");
+    m.insert("accounts.account_scope", "Account scope");
+    m.insert("accounts.scope_platform_shared", "Platform shared");
+    m.insert("accounts.scope_tenant_private", "Tenant private");
     m.insert(
-        "accounts.global_visibility_hint",
-        "When enabled, API keys from all tenants can route to this channel account",
+        "accounts.platform_scope_hint",
+        "Channels created by a platform administrator are platform-owned and available to every active tenant. Ownership and visibility are assigned automatically.",
     );
-    m.insert("accounts.tenant_id", "Tenant ID");
-    m.insert("accounts.tenant_id_label", "Tenant ID");
-    m.insert(
-        "accounts.tenant_id_hint",
-        "Change the owner tenant of this channel account",
-    );
-    m.insert("accounts.tenant_id_keep", "-- Keep current tenant --");
     m.insert("accounts.delete_confirm_title", "Confirm Deletion");
     m.insert("accounts.delete_confirm_prefix", "Delete channel \"");
     m.insert(

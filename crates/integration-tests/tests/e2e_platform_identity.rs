@@ -1,4 +1,4 @@
-//! Current root identity/lifecycle and fixed financial owners, with isolated PostgreSQL.
+//! Current platform identity/lifecycle and fixed financial owners, with isolated PostgreSQL.
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -54,9 +54,16 @@ impl Fixture {
         let user = create_test_user(&db, tenant, "settings-user", "isolated")
             .await
             .id;
-        let operator = create_test_user(&db, tenant, "settings-operator", "isolated")
-            .await
-            .id;
+        let operator = User::create(
+            &db,
+            &CreateUserRequest {
+                email: "settings-operator@fixture.invalid".into(),
+                name: Some("settings-operator".into()),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
@@ -232,7 +239,8 @@ async fn canonical_root_identity_reads_are_current_scoped_and_never_load_credent
         for path in ["/api/v1/platform/users".to_owned(),format!("/api/v1/platform/users/{}",f.user),"/api/v1/platform/tenants".to_owned(),format!("/api/v1/platform/tenants/{}",f.tenant)] {
             let r=call(app.clone(),"GET",&path,&root,Value::Null).await;assert_eq!(r.0,StatusCode::OK,"{path}: {}",r.1);assert!(r.2["cache-control"].to_str().unwrap().contains("no-store"));
             for word in ["password_hash","NEVER-READ-PASSWORD","token_version","refresh_token"] {assert!(!r.1.to_string().contains(word),"{word}");}
-            for token in [&admin,&op,&member,&f.key] {assert!(matches!(call(app.clone(),"GET",&path,token,Value::Null).await.0,StatusCode::FORBIDDEN|StatusCode::UNAUTHORIZED));}
+            assert_eq!(call(app.clone(),"GET",&path,&op,Value::Null).await.0,StatusCode::OK);
+            for token in [&admin,&member,&f.key] {assert!(matches!(call(app.clone(),"GET",&path,token,Value::Null).await.0,StatusCode::FORBIDDEN|StatusCode::UNAUTHORIZED));}
         }
         let bare=Router::new().route("/users",get(keycompute_server::handlers::admin_user::list_all_users)).with_state(state);
         assert_eq!(call(bare,"GET","/users",&admin,Value::Null).await.0,StatusCode::FORBIDDEN);
@@ -273,7 +281,7 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
             .unwrap();
         assert_eq!(tenants.total, 1);
         assert_eq!(tenants.items[0].id, f.tenant);
-        assert_eq!(tenants.items[0].user_count, 4);
+        assert_eq!(tenants.items[0].user_count, 3);
         for id in [f.user, f.admin, f.operator] {
             let forged = f.scope(id).await;
             assert!(
@@ -306,7 +314,16 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
         let state = f.state();
         let root = f.token(&state, f.root, false, 3600).await;
         let app = create_router(state);
-        let target = format!("/api/v1/platform/users/{}", f.user);
+        let unowned = User::create(
+            &f.db,
+            &CreateUserRequest {
+                email: "unowned-operator@fixture.invalid".into(),
+                name: Some("Unowned".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let target = format!("/api/v1/platform/users/{}", unowned.id);
 
         let changed_response = call(
             app.clone(),
@@ -324,6 +341,12 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
         let changed = ok(changed_response);
         assert_eq!(changed["platform_role"], "operator");
         assert_eq!(changed["name"], "Changed");
+        assert!(
+            keycompute_db::TenantMembership::list_active_for_user(&f.db, unowned.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let rows = f.db.query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT scope_type,tenant_id,action,metadata FROM tenant_audit_events WHERE request_id=$1 ORDER BY id",
@@ -396,7 +419,7 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
             call(
                 app.clone(),
                 "PATCH",
-                &target,
+                &format!("/api/v1/platform/users/{}", f.user),
                 &root,
                 json!({"status":"suspended","reason":"invalid owner suspension"}),
             )
@@ -470,57 +493,51 @@ async fn lifecycle_audit_failure_keeps_tenant_memberships_and_configuration_atom
     }).await;
 }
 #[tokio::test]
-async fn authorized_self_role_change_and_selected_tenant_changes_commit_then_invalidate_old_jwt() {
+async fn root_is_immutable_and_only_root_can_change_an_operator() {
     isolated(|f| async move {
         let state = f.state();
         let root = f.token(&state, f.root, false, 3600).await;
+        let operator = f.token(&state, f.operator, false, 3600).await;
         let app = create_router(state.clone());
-        ok(call(
-            app.clone(),
-            "PATCH",
-            &format!("/api/v1/platform/users/{}", f.admin),
-            &root,
-            json!({"platform_role":"root","reason":"second root for invariants"}),
-        )
-        .await);
-        let admin_global = f.token(&state, f.admin, false, 3600).await;
-        let selected = f.token(&state, f.admin, true, 3600).await;
-        let changed = ok(call(
-            app.clone(),
-            "PATCH",
-            &format!("/api/v1/platform/tenants/{}", f.tenant),
-            &selected,
-            json!({"status":"inactive"}),
-        )
-        .await);
-        assert_eq!(changed["status"], "inactive");
-        assert!(matches!(
+        assert_eq!(
             call(
                 app.clone(),
-                "GET",
-                "/api/v1/platform/tenants",
-                &selected,
-                Value::Null
+                "PATCH",
+                &format!("/api/v1/platform/users/{}", f.root),
+                &operator,
+                json!({"name":"operator cannot rename root"}),
             )
             .await
             .0,
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-        ));
-        let selfdemotion = ok(call(
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                app.clone(),
+                "PATCH",
+                &format!("/api/v1/platform/users/{}", f.operator),
+                &operator,
+                json!({"name":"operator cannot rename operator"}),
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let demoted = ok(call(
             app.clone(),
             "PATCH",
-            &format!("/api/v1/platform/users/{}", f.admin),
-            &admin_global,
-            json!({"platform_role":"none","reason":"relinquish platform role"}),
+            &format!("/api/v1/platform/users/{}", f.operator),
+            &root,
+            json!({"platform_role":"none","reason":"root revokes operator role"}),
         )
         .await);
-        assert_eq!(selfdemotion["platform_role"], "none");
+        assert_eq!(demoted["platform_role"], "none");
         assert!(matches!(
             call(
                 app.clone(),
                 "GET",
                 "/api/v1/platform/users",
-                &admin_global,
+                &operator,
                 Value::Null
             )
             .await
@@ -533,15 +550,89 @@ async fn authorized_self_role_change_and_selected_tenant_changes_commit_then_inv
                 "PATCH",
                 &format!("/api/v1/platform/users/{}", f.root),
                 &root,
-                json!({"platform_role":"none","reason":"last root cannot go"})
+                json!({"platform_role":"none","reason":"root cannot be demoted"})
             )
             .await
             .0,
             StatusCode::CONFLICT
         );
+        let database_delete =
+            f.db.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM users WHERE id=$1",
+                [f.root.into()],
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            database_delete
+                .to_string()
+                .contains("root identity cannot be deleted"),
+            "{database_delete}"
+        );
     })
     .await;
 }
+
+#[tokio::test]
+async fn operator_can_manage_tenants_without_acquiring_tenant_membership() {
+    isolated(|f| async move {
+        let state = f.state();
+        let operator = f.token(&state, f.operator, false, 3600).await;
+        let owner = User::create(
+            &f.db,
+            &CreateUserRequest {
+                email: "operator-created-owner@fixture.invalid".into(),
+                name: Some("Operator-created owner".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let app = create_router(state);
+        let created = ok(call(
+            app.clone(),
+            "POST",
+            "/api/v1/platform/tenants",
+            &operator,
+            json!({
+                "owner_user_id": owner.id,
+                "name": "Operator managed tenant",
+                "slug": "operator-managed-tenant"
+            }),
+        )
+        .await);
+        let tenant_id = created["id"].as_str().unwrap();
+        let updated = ok(call(
+            app.clone(),
+            "PUT",
+            &format!("/api/v1/platform/tenants/{tenant_id}"),
+            &operator,
+            json!({"name": "Operator updated tenant"}),
+        )
+        .await);
+        assert_eq!(updated["name"], "Operator updated tenant");
+        assert_eq!(
+            call(
+                app,
+                "DELETE",
+                &format!("/api/v1/platform/tenants/{tenant_id}"),
+                &operator,
+                Value::Null,
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert!(
+            keycompute_db::TenantMembership::list_active_for_user(&f.db, f.operator)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn no_stale_or_forged_root_scope_can_create_update_or_delete_tenants() {
     isolated(|f| async move {
@@ -647,7 +738,7 @@ async fn wait_for_exact_backend(db: &DatabaseConnection, pid: i32, relation: &st
 }
 
 #[tokio::test]
-async fn queued_tenant_update_rechecks_root_after_identity_fence_wait() {
+async fn queued_tenant_update_rechecks_platform_token_after_identity_fence_wait() {
     isolated(|f| async move {
         let single = single_connection(&f).await;
         let pid: i32 = single
@@ -680,14 +771,7 @@ async fn queued_tenant_update_rechecks_root_after_identity_fence_wait() {
         wait_for_exact_backend(&f.db, pid, "identity_admin_fence").await;
         hold.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
-            [f.admin.into()],
-        ))
-        .await
-        .unwrap();
-        hold.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            "UPDATE users SET token_version=token_version+1 WHERE id=$1",
             [f.root.into()],
         ))
         .await

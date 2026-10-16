@@ -1,4 +1,3 @@
-use client_api::PlatformRole;
 use client_api::{
     AdminApi, ClientError,
     api::admin::{
@@ -6,6 +5,7 @@ use client_api::{
         UserBalanceReservationsResponse, UserDetail, UserQueryParams,
     },
 };
+use client_api::{PlatformRole, UserStatus};
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -1226,6 +1226,9 @@ fn AdminUsersView() -> Element {
     // 编辑弹窗状态
     let mut edit_user = use_signal(|| Option::<UserDetail>::None);
     let mut edit_name = use_signal(String::new);
+    let mut edit_role = use_signal(|| PlatformRole::None.as_str().to_string());
+    let mut edit_status = use_signal(|| UserStatus::Active.as_str().to_string());
+    let mut edit_reason = use_signal(String::new);
     let mut edit_saving = use_signal(|| false);
 
     // 删除确认状态
@@ -1361,19 +1364,40 @@ fn AdminUsersView() -> Element {
     let on_edit_save = move |_| {
         let Some(u) = edit_user() else { return };
         let name_val = edit_name();
-        let _ = (
-            &u,
-            &current_user_id_for_edit,
-            &can_current_user_manage_roles_for_edit,
-        );
         let id = u.id.clone();
-        edit_saving.set(true);
+        let current_role = u.platform_role.unwrap_or(PlatformRole::None);
+        let current_status = u.status.unwrap_or(UserStatus::Active);
+        let can_change_role = can_current_user_manage_roles_for_edit
+            && current_role != PlatformRole::Root
+            && u.id != current_user_id_for_edit;
+        let can_change_status = current_role != PlatformRole::Root
+            && (current_role != PlatformRole::Operator || can_current_user_manage_roles_for_edit);
+        let next_role = edit_role().parse::<PlatformRole>().ok();
+        let next_status = edit_status().parse::<UserStatus>().ok();
+        let role_changed = can_change_role && next_role.is_some_and(|role| role != current_role);
+        let status_changed =
+            can_change_status && next_status.is_some_and(|status| status != current_status);
+        let reason = edit_reason().trim().to_string();
+        if (role_changed || status_changed) && reason.is_empty() {
+            ui_store.show_error(i18n.t("users.security_reason_required").to_string());
+            return;
+        }
         spawn(async move {
             let client = get_client();
             let mut req = UpdateUserRequest::new();
             if !name_val.trim().is_empty() {
                 req = req.with_name(name_val);
             }
+            if role_changed {
+                req = req.with_platform_role(next_role.unwrap());
+            }
+            if status_changed {
+                req = req.with_status(next_status.unwrap());
+            }
+            if role_changed || status_changed {
+                req = req.with_reason(reason);
+            }
+            edit_saving.set(true);
             let result = with_auto_refresh(auth_store, move |token| {
                 let id = id.clone();
                 let req = req.clone();
@@ -1874,7 +1898,9 @@ fn AdminUsersView() -> Element {
                                             Badge { variant: BadgeVariant::Info, {platform_role_label(u.platform_role, &i18n)} }
                                         }
                                         td {
-                                            if let Some(memberships) = &u.memberships {
+                                            if matches!(u.platform_role, Some(PlatformRole::Root | PlatformRole::Operator)) {
+                                                span { {i18n.t("users.platform_identity_no_tenant")} }
+                                            } else if let Some(memberships) = &u.memberships {
                                                 span { {format!("{} {}", memberships.len(), i18n.t("users.memberships_suffix"))} }
                                             } else {
                                                 span { "—" }
@@ -1884,8 +1910,10 @@ fn AdminUsersView() -> Element {
                                         td { {format_time(&u.created_at)} }
                                         td {
                                             div { class: "btn-group",
-                                                // Only root may edit root users; platform admins may edit other users.
-                                                if u.platform_role != Some(PlatformRole::Root) || can_current_user_manage_roles {
+                                                // root/operator identities are protected from operator edits.
+                                                if !matches!(u.platform_role, Some(PlatformRole::Root | PlatformRole::Operator))
+                                                    || can_current_user_manage_roles
+                                                {
                                                     Button {
                                                         variant: ButtonVariant::Ghost,
                                                         size: ButtonSize::Small,
@@ -1893,14 +1921,27 @@ fn AdminUsersView() -> Element {
                                                             let uu = u.clone();
                                                             move |_| {
                                                                 edit_name.set(uu.name.clone().unwrap_or_default());
+                                                                edit_role.set(
+                                                                    uu.platform_role
+                                                                        .unwrap_or(PlatformRole::None)
+                                                                        .as_str()
+                                                                        .to_string(),
+                                                                );
+                                                                edit_status.set(
+                                                                    uu.status
+                                                                        .unwrap_or(UserStatus::Active)
+                                                                        .as_str()
+                                                                        .to_string(),
+                                                                );
+                                                                edit_reason.set(String::new());
                                                                 edit_user.set(Some(uu.clone()));
                                                             }
                                                         },
                                                         {i18n.t("form.edit")}
                                                     }
                                                 }
-                                                // Only root may manage root-user balances; platform admins may manage others.
-                                                if u.platform_role != Some(PlatformRole::Root) || can_current_user_manage_roles {
+                                                // Platform identities have no tenant wallet or membership.
+                                                if !matches!(u.platform_role, Some(PlatformRole::Root | PlatformRole::Operator)) {
                                                     Button {
                                                         variant: ButtonVariant::Ghost,
                                                         size: ButtonSize::Small,
@@ -1981,7 +2022,7 @@ fn AdminUsersView() -> Element {
             }
 
             // ── 编辑用户弹窗 ──────────────────────────────────────────
-            if edit_user().is_some() {
+            if let Some(ref editing) = edit_user() {
                 div {
                     class: "modal-backdrop",
                     onclick: move |_| edit_user.set(None),
@@ -2009,6 +2050,46 @@ fn AdminUsersView() -> Element {
                                     placeholder: "{i18n.t(\"users.display_name_placeholder\")}",
                                     value: "{edit_name}",
                                     oninput: move |e| *edit_name.write() = e.value(),
+                                }
+                            }
+                            if can_current_user_manage_roles
+                                && editing.platform_role != Some(PlatformRole::Root)
+                                && editing.id != current_user_id
+                            {
+                                div { class: "form-group",
+                                    label { class: "form-label", {i18n.t("users.platform_role")} }
+                                    select {
+                                        class: "input-field",
+                                        value: "{edit_role}",
+                                        onchange: move |e| *edit_role.write() = e.value(),
+                                        option { value: "none", {i18n.t("users.role_none")} }
+                                        option { value: "operator", {i18n.t("users.role_operator")} }
+                                    }
+                                    p { class: "text-secondary", {i18n.t("users.platform_role_hint")} }
+                                }
+                            }
+                            if editing.platform_role != Some(PlatformRole::Root)
+                                && (editing.platform_role != Some(PlatformRole::Operator)
+                                    || can_current_user_manage_roles)
+                            {
+                                div { class: "form-group",
+                                    label { class: "form-label", {i18n.t("users.account_status")} }
+                                    select {
+                                        class: "input-field",
+                                        value: "{edit_status}",
+                                        onchange: move |e| *edit_status.write() = e.value(),
+                                        option { value: "active", {i18n.t("users.status_active")} }
+                                        option { value: "suspended", {i18n.t("users.status_suspended")} }
+                                    }
+                                }
+                                div { class: "form-group",
+                                    label { class: "form-label", {i18n.t("users.security_reason")} }
+                                    input {
+                                        class: "input-field",
+                                        placeholder: "{i18n.t(\"users.security_reason_placeholder\")}",
+                                        value: "{edit_reason}",
+                                        oninput: move |e| *edit_reason.write() = e.value(),
+                                    }
                                 }
                             }
                             p { {i18n.t("users.global_profile_only")} }
@@ -2499,7 +2580,7 @@ mod search_tests {
             "operator" => Some(PlatformRole::Operator),
             _ => None,
         };
-        let permissions = if role == "root" {
+        let permissions = if matches!(role, "root" | "operator") {
             vec!["users:manage".into()]
         } else {
             Vec::new()
@@ -2524,7 +2605,7 @@ mod search_tests {
         let operator = user_with_role("operator");
         let root = user_with_role("root");
         let mut member = user_with_role("none");
-        assert!(!user_can_manage_platform_users(Some(&operator)));
+        assert!(user_can_manage_platform_users(Some(&operator)));
         assert!(user_can_manage_platform_users(Some(&root)));
         assert!(!user_can_manage_platform_users(Some(&member)));
         member.capabilities.tenant.push("users:manage".into());

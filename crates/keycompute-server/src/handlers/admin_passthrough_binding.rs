@@ -62,7 +62,9 @@ fn map(error: DbError) -> ApiError {
         {
             ApiError::Forbidden("Passthrough binding management authorization denied".into())
         }
-        DbError::Other(s) if s.contains("must") || s.contains("invalid") => {
+        DbError::Other(s)
+            if s.contains("must") || s.contains("invalid") || s.contains("cannot") =>
+        {
             ApiError::BadRequest(s)
         }
         DbError::Other(s) if s.contains("active") || s.contains("referenced") => {

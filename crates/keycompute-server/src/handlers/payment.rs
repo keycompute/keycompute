@@ -39,7 +39,7 @@ fn require_billing_admin_permission(
     auth.require_platform(AuthorizationAction::ManagePlatform)
 }
 
-/// Platform payment reads and control commands are global root operations.
+/// Platform payment reads and control commands are global administrator operations.
 /// They must not require a selected tenant just because payment orders carry
 /// tenant ownership in the data model.
 fn require_global_billing_admin_permission(
@@ -1055,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn global_root_payment_scope_does_not_require_a_selected_tenant() {
+    fn global_platform_payment_scope_does_not_require_a_selected_tenant() {
         let mut context = keycompute_auth::AuthContext::global(Uuid::new_v4())
             .with_permissions(vec![keycompute_auth::Permission::AccessConsole]);
         context.platform_role = PlatformRole::Root;
@@ -1066,7 +1066,7 @@ mod tests {
             .with_permissions(vec![keycompute_auth::Permission::AccessConsole]);
         context.platform_role = PlatformRole::Operator;
         let operator = GlobalConsoleAuth::try_from(context).unwrap();
-        assert!(require_global_billing_admin_permission(&operator).is_err());
+        assert!(require_global_billing_admin_permission(&operator).is_ok());
     }
 
     #[test]
@@ -1122,7 +1122,8 @@ mod tests {
             Err(ApiError::Forbidden(_))
         ));
 
-        // A tenant billing capability is not platform payment administration.
+        // A selected tenant identity is never platform payment administration,
+        // even when its role fields are manually made inconsistent.
         for platform_role in [
             PlatformRole::None,
             PlatformRole::Operator,
@@ -1137,10 +1138,7 @@ mod tests {
             .with_permissions(vec![Permission::ManageBilling]);
             jwt.tenant_role = Some(TenantRole::Admin);
             jwt.platform_role = platform_role;
-            assert_eq!(
-                require_billing_admin_permission(&jwt).is_ok(),
-                platform_role == PlatformRole::Root
-            );
+            assert!(require_billing_admin_permission(&jwt).is_err());
             jwt.credential_kind = CredentialKind::ApiKey;
             assert!(require_billing_admin_permission(&jwt).is_err());
         }

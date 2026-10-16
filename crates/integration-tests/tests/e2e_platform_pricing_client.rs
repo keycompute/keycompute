@@ -8,9 +8,7 @@ use client_api::{
 };
 use integration_tests::{
     common::generate_test_id,
-    db::{
-        TestDataGuard, create_test_api_key, create_test_pool, create_test_tenant, create_test_user,
-    },
+    db::{TestDataGuard, create_test_api_key, create_test_pool, create_test_tenant},
 };
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::{CreateProduceAiKeyRequest, DbRouter, TenantMembership, User};
@@ -56,13 +54,24 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
     let mut cleanup = TestDataGuard::new(db.clone(), run.clone());
     let a = create_test_tenant(&db, "platform-pricing-client-a", &run).await;
     let b = create_test_tenant(&db, "platform-pricing-client-b", &run).await;
-    let operator = create_test_user(&db, a.id, "platform-pricing-operator", &run).await;
     let state = AppState::with_pool(DbRouter::single(db.clone()));
-    db.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE users SET platform_role='root' WHERE id=$1",
-        [a.owner_user_id.into()],
-    ))
+    let root_id = db
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT id FROM users WHERE platform_role='root' AND status='active' ORDER BY created_at LIMIT 1",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<Uuid>("", "id")
+        .unwrap();
+    let operator = User::create(
+        &db,
+        &keycompute_db::CreateUserRequest {
+            email: format!("platform-pricing-operator-{run}@fixture.invalid"),
+            name: Some("platform-pricing-operator".into()),
+        },
+    )
     .await
     .unwrap();
     db.execute(Statement::from_sql_and_values(
@@ -72,12 +81,11 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
     ))
     .await
     .unwrap();
-    let root_global = token(&state, &db, a.owner_user_id, None).await;
-    let root_in_a = token(&state, &db, a.owner_user_id, Some(a.id)).await;
+    let root_global = token(&state, &db, root_id, None).await;
     let operator = token(&state, &db, operator.id, None).await;
     let admin_b = token(&state, &db, b.owner_user_id, Some(b.id)).await;
     assert!(
-        TenantMembership::find_any(&db, b.id, a.owner_user_id)
+        TenantMembership::find_any(&db, b.id, root_id)
             .await
             .unwrap()
             .is_none()
@@ -107,7 +115,7 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
     let model = format!("platform-pricing-contract-{run}");
     let target = PricingTarget::Tenant { tenant_id: b.id };
     let query = |t| PricingQueryParams::new(t).with_search(model.clone());
-    for denied in [&operator, &admin_b, &raw_key] {
+    for denied in [&admin_b, &raw_key] {
         assert!(matches!(
             api.list_pricing_page(&query(PricingTarget::Platform), denied)
                 .await,
@@ -125,7 +133,8 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
             .total,
         0
     );
-    // Same model has separate global and tenant rows. Selected A never supplies target B implicitly.
+    // The same model has separate global and tenant rows; both platform roles
+    // operate through an explicit target without tenant membership.
     let global = api
         .create_pricing(
             &CreatePricingRequest::new(
@@ -136,7 +145,7 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
                 "1",
                 "CNY",
             ),
-            &root_in_a,
+            &operator,
         )
         .await
         .unwrap();
@@ -154,7 +163,7 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
         )
         .await
         .unwrap();
-    for auth in [&root_global, &root_in_a] {
+    for auth in [&root_global, &operator] {
         let g = api
             .list_pricing_page(&query(PricingTarget::Platform), auth)
             .await
@@ -175,18 +184,18 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
             PricingTarget::Tenant { tenant_id: a.id },
             &owned.pricing_id,
             &patch,
-            &root_in_a
+            &operator
         )
         .await
         .is_err()
     );
     let changed = api
-        .update_pricing(target, &owned.pricing_id, &patch, &root_in_a)
+        .update_pricing(target, &owned.pricing_id, &patch, &operator)
         .await
         .unwrap();
     assert!(changed.version > owned.version);
     assert!(
-        api.update_pricing(target, &owned.pricing_id, &patch, &root_in_a)
+        api.update_pricing(target, &owned.pricing_id, &patch, &operator)
             .await
             .is_err()
     );

@@ -33,6 +33,7 @@ struct TipWithdrawalTestEnv {
     pool: DatabaseConnection,
     test_user_id: Uuid,
     admin_user_id: Uuid,
+    root_user_id: Uuid,
     tenant_id: Uuid,
     produce_ai_key_id: Uuid,
     node_id: Uuid,
@@ -122,12 +123,14 @@ impl TipWithdrawalTestEnv {
         ))
         .await?;
 
-        pool.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
-            [admin_user.id.into()],
-        ))
-        .await?;
+        let root_user_id = pool
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT id FROM users WHERE platform_role='root' AND status='active' ORDER BY created_at LIMIT 1",
+            ))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("test root identity missing"))?
+            .try_get::<Uuid>("", "id")?;
 
         // 为测试用户创建 API Key（用于创建 usage_log）
         let api_key = integration_tests::db::create_test_api_key(
@@ -169,6 +172,7 @@ impl TipWithdrawalTestEnv {
             pool,
             test_user_id: test_user.id,
             admin_user_id: admin_user.id,
+            root_user_id,
             tenant_id: tenant.id,
             produce_ai_key_id: api_key.id,
             node_id: node.id,
@@ -191,6 +195,19 @@ impl TipWithdrawalTestEnv {
         let t = Tenant::find_by_id(&self.pool, self.tenant_id)
             .await?
             .unwrap();
+        if root {
+            return Ok(FinancialScope::platform_tenant(
+                PlatformScope::checked(user, PlatformRole::Root).unwrap(),
+                FinancialSession {
+                    user_id: user,
+                    credential_kind: CredentialKind::Jwt,
+                    token_version: u.token_version,
+                    expires_at: Utc::now().timestamp() + 3600,
+                    selected: None,
+                },
+                t.id,
+            )?);
+        }
         let m = keycompute_db::TenantMembership::find(&self.pool, t.id, user)
             .await?
             .unwrap();
@@ -207,13 +224,7 @@ impl TipWithdrawalTestEnv {
                 membership_authz_version: m.authz_version,
             }),
         };
-        Ok(if root {
-            FinancialScope::platform_tenant(
-                PlatformScope::checked(user, PlatformRole::Root).unwrap(),
-                session,
-                t.id,
-            )?
-        } else if admin {
+        Ok(if admin {
             assert_eq!(role, TenantRole::Admin);
             FinancialScope::tenant_admin(TenantScope::checked(t.id, user, role).unwrap(), session)?
         } else {
@@ -224,7 +235,11 @@ impl TipWithdrawalTestEnv {
         AuditContext {
             actor_user_id: user,
             credential_kind: keycompute_types::CredentialKind::Jwt,
-            actor_platform_role: keycompute_types::PlatformRole::None,
+            actor_platform_role: if user == self.root_user_id {
+                keycompute_types::PlatformRole::Root
+            } else {
+                keycompute_types::PlatformRole::None
+            },
             actor_tenant_role: None,
             request_id: Some(Uuid::new_v4()),
         }
@@ -659,8 +674,8 @@ async fn test_alipay_withdrawal_approval_workflow() -> anyhow::Result<()> {
 
     let completed_withdrawal = NodeTipWithdrawal::complete_external(
         &tx3,
-        env.scope(env.admin_user_id, false, true).await?,
-        &env.audit(env.admin_user_id),
+        env.scope(env.root_user_id, false, true).await?,
+        &env.audit(env.root_user_id),
         &CompleteWithdrawal {
             id: withdrawal.id,
             expected_revision: approved_withdrawal.revision,

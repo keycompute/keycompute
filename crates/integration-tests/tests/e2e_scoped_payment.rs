@@ -135,16 +135,12 @@ async fn global_root_can_read_all_payment_orders_without_selected_tenant() {
     let mut guard = TestDataGuard::new(db.clone(), run.clone());
     let a = create_test_tenant(&db, "payment-platform-a", &run).await;
     let b = create_test_tenant(&db, "payment-platform-b", &run).await;
-    let root = create_test_user(&db, a.id, "payment-platform-root", &run).await;
     let user_a = create_test_user(&db, a.id, "payment-platform-user-a", &run).await;
     let user_b = create_test_user(&db, b.id, "payment-platform-user-b", &run).await;
-    db.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE users SET platform_role='root' WHERE id=$1",
-        [root.id.into()],
-    ))
-    .await
-    .unwrap();
+    let root = User::find_by_email(&db, "tenant-test-root@fixture.invalid")
+        .await
+        .unwrap()
+        .unwrap();
     let order_a = order(&db, a.id, user_a.id).await;
     let order_b = order(&db, b.id, user_b.id).await;
     let state = AppState::with_pool(DbRouter::single(db.clone()));

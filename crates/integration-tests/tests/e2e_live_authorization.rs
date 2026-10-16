@@ -346,11 +346,12 @@ async fn credential_and_orthogonal_role_matrix_is_enforced_over_http() {
 #[tokio::test]
 async fn global_identity_can_select_only_existing_memberships_and_clear_selection() {
     let mut f = Fixture::new().await;
-    for platform in [
-        PlatformRole::Root,
-        PlatformRole::Operator,
-        PlatformRole::None,
-    ] {
+    let root = User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut identities = vec![(PlatformRole::Root, root)];
+    for platform in [PlatformRole::Operator, PlatformRole::None] {
         let user = User::create(
             &f.db,
             &CreateUserRequest {
@@ -360,7 +361,9 @@ async fn global_identity_can_select_only_existing_memberships_and_clear_selectio
         )
         .await
         .unwrap();
-        let user = f.platform_role(user.id, platform).await;
+        identities.push((platform, f.platform_role(user.id, platform).await));
+    }
+    for (_, user) in identities {
         let token = f.global_token(user.id).await;
         let (status, session) = call(
             create_router(f.state.clone()),
@@ -430,7 +433,7 @@ async fn global_identity_can_select_only_existing_memberships_and_clear_selectio
 #[tokio::test]
 async fn membership_and_tenant_versions_revoke_only_their_own_scope() {
     let mut f = Fixture::new().await;
-    let user = f.member("versions", PlatformRole::Operator).await;
+    let user = f.member("versions", PlatformRole::None).await;
     let global = f.global_token(user.id).await;
     let a = f.selected(&global, f.a.id).await;
     let b = f.selected(&global, f.b.id).await;
@@ -516,14 +519,20 @@ async fn membership_and_tenant_versions_revoke_only_their_own_scope() {
 }
 
 #[tokio::test]
-async fn live_global_security_changes_invalidate_all_old_sessions_without_cross_scope_escalation() {
+async fn live_global_token_changes_invalidate_all_old_sessions_without_cross_scope_escalation() {
     let mut f = Fixture::new().await;
-    let user = f.member("global-versions", PlatformRole::Operator).await;
+    let user = f.member("global-versions", PlatformRole::None).await;
     let global = f.global_token(user.id).await;
     let a = f.selected(&global, f.a.id).await;
     let b = f.selected(&global, f.b.id).await;
     let key = f.key(user.id, f.a.id).await;
-    f.platform_role(user.id, PlatformRole::None).await;
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE users SET token_version=token_version+1 WHERE id=$1",
+        [user.id.into()],
+    ))
+    .await
+    .unwrap();
     for token in [&global, &a, &b] {
         assert!(f.state.auth.verify_token(token).await.is_err());
     }

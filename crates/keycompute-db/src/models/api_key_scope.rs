@@ -31,7 +31,12 @@ impl Scope {
     fn validate(self) -> Result<(), DbError> {
         match self {
             Self::Tenant(s) if s.tenant_role() != TenantRole::Admin => Err(denied()),
-            Self::Platform(s, t) if s.platform_role() != PlatformRole::Root || t.is_nil() => {
+            Self::Platform(s, t)
+                if !matches!(
+                    s.platform_role(),
+                    PlatformRole::Root | PlatformRole::Operator
+                ) || t.is_nil() =>
+            {
                 Err(denied())
             }
             _ => Ok(()),
@@ -64,7 +69,7 @@ fn read_query(
             "EXISTS (SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.tenant_role='admin' AND m.status='active' AND u.status='active' AND t.status='active')"
         }
         Scope::Platform(_, _) => {
-            "EXISTS (SELECT 1 FROM users u WHERE u.id=$2 AND u.platform_role='root' AND u.status='active')"
+            "EXISTS (SELECT 1 FROM users u WHERE u.id=$2 AND u.platform_role IN ('root','operator') AND u.status='active')"
         }
     };
     let columns = if count { "COUNT(*)" } else { COLUMNS };
@@ -195,7 +200,10 @@ async fn lock_authority(
                 .ok_or_else(denied)?;
         }
         Scope::Platform(_, _) => {
-            if actor.platform_role()? != PlatformRole::Root {
+            if !matches!(
+                actor.platform_role()?,
+                PlatformRole::Root | PlatformRole::Operator
+            ) {
                 return Err(denied());
             }
         }
@@ -609,7 +617,7 @@ mod tests {
         }
     }
     #[test]
-    fn key_scope_rejects_insufficient_roles_and_missing_platform_tenant() {
+    fn key_scope_accepts_platform_admins_and_rejects_missing_platform_tenant() {
         let id = Uuid::new_v4();
         assert!(
             Scope::Tenant(TenantScope::checked(Uuid::new_v4(), id, TenantRole::Member).unwrap())
@@ -622,7 +630,7 @@ mod tests {
                 Uuid::new_v4()
             )
             .validate()
-            .is_err()
+            .is_ok()
         );
         assert!(
             Scope::Platform(

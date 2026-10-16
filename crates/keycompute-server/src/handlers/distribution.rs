@@ -361,7 +361,7 @@ fn build_distribution_record_response(
 /// 查看分销记录
 ///
 /// GET /api/v1/distribution/records
-/// Root-only legacy view of the explicitly selected tenant.
+/// Platform-administrator legacy view of the explicitly selected tenant.
 /// This single-currency UI remains CNY; canonical report routes expose currencies.
 pub async fn list_distribution_records(
     auth: AuthExtractor,

@@ -15,8 +15,8 @@ pub const ACCOUNT_PRIORITY_MIN: i32 = 0;
 pub const ACCOUNT_PRIORITY_MAX: i32 = 10;
 pub const ACCOUNT_RATE_LIMIT_MIN: i32 = 1;
 
-const ACTIVE_ACCOUNT_KEY_SHARE_SQL: &str = "SELECT accounts.* FROM accounts JOIN tenants ON tenants.id = accounts.tenant_id WHERE accounts.id = $1 AND tenants.status = 'active' FOR KEY SHARE OF accounts";
-const ACTIVE_ACCOUNT_SHARE_SQL: &str = "SELECT accounts.* FROM accounts JOIN tenants ON tenants.id = accounts.tenant_id WHERE accounts.id = $1 AND tenants.status = 'active' FOR SHARE OF accounts";
+const ACTIVE_ACCOUNT_KEY_SHARE_SQL: &str = "SELECT accounts.* FROM accounts LEFT JOIN tenants ON tenants.id = accounts.tenant_id WHERE accounts.id = $1 AND (accounts.tenant_id IS NULL OR tenants.status = 'active') FOR KEY SHARE OF accounts";
+const ACTIVE_ACCOUNT_SHARE_SQL: &str = "SELECT accounts.* FROM accounts LEFT JOIN tenants ON tenants.id = accounts.tenant_id WHERE accounts.id = $1 AND (accounts.tenant_id IS NULL OR tenants.status = 'active') FOR SHARE OF accounts";
 const ACCOUNT_KEY_SHARE_SQL: &str = "SELECT * FROM accounts WHERE id = $1 FOR KEY SHARE";
 
 fn validate_priority(priority: Option<i32>) -> Result<(), DbError> {
@@ -52,7 +52,8 @@ fn validate_rate_limits(rpm_limit: Option<i32>, tpm_limit: Option<i32>) -> Resul
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct Account {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// None denotes a platform-owned account available to every active tenant.
+    pub tenant_id: Option<Uuid>,
     pub provider: String,
     pub name: String,
     pub endpoint: String,
@@ -96,7 +97,7 @@ struct AccountCount {
 /// 创建账号请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateAccountRequest {
-    pub tenant_id: Uuid,
+    pub tenant_id: Option<Uuid>,
     pub provider: String,
     pub name: String,
     pub endpoint: String,
@@ -107,14 +108,12 @@ pub struct CreateAccountRequest {
     pub priority: Option<i32>,
     pub models_supported: Vec<String>,
     pub api_capabilities: Vec<String>,
-    pub visibility: Option<String>,
     pub pool_enabled: Option<bool>,
 }
 
 /// 更新账号请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateAccountRequest {
-    pub tenant_id: Option<Uuid>,
     pub name: Option<String>,
     pub endpoint: Option<String>,
     pub upstream_api_key_encrypted: Option<String>,
@@ -125,7 +124,6 @@ pub struct UpdateAccountRequest {
     pub enabled: Option<bool>,
     pub models_supported: Option<Vec<String>>,
     pub api_capabilities: Option<Vec<String>>,
-    pub visibility: Option<String>,
     pub pool_enabled: Option<bool>,
 }
 
@@ -160,7 +158,12 @@ impl Account {
                 req.priority.unwrap_or(0).into(),
                 req.models_supported.clone().into(),
                 req.api_capabilities.clone().into(),
-                req.visibility.as_deref().unwrap_or("tenant").into(),
+                (if req.tenant_id.is_some() {
+                    "tenant"
+                } else {
+                    "global"
+                })
+                .into(),
                 req.pool_enabled.unwrap_or(true).into(),
             ],
         );
@@ -276,10 +279,8 @@ impl Account {
         limit: u64,
     ) -> Result<Vec<Account>, DbError> {
         let policy = super::upstream_access::non_pt_predicate("a", "$1");
-        // Discovery is limited to consumer-owned private accounts: it probes
-        // opaque resources, not global accounts belonging to another consumer.
         Ok(Account::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            format!("SELECT a.* FROM accounts a WHERE a.tenant_id=$1 AND a.visibility='tenant' AND NOT EXISTS (SELECT 1 FROM passthrough_bindings shared_grant WHERE shared_grant.account_id=a.id AND (shared_grant.is_global OR shared_grant.tenant_id<>$1)) AND {policy} AND LOWER(a.provider)=LOWER($2) AND $3=ANY(a.api_capabilities) ORDER BY a.priority DESC,a.id LIMIT $4"),
+            format!("SELECT a.* FROM accounts a WHERE a.tenant_id=$1 AND {policy} AND LOWER(a.provider)=LOWER($2) AND $3=ANY(a.api_capabilities) ORDER BY a.priority DESC,a.id LIMIT $4"),
             [tenant_id.into(),provider.into(),api_capability.into(),i64::try_from(limit).unwrap_or(i64::MAX).into()])).all(db).await?)
     }
 
@@ -414,7 +415,7 @@ impl Account {
     pub async fn find_enabled_all(db: &impl ConnectionTrait) -> Result<Vec<Account>, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
-            "SELECT accounts.* FROM accounts JOIN tenants ON tenants.id = accounts.tenant_id WHERE tenants.status = 'active' AND accounts.enabled = TRUE ORDER BY accounts.priority DESC".to_string(),
+            "SELECT accounts.* FROM accounts LEFT JOIN tenants ON tenants.id = accounts.tenant_id WHERE (accounts.tenant_id IS NULL OR tenants.status = 'active') AND accounts.enabled = TRUE ORDER BY accounts.priority DESC".to_string(),
         );
         let accounts = Account::find_by_statement(stmt).all(db).await?;
 
@@ -718,20 +719,6 @@ impl Account {
         db: &impl ConnectionTrait,
         req: &UpdateAccountRequest,
     ) -> Result<Account, DbError> {
-        if req.pool_enabled.is_some()
-            && db
-                .query_one(Statement::from_sql_and_values(
-                    DbBackend::Postgres,
-                    "SELECT 1 FROM passthrough_bindings WHERE account_id=$1 LIMIT 1",
-                    [self.id.into()],
-                ))
-                .await?
-                .is_some()
-        {
-            return Err(DbError::Other(
-                "account pool participation is managed by passthrough bindings".into(),
-            ));
-        }
         validate_priority(req.priority)?;
         validate_rate_limits(req.rpm_limit, req.tpm_limit)?;
         let stmt = Statement::from_sql_and_values(
@@ -746,10 +733,9 @@ impl Account {
                 tpm_limit = COALESCE($6, tpm_limit),
                 priority = COALESCE($7, priority),
                 enabled = COALESCE($8, enabled),
-                pool_enabled = COALESCE($14, pool_enabled),
+                pool_enabled = COALESCE($12, pool_enabled),
                 models_supported = COALESCE($9, models_supported),
                 api_capabilities = COALESCE($10, api_capabilities),
-                visibility = COALESCE($11, visibility),
                 -- Fence runtime health events that were started against the
                 -- previous account configuration. The health snapshot itself
                 -- is preserved until a probe or runtime result replaces it.
@@ -763,7 +749,6 @@ impl Account {
                     OR COALESCE($3,upstream_api_key_encrypted) IS DISTINCT FROM upstream_api_key_encrypted
                     OR COALESCE($9,models_supported) IS DISTINCT FROM models_supported
                     OR COALESCE($10,api_capabilities) IS DISTINCT FROM api_capabilities THEN 1 ELSE 0 END,
-                tenant_id = COALESCE($12, tenant_id),
                 upstream_config_version = CASE WHEN
                     COALESCE($2,endpoint) IS DISTINCT FROM endpoint
                     OR COALESCE($3,upstream_api_key_encrypted) IS DISTINCT FROM upstream_api_key_encrypted
@@ -772,7 +757,7 @@ impl Account {
                     THEN GREATEST(upstream_config_version,statement_timestamp())+INTERVAL '1 microsecond'
                     ELSE upstream_config_version END,
                 updated_at = GREATEST(updated_at, NOW()) + INTERVAL '1 microsecond'
-            WHERE id = $13
+            WHERE id = $11
             RETURNING *
             "#,
             [
@@ -786,8 +771,6 @@ impl Account {
                 req.enabled.into(),
                 req.models_supported.clone().into(),
                 req.api_capabilities.clone().into(),
-                req.visibility.clone().into(),
-                req.tenant_id.into(),
                 self.id.into(),
                 req.pool_enabled.into(),
             ],

@@ -1,4 +1,4 @@
-//! Root-only raw diagnostics. Operator aggregates use platform_operations instead.
+//! Platform-administrator raw diagnostics with current global authority.
 //! Read authorization rows are shared-locked, never the global administrative fence.
 use super::financial_scope::{FinancialAccess, FinancialScope};
 use crate::{Account, AuditContext, DbError, TenantAuditEvent};
@@ -32,7 +32,7 @@ impl MonitoringAction {
         }
     }
 }
-/// Only valid current root platform scopes may obtain this connection.
+/// Only valid current platform-administrator scopes may obtain this connection.
 /// It must be committed with its audit before any result reaches the client.
 pub struct MonitoringRead {
     tx: DatabaseTransaction,
@@ -45,10 +45,10 @@ impl MonitoringRead {
         scope: FinancialScope,
         audit: &AuditContext,
     ) -> Result<Self, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         let tx = db.begin().await?;
         tx.execute_unprepared("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; SET LOCAL lock_timeout='1000ms'; SET LOCAL statement_timeout='5000ms'").await?;
-        let actor = scope.lock_root_read(&tx, audit).await?;
+        let actor = scope.lock_platform_read(&tx, audit).await?;
         Ok(Self { tx, scope, actor })
     }
     pub fn connection(&self) -> &DatabaseTransaction {
@@ -104,7 +104,7 @@ impl Account {
             account.api_capabilities.clone().into(),
         ]);
         let sql = format!(
-            "SELECT EXISTS(SELECT 1 FROM accounts a JOIN tenants owner ON owner.id=a.tenant_id WHERE a.id=$10 AND a.tenant_id=$11 AND a.upstream_config_version=$12 AND owner.status='active' AND (NOT $13::boolean OR a.enabled) AND a.endpoint=$14 AND a.provider=$15 AND a.upstream_api_key_encrypted=$16 AND a.models_supported=$17 AND a.api_capabilities=$18 AND ($8::uuid IS NULL OR a.tenant_id=$8) AND {}) AS allowed",
+            "SELECT EXISTS(SELECT 1 FROM accounts a LEFT JOIN tenants owner ON owner.id=a.tenant_id WHERE a.id=$10 AND a.tenant_id IS NOT DISTINCT FROM $11 AND a.upstream_config_version=$12 AND COALESCE(owner.status='active',TRUE) AND (NOT $13::boolean OR a.enabled) AND a.endpoint=$14 AND a.provider=$15 AND a.upstream_api_key_encrypted=$16 AND a.models_supported=$17 AND a.api_capabilities=$18 AND ($8::uuid IS NULL OR a.tenant_id=$8) AND {}) AS allowed",
             scope.predicate()
         );
         let row = db
@@ -134,7 +134,7 @@ impl Account {
         let mut values = scope.values();
         values.push(id.into());
         let sql = format!(
-            "SELECT a.* FROM accounts a JOIN tenants owner ON owner.id=a.tenant_id WHERE a.id=$10 AND owner.status='active' AND ($8::uuid IS NULL OR a.tenant_id=$8) AND {}",
+            "SELECT a.* FROM accounts a LEFT JOIN tenants owner ON owner.id=a.tenant_id WHERE a.id=$10 AND COALESCE(owner.status='active',TRUE) AND ($8::uuid IS NULL OR a.tenant_id=$8) AND {}",
             scope.predicate()
         );
         Ok(Self::find_by_statement(Statement::from_sql_and_values(

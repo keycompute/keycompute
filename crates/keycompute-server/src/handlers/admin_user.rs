@@ -98,10 +98,20 @@ fn identity_error(error: keycompute_db::DbError) -> ApiError {
     }
     if let keycompute_db::DbError::Other(code) = &error {
         if code == "financial_authority_invalid" {
-            return ApiError::Forbidden("Current root authority required".into());
+            return ApiError::Forbidden(
+                "Platform identity authority denied for this target".into(),
+            );
         }
         if code == "platform_identity_request_invalid" {
             return ApiError::BadRequest("Invalid platform identity request".into());
+        }
+        if code == "platform_identity_has_tenant_membership" {
+            return ApiError::Conflict(
+                "Remove all tenant memberships before assigning a platform role".into(),
+            );
+        }
+        if code == "protected_platform_identity" {
+            return ApiError::Conflict("Protected platform identity cannot be changed".into());
         }
         if code == "tenant_retained_members_or_accounts" {
             return ApiError::Conflict(
@@ -1235,6 +1245,16 @@ mod tests {
     }
 
     #[test]
+    fn protected_platform_identity_error_is_client_visible_as_conflict() {
+        let mapped = identity_error(keycompute_db::DbError::Other(
+            "protected_platform_identity".to_string(),
+        ));
+        assert!(
+            matches!(mapped, ApiError::Conflict(message) if message.contains("Protected platform identity"))
+        );
+    }
+
+    #[test]
     fn pending_responses_delete_error_is_client_visible_as_conflict() {
         let error = keycompute_db::DbError::TenantHasPendingResponsesWork {
             pending_settlements: 2,
@@ -1507,11 +1527,12 @@ mod tests {
                         tenant_id: tenant.map(|_| Uuid::new_v4()),
                         tenant_role: tenant,
                     });
-                let auth = GlobalConsoleAuth::try_from(ctx).unwrap();
-                assert_eq!(
-                    platform_manage(&auth).is_ok(),
-                    platform == PlatformRole::Root
-                );
+                let expected = matches!(platform, PlatformRole::Root | PlatformRole::Operator)
+                    && tenant.is_none();
+                match GlobalConsoleAuth::try_from(ctx) {
+                    Ok(auth) => assert_eq!(platform_manage(&auth).is_ok(), expected),
+                    Err(_) => assert!(!expected),
+                }
             }
             let id = Uuid::new_v4();
             let ctx = keycompute_auth::AuthContext::new(id, CredentialKind::ApiKey)

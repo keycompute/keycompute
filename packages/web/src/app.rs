@@ -597,8 +597,8 @@ pub fn AppLayout() -> Element {
         });
     }
 
-    // Platform business pages remain root-only. The audit entry is separately
-    // capability-gated so operators can investigate incidents without writes.
+    // Root and operator share platform business pages. Individual protected
+    // identity actions are still constrained by the server-side role hierarchy.
     let mut platform_management_items = Vec::new();
     if can_manage_platform {
         platform_management_items.extend([

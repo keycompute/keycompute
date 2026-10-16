@@ -59,7 +59,7 @@ impl UserBalance {
         audit: &AuditContext,
         command: &ManualBalanceCommand<'_>,
     ) -> Result<ManualBalanceOperationDecision, DbError> {
-        scope.require_root_tenant()?;
+        scope.require_platform_tenant()?;
         if command.user_id.is_nil() {
             return Err(DbError::Other("financial_target_invalid".into()));
         }

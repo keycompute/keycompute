@@ -78,7 +78,7 @@ fn audit_root(scope: PlatformScope, request_id: Option<Uuid>) -> keycompute_db::
     }
 }
 
-fn account_request(tenant_id: Uuid, name: &str, visibility: &str) -> CreateAccountRequest {
+fn account_request(tenant_id: Option<Uuid>, name: &str) -> CreateAccountRequest {
     CreateAccountRequest {
         tenant_id,
         provider: "openai".into(),
@@ -91,16 +91,14 @@ fn account_request(tenant_id: Uuid, name: &str, visibility: &str) -> CreateAccou
         priority: Some(1),
         // Global grants share one model namespace, so each fixture needs its
         // own model even when the database is deliberately shared in CI.
-        models_supported: vec![format!("gpt-scoped-{tenant_id}")],
+        models_supported: vec![format!("gpt-scoped-{name}")],
         api_capabilities: vec!["chat_completions".into(), "responses".into()],
-        visibility: Some(visibility.into()),
         pool_enabled: Some(true),
     }
 }
 
 fn update_name(name: &str) -> UpdateAccountRequest {
     UpdateAccountRequest {
-        tenant_id: None,
         name: Some(name.into()),
         endpoint: None,
         upstream_api_key_encrypted: None,
@@ -111,7 +109,6 @@ fn update_name(name: &str) -> UpdateAccountRequest {
         enabled: None,
         models_supported: None,
         api_capabilities: None,
-        visibility: None,
         pool_enabled: None,
     }
 }
@@ -160,24 +157,15 @@ impl Fixture {
             .unwrap();
         let root = User::find_by_id(&db, root_id).await.unwrap().unwrap();
 
-        let root_scope = root_scope(&root);
-        let account_a = Account::create_platform(
+        let account_a = Account::create(
             &db,
-            root_scope,
-            a.id,
-            &account_request(a.id, &format!("literal_%_account_{run_id}"), "global"),
-            &audit_root(root_scope, Some(Uuid::new_v4())),
-            root_snapshot(&root),
+            &account_request(Some(a.id), &format!("literal_%_account_{run_id}")),
         )
         .await
         .unwrap();
-        let account_b = Account::create_platform(
+        let account_b = Account::create(
             &db,
-            root_scope,
-            b.id,
-            &account_request(b.id, &format!("tenant-b-account-{run_id}"), "tenant"),
-            &audit_root(root_scope, Some(Uuid::new_v4())),
-            root_snapshot(&root),
+            &account_request(Some(b.id), &format!("tenant-b-account-{run_id}")),
         )
         .await
         .unwrap();
@@ -294,58 +282,63 @@ async fn account_reads_are_scoped_and_list_count_filters_match() {
 }
 
 #[tokio::test]
-async fn tenant_cannot_transfer_account_but_root_can_transfer_atomically() {
+async fn account_ownership_is_immutable_for_tenant_and_root_updates() {
     let mut f = Fixture::new().await;
     let before = Account::find_by_id(&f.db, f.account_a.id)
         .await
         .unwrap()
         .unwrap();
-    let denied = Account::update_in_tenant(
+    let updated_by_tenant = Account::update_in_tenant(
         &f.db,
         f.a_scope(),
         before.id,
         &UpdateAccountRequest {
-            tenant_id: Some(f.b.id),
             ..update_name(&before.name)
         },
         before.upstream_config_version,
         &audit_tenant(f.a_scope(), Some(Uuid::new_v4())),
         tenant_snapshot(&f.db, &f.a, &f.a_admin).await,
     )
-    .await;
-    assert!(denied.is_err());
+    .await
+    .unwrap();
+    assert_eq!(updated_by_tenant.tenant_id, Some(f.a.id));
     assert_eq!(
         Account::find_by_id(&f.db, before.id)
             .await
             .unwrap()
             .unwrap()
             .tenant_id,
-        f.a.id
+        Some(f.a.id)
     );
 
-    let transferred = Account::update_platform(
+    let updated_by_root = Account::update_platform(
         &f.db,
         f.root_scope(),
         before.id,
         &UpdateAccountRequest {
-            tenant_id: Some(f.b.id),
             ..update_name(&before.name)
         },
-        before.upstream_config_version,
+        updated_by_tenant.upstream_config_version,
         &audit_root(f.root_scope(), Some(Uuid::new_v4())),
         root_snapshot(&f.root),
     )
     .await
     .unwrap();
-    assert_eq!(transferred.tenant_id, f.b.id);
+    assert_eq!(updated_by_root.tenant_id, Some(f.a.id));
     f.cleanup().await;
 }
 
 #[tokio::test]
 async fn global_consumption_does_not_grant_foreign_binding_ownership() {
     let mut f = Fixture::new().await;
-    let own = f.create_binding(f.account_a.id, f.a.id, false).await;
-    let foreign_global = f.create_binding(f.account_a.id, f.b.id, true).await;
+    let global_account = Account::create(
+        &f.db,
+        &account_request(None, &format!("platform-account-{}", f.run_id)),
+    )
+    .await
+    .unwrap();
+    let own = f.create_binding(global_account.id, f.a.id, false).await;
+    let foreign_global = f.create_binding(global_account.id, f.b.id, true).await;
 
     assert!(
         keycompute_db::models::passthrough_binding::PassthroughBinding::find_in_tenant(
@@ -456,7 +449,7 @@ async fn global_consumption_does_not_grant_foreign_binding_ownership() {
 }
 
 #[tokio::test]
-async fn actor_credential_and_operator_mismatches_have_no_side_effect() {
+async fn actor_and_credential_mismatches_have_no_side_effect_and_operator_can_read() {
     let mut f = Fixture::new().await;
     let before_name = f.account_a.name.clone();
     let before_audits: i64 = f
@@ -523,7 +516,7 @@ async fn actor_credential_and_operator_mismatches_have_no_side_effect() {
     assert!(
         Account::count_platform(&f.db, operator_scope, &AccountListFilter::default())
             .await
-            .is_err()
+            .is_ok()
     );
 
     let after = Account::find_by_id(&f.db, f.account_a.id)
@@ -660,7 +653,7 @@ async fn pending_settlements_and_audit_failures_roll_back_account_changes() {
     let mut f = Fixture::new().await;
     let pending = Account::create(
         &f.db,
-        &account_request(f.a.id, &format!("pending-{0}", f.run_id), "tenant"),
+        &account_request(Some(f.a.id), &format!("pending-{0}", f.run_id)),
     )
     .await
     .unwrap();
@@ -724,7 +717,7 @@ async fn pending_settlements_and_audit_failures_roll_back_account_changes() {
     .await
     .unwrap();
     let audit = audit_tenant(f.a_scope(), Some(request_id));
-    let audit_account = account_request(f.a.id, &format!("audit-{}", f.run_id), "tenant");
+    let audit_account = account_request(Some(f.a.id), &format!("audit-{}", f.run_id));
     assert!(
         Account::create_in_tenant(
             &tx,
@@ -819,17 +812,16 @@ async fn probe_material_and_binding_counts_follow_the_current_authorized_owner()
     use keycompute_db::models::account::AccountManagementScope;
     let mut f = Fixture::new().await;
     let _own = f.create_binding(f.account_a.id, f.a.id, false).await;
-    let _shared = f.create_binding(f.account_a.id, f.b.id, true).await;
     let own_view = Account::find_in_tenant(&f.db, f.a_scope(), f.account_a.id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(own_view.passthrough_binding_count, 2);
+    assert_eq!(own_view.passthrough_binding_count, 1);
     let platform_view = Account::find_platform(&f.db, f.root_scope(), f.account_a.id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(platform_view.passthrough_binding_count, 2);
+    assert_eq!(platform_view.passthrough_binding_count, 1);
     assert!(
         Account::find_in_tenant(&f.db, f.b_scope(), f.account_a.id)
             .await
@@ -842,7 +834,7 @@ async fn probe_material_and_binding_counts_follow_the_current_authorized_owner()
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(connection.tenant_id, f.a.id);
+    assert_eq!(connection.tenant_id, Some(f.a.id));
     assert_eq!(
         connection.upstream_config_version,
         f.account_a.upstream_config_version
@@ -881,15 +873,14 @@ async fn probe_material_and_binding_counts_follow_the_current_authorized_owner()
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(root_connection.tenant_id, f.a.id);
-    let before_transfer_scope = AccountManagementScope::Tenant(f.b_scope());
-    let before_transfer_snapshot = tenant_snapshot(&f.db, &f.b, &f.b_admin).await;
-    let transferred = Account::update_platform(
+    assert_eq!(root_connection.tenant_id, Some(f.a.id));
+    let owner_scope = AccountManagementScope::Tenant(f.b_scope());
+    let owner_snapshot = tenant_snapshot(&f.db, &f.b, &f.b_admin).await;
+    let updated = Account::update_platform(
         &f.db,
         f.root_scope(),
         f.account_b.id,
         &UpdateAccountRequest {
-            tenant_id: Some(f.a.id),
             ..update_name("probe-owner-moved")
         },
         f.account_b.upstream_config_version,
@@ -898,18 +889,13 @@ async fn probe_material_and_binding_counts_follow_the_current_authorized_owner()
     )
     .await
     .unwrap();
-    assert_eq!(transferred.tenant_id, f.a.id);
+    assert_eq!(updated.tenant_id, Some(f.b.id));
     assert!(
-        Account::load_authorized_probe(
-            &f.db,
-            before_transfer_scope,
-            transferred.id,
-            before_transfer_snapshot
-        )
-        .await
-        .unwrap()
-        .is_none(),
-        "a prior owner cannot read the new owner's connection by ID"
+        Account::load_authorized_probe(&f.db, owner_scope, updated.id, owner_snapshot)
+            .await
+            .unwrap()
+            .is_some(),
+        "updating account settings must not change its owner"
     );
     f.cleanup().await;
 }

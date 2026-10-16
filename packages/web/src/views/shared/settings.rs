@@ -13,7 +13,7 @@ use crate::stores::{
 /// 系统设置页面
 ///
 /// - 普通用户：无此页面入口（个人偏好通过导航栏按钮切换，存 localStorage）
-/// - Platform root：全局平台参数配置（调用 SettingsApi，需平台权限）
+/// - Platform root/operator：全局平台参数配置（调用 SettingsApi，需平台权限）
 #[component]
 pub fn Settings() -> Element {
     let i18n = use_i18n();
@@ -24,9 +24,9 @@ pub fn Settings() -> Element {
         .as_ref()
         .map(|u| u.can_manage_platform())
         .unwrap_or(false);
-    let is_root = current_user
+    let can_manage_system_settings = current_user
         .as_ref()
-        .map(|u| u.has_platform_permission("protected_users:manage"))
+        .map(|u| u.has_platform_permission("system_settings:manage"))
         .unwrap_or(false);
 
     let settings = use_resource(move || async move {
@@ -229,14 +229,14 @@ pub fn Settings() -> Element {
                             div { class: "settings-section-body",
                                 SettingItemToggle {
                                     label: i18n.t("settings.distribution_enabled_label").to_string(),
-                                    description: if is_root {
+                                    description: if can_manage_system_settings {
                                         i18n.t("settings.distribution_enabled_desc").to_string()
                                     } else {
                                         i18n.t("settings.distribution_enabled_system_only_desc").to_string()
                                     },
                                     setting_key: "distribution_enabled",
                                     value: distribution_enabled.clone(),
-                                    editable: is_root,
+                                    editable: can_manage_system_settings,
                                     auth_store,
                                     save_ok,
                                     save_error

@@ -56,16 +56,27 @@ pub(crate) async fn lock_identity_admin(tx: &DatabaseTransaction) -> Result<(), 
 }
 
 impl AuditContext {
-    /// Revalidate current platform authority while the security fence is held.
-    /// A cached role string in the audit metadata is not a privilege grant.
-    pub(crate) async fn require_root(&self, tx: &DatabaseTransaction) -> Result<Self, DbError> {
+    /// Revalidate a root/operator platform administrator. Target-sensitive
+    /// identity code must still keep root and operator lifecycle checks local
+    /// to the same transaction.
+    pub(crate) async fn require_platform_admin(
+        &self,
+        tx: &DatabaseTransaction,
+    ) -> Result<Self, DbError> {
         if self.credential_kind != CredentialKind::Jwt || self.actor_user_id.is_nil() {
-            return Err(DbError::Other("root console authority required".into()));
+            return Err(DbError::Other(
+                "platform administrator console authority required".into(),
+            ));
         }
         let user = super::user::User::find_by_id(tx, self.actor_user_id)
             .await?
-            .filter(|user| user.status == "active" && user.platform_role == "root")
-            .ok_or_else(|| DbError::Other("root console authority required".into()))?;
+            .filter(|user| {
+                user.status == "active"
+                    && matches!(user.platform_role.as_str(), "root" | "operator")
+            })
+            .ok_or_else(|| {
+                DbError::Other("platform administrator console authority required".into())
+            })?;
         Ok(Self {
             actor_platform_role: user.platform_role()?,
             ..*self
@@ -293,12 +304,15 @@ impl TenantAuditEvent {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Self>, DbError> {
-        if scope.platform_role() != PlatformRole::Root {
-            return Err(DbError::Other("root audit access required".into()));
+        if !matches!(
+            scope.platform_role(),
+            PlatformRole::Root | PlatformRole::Operator
+        ) {
+            return Err(DbError::Other("platform audit access required".into()));
         }
         Ok(Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT a.* FROM tenant_audit_events a WHERE EXISTS (SELECT 1 FROM users u WHERE u.id=$1 AND u.status='active' AND u.platform_role='root') ORDER BY a.created_at DESC,a.id DESC LIMIT $2 OFFSET $3",
+            "SELECT a.* FROM tenant_audit_events a WHERE EXISTS (SELECT 1 FROM users u WHERE u.id=$1 AND u.status='active' AND u.platform_role IN ('root','operator')) ORDER BY a.created_at DESC,a.id DESC LIMIT $2 OFFSET $3",
             [scope.user_id().into(), limit.clamp(1, 100).into(), offset.max(0).into()],
         ))
         .all(db)

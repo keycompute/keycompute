@@ -43,11 +43,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             current.platform_role().unwrap(),
-            PlatformRole::Root,
-            "test command needs a real current root"
+            PlatformRole::Operator,
+            "test command needs a real current platform operator"
         );
         FinancialScope::platform_tenant(
-            PlatformScope::checked(actor, PlatformRole::Root).unwrap(),
+            PlatformScope::checked(actor, PlatformRole::Operator).unwrap(),
             FinancialSession {
                 user_id: actor,
                 credential_kind: CredentialKind::Jwt,
@@ -63,15 +63,22 @@ mod tests {
         keycompute_db::AuditContext {
             actor_user_id: actor,
             credential_kind: keycompute_types::CredentialKind::Jwt,
-            actor_platform_role: keycompute_types::PlatformRole::Root,
+            actor_platform_role: keycompute_types::PlatformRole::Operator,
             actor_tenant_role: None,
             request_id: Some(uuid::Uuid::new_v4()),
         }
     }
-    async fn make_fixture_root(pool: &DatabaseConnection, actor: uuid::Uuid) {
+    async fn make_fixture_operator(pool: &DatabaseConnection, actor: uuid::Uuid) {
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
+            "UPDATE tenant_memberships SET status='removed',removed_at=clock_timestamp() WHERE user_id=$1 AND status<>'removed'",
+            [actor.into()],
+        ))
+        .await
+        .unwrap();
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
             [actor.into()],
         ))
         .await
@@ -1541,10 +1548,10 @@ mod tests {
             create_test_user(&pool, tenant.id, "admin-release-replay-target", &test_id).await;
         let administrator =
             create_test_user(&pool, tenant.id, "admin-release-replay-actor", &test_id).await;
-        make_fixture_root(&pool, administrator.id).await;
+        make_fixture_operator(&pool, administrator.id).await;
         let other_administrator =
             create_test_user(&pool, tenant.id, "admin-release-replay-other", &test_id).await;
-        make_fixture_root(&pool, other_administrator.id).await;
+        make_fixture_operator(&pool, other_administrator.id).await;
         let other_user =
             create_test_user(&pool, tenant.id, "admin-release-replay-user", &test_id).await;
         let tenant_id = tenant.id;
@@ -1900,7 +1907,7 @@ mod tests {
         let user = create_test_user(&pool, tenant.id, "admin-release-target", &test_id).await;
         let administrator =
             create_test_user(&pool, tenant.id, "admin-release-actor", &test_id).await;
-        make_fixture_root(&pool, administrator.id).await;
+        make_fixture_operator(&pool, administrator.id).await;
         let other_user = create_test_user(&pool, tenant.id, "admin-release-other", &test_id).await;
         let service = BalanceService::new(DbRouter::single(pool.clone()));
         service
@@ -2578,7 +2585,7 @@ mod tests {
             keycompute_db::Account::create(
                 &pool,
                 &keycompute_db::CreateAccountRequest {
-                    tenant_id: tenant.id,
+                    tenant_id: Some(tenant.id),
                     provider: provider.to_string(),
                     name,
                     endpoint: format!("https://{provider}.invalid/v1"),
@@ -2590,7 +2597,6 @@ mod tests {
                     models_supported: vec![model],
                     api_capabilities: capabilities,
                     pool_enabled: None,
-                    visibility: Some("tenant".to_string()),
                 },
             )
             .await
@@ -2875,7 +2881,7 @@ mod tests {
             .expect("administrator idempotency cleanup should succeed");
         let tenant = create_test_tenant(&pool, "admin-idempotency", &test_id).await;
         let actor = create_test_user(&pool, tenant.id, "admin-idempotency-actor", &test_id).await;
-        make_fixture_root(&pool, actor.id).await;
+        make_fixture_operator(&pool, actor.id).await;
         let recharge_user =
             create_test_user(&pool, tenant.id, "admin-idempotency-recharge", &test_id).await;
         let consume_user =
@@ -3001,7 +3007,7 @@ mod tests {
         let tenant = create_test_tenant(&pool, "admin-conflict", &test_id).await;
         let other_tenant = create_test_tenant(&pool, "admin-conflict-other", &test_id).await;
         let actor = create_test_user(&pool, tenant.id, "admin-conflict-actor", &test_id).await;
-        make_fixture_root(&pool, actor.id).await;
+        make_fixture_operator(&pool, actor.id).await;
         let target = create_test_user(&pool, tenant.id, "admin-conflict-target", &test_id).await;
         let other_target =
             create_test_user(&pool, tenant.id, "admin-conflict-other-target", &test_id).await;
@@ -3014,7 +3020,7 @@ mod tests {
         }
         let other_actor =
             create_test_user(&pool, tenant.id, "admin-conflict-other-actor", &test_id).await;
-        make_fixture_root(&pool, other_actor.id).await;
+        make_fixture_operator(&pool, other_actor.id).await;
         let key = format!("admin-balance-conflict-{}", uuid::Uuid::new_v4());
         let first = service
             .apply_admin_manual_operation(
@@ -3167,7 +3173,7 @@ mod tests {
             .await
             .expect("administrator balance API cleanup should succeed");
         let tenant = create_test_tenant(&pool, "admin-balance-api", &test_id).await;
-        let mut admin = keycompute_db::User::create(
+        let admin = keycompute_db::User::create(
             &pool,
             &keycompute_db::CreateUserRequest {
                 email: format!("test-admin-balance-api-{test_id}@example.com"),
@@ -3183,17 +3189,6 @@ mod tests {
         ))
         .await
         .expect("administrator membership should be created");
-        pool.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
-            [admin.id.into()],
-        ))
-        .await
-        .unwrap();
-        admin = keycompute_db::User::find_by_id(&pool, admin.id)
-            .await
-            .unwrap()
-            .unwrap();
         let target = create_test_user(&pool, tenant.id, "admin-balance-api-target", &test_id).await;
         let service = BalanceService::new(DbRouter::single(pool.clone()));
         service
@@ -3361,7 +3356,7 @@ mod tests {
             .expect("failed administrator operation cleanup should succeed");
         let tenant = create_test_tenant(&pool, "admin-failed-claim", &test_id).await;
         let actor = create_test_user(&pool, tenant.id, "admin-failed-claim-actor", &test_id).await;
-        make_fixture_root(&pool, actor.id).await;
+        make_fixture_operator(&pool, actor.id).await;
         let freeze_user = create_test_user(&pool, tenant.id, "admin-failed-freeze", &test_id).await;
         let consume_user =
             create_test_user(&pool, tenant.id, "admin-failed-consume", &test_id).await;

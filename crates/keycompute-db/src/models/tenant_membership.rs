@@ -115,7 +115,7 @@ impl TenantMembership {
         }
         super::user::User::find_by_id_for_no_key_update(tx, req.user_id)
             .await?
-            .filter(|user| user.status == "active")
+            .filter(|user| user.status == "active" && user.platform_role == "none")
             .ok_or_else(|| DbError::Other("active member identity required".into()))?;
         let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
             "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status,invited_by) VALUES($1,$2,$3,'active',$4) ON CONFLICT (tenant_id,user_id) DO NOTHING RETURNING *",

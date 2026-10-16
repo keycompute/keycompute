@@ -563,7 +563,7 @@ mod tests {
         );
     }
     #[test]
-    fn platform_settings_reject_operator_even_when_it_is_a_tenant_admin() {
+    fn platform_settings_reject_a_platform_identity_with_tenant_authority() {
         use keycompute_types::{AuthorizationSubject, PlatformRole, TenantRole};
         let decision = keycompute_auth::authorize(
             CredentialKind::Jwt,

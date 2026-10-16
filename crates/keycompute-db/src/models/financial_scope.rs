@@ -33,6 +33,7 @@ pub struct FinancialScope {
     session: FinancialSession,
     access: FinancialAccess,
     tenant_id: Option<Uuid>,
+    platform_role: PlatformRole,
 }
 fn denied() -> DbError {
     DbError::Other("financial_authority_invalid".into())
@@ -81,6 +82,7 @@ impl FinancialScope {
                 FinancialAccess::Personal
             },
             tenant_id: Some(m.tenant_id),
+            platform_role: PlatformRole::None,
         })
     }
     pub fn platform_tenant(
@@ -101,13 +103,20 @@ impl FinancialScope {
         session: FinancialSession,
     ) -> Result<Self, DbError> {
         Self::validate_session(session)?;
-        if scope.user_id() != session.user_id || scope.platform_role() != PlatformRole::Root {
+        if scope.user_id() != session.user_id
+            || session.selected.is_some()
+            || !matches!(
+                scope.platform_role(),
+                PlatformRole::Root | PlatformRole::Operator
+            )
+        {
             return Err(denied());
         }
         Ok(Self {
             session,
             access: FinancialAccess::PlatformGlobal,
             tenant_id: None,
+            platform_role: scope.platform_role(),
         })
     }
     pub fn tenant_id(self) -> Result<Uuid, DbError> {
@@ -118,6 +127,9 @@ impl FinancialScope {
     }
     pub fn access(self) -> FinancialAccess {
         self.access
+    }
+    pub fn platform_role(self) -> PlatformRole {
+        self.platform_role
     }
     pub fn require_personal(self) -> Result<(), DbError> {
         if self.access == FinancialAccess::Personal {
@@ -136,15 +148,20 @@ impl FinancialScope {
             Err(denied())
         }
     }
-    pub fn require_root_tenant(self) -> Result<(), DbError> {
+    pub fn require_platform_tenant(self) -> Result<(), DbError> {
         if self.access == FinancialAccess::PlatformTenant {
             Ok(())
         } else {
             Err(denied())
         }
     }
-    pub fn require_root_global(self) -> Result<(), DbError> {
-        if self.access == FinancialAccess::PlatformGlobal {
+    pub fn require_platform_global(self) -> Result<(), DbError> {
+        if self.access == FinancialAccess::PlatformGlobal
+            && matches!(
+                self.platform_role,
+                PlatformRole::Root | PlatformRole::Operator
+            )
+        {
             Ok(())
         } else {
             Err(denied())
@@ -154,12 +171,19 @@ impl FinancialScope {
     // tenant API has a client-controlled missing-tenant/all-rows switch.
     pub(super) fn values(self) -> Vec<Value> {
         let m = self.session.selected;
+        let asserted_role = m.map(|value| value.tenant_role.as_str()).or_else(|| {
+            matches!(
+                self.access,
+                FinancialAccess::PlatformTenant | FinancialAccess::PlatformGlobal
+            )
+            .then_some(self.platform_role.as_str())
+        });
         vec![
             self.session.user_id.into(),
             self.session.token_version.into(),
             self.session.expires_at.into(),
             m.map(|v| v.tenant_id).into(),
-            m.map(|v| v.tenant_role.as_str()).into(),
+            asserted_role.into(),
             m.map(|v| v.tenant_authz_version).into(),
             m.map(|v| v.membership_authz_version).into(),
             self.tenant_id.into(),
@@ -171,7 +195,7 @@ impl FinancialScope {
         ]
     }
     pub(super) fn predicate(self) -> &'static str {
-        "EXISTS(SELECT 1 FROM users financial_actor WHERE financial_actor.id=$1 AND financial_actor.status='active' AND financial_actor.token_version=$2 AND clock_timestamp()<to_timestamp($3::double precision) AND (NOT $9::boolean OR financial_actor.platform_role='root') AND (($4::uuid IS NULL AND $9::boolean) OR EXISTS(SELECT 1 FROM tenant_memberships financial_m JOIN tenants financial_t ON financial_t.id=financial_m.tenant_id WHERE financial_m.user_id=$1 AND financial_m.tenant_id=$4 AND financial_m.status='active' AND financial_m.tenant_role=$5 AND financial_m.authz_version=$7 AND financial_t.status='active' AND financial_t.authz_version=$6)) AND ($8::uuid IS NULL OR EXISTS(SELECT 1 FROM tenants financial_target WHERE financial_target.id=$8 AND ($9::boolean OR financial_target.status='active'))))"
+        "EXISTS(SELECT 1 FROM users financial_actor WHERE financial_actor.id=$1 AND financial_actor.status='active' AND financial_actor.token_version=$2 AND clock_timestamp()<to_timestamp($3::double precision) AND (NOT $9::boolean OR financial_actor.platform_role=$5) AND (($4::uuid IS NULL AND $9::boolean) OR EXISTS(SELECT 1 FROM tenant_memberships financial_m JOIN tenants financial_t ON financial_t.id=financial_m.tenant_id WHERE financial_m.user_id=$1 AND financial_m.tenant_id=$4 AND financial_m.status='active' AND financial_m.tenant_role=$5 AND financial_m.authz_version=$7 AND financial_t.status='active' AND financial_t.authz_version=$6)) AND ($8::uuid IS NULL OR EXISTS(SELECT 1 FROM tenants financial_target WHERE financial_target.id=$8 AND ($9::boolean OR financial_target.status='active'))))"
     }
     pub(super) fn owner_predicate(self, alias: &str) -> String {
         if self.access == FinancialAccess::Personal {
@@ -196,10 +220,14 @@ impl FinancialScope {
             .await?
             .ok_or_else(denied)?;
         let role: String = row.try_get("", "platform_role")?;
+        let role: PlatformRole = role.parse().map_err(DbError::Other)?;
+        if role != self.platform_role {
+            return Err(denied());
+        }
         Ok(AuditContext {
             actor_user_id: self.session.user_id,
             credential_kind: CredentialKind::Jwt,
-            actor_platform_role: role.parse().map_err(DbError::Other)?,
+            actor_platform_role: role,
             actor_tenant_role: self.session.selected.map(|m| m.tenant_role),
             request_id: None,
         })
@@ -210,17 +238,19 @@ impl FinancialScope {
     pub(crate) fn check_expiry(self) -> Result<(), DbError> {
         Self::validate_session(self.session)
     }
-    /// Read-side authority lock for root diagnostic snapshots. This neither
+    /// Read-side authority lock for platform diagnostic snapshots. This neither
     /// increments the administrative fence nor locks business resource rows.
-    pub(super) async fn lock_root_read(
+    pub(super) async fn lock_platform_read(
         self,
         tx: &DatabaseTransaction,
         audit: &AuditContext,
     ) -> Result<AuditContext, DbError> {
-        self.require_root_global()?;
+        self.require_platform_global()?;
         Self::validate_session(self.session)?;
         if audit.actor_user_id != self.session.user_id
             || audit.credential_kind != CredentialKind::Jwt
+            || audit.actor_platform_role != self.platform_role
+            || audit.actor_tenant_role != self.session.selected.map(|value| value.tenant_role)
             || audit.request_id.is_none_or(|id| id.is_nil())
         {
             return Err(denied());
@@ -270,6 +300,8 @@ impl FinancialScope {
         Self::validate_session(self.session)?;
         if audit.actor_user_id != self.session.user_id
             || audit.credential_kind != CredentialKind::Jwt
+            || audit.actor_platform_role != self.platform_role
+            || audit.actor_tenant_role != self.session.selected.map(|value| value.tenant_role)
             || audit.request_id.is_none_or(|id| id.is_nil())
             || tenants.iter().chain(users).any(Uuid::is_nil)
         {

@@ -97,10 +97,15 @@ impl PassthroughBinding {
         let before = Account::find_by_id(txn, account_id)
             .await?
             .ok_or_else(|| DbError::not_found("account", account_id))?;
+        let tenants = before
+            .tenant_id
+            .into_iter()
+            .chain(std::iter::once(tenant_id))
+            .collect::<Vec<_>>();
         txn.query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT id FROM tenants WHERE id=ANY($1::UUID[]) ORDER BY id FOR KEY SHARE",
-            [vec![before.tenant_id, tenant_id].into()],
+            [tenants.into()],
         ))
         .await?;
         let account = Account::find_by_id_for_update(txn, account_id)
@@ -109,9 +114,21 @@ impl PassthroughBinding {
         if before.tenant_id != account.tenant_id {
             return Err(conflict(account_id));
         }
-        let active=txn.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT 1 FROM tenants owner JOIN tenants target ON target.id=$2 WHERE owner.id=$1 AND owner.status='active' AND target.status='active'",
-            [account.tenant_id.into(),tenant_id.into()])).await?.is_some();
+        if account.tenant_id.is_some_and(|owner| owner != tenant_id) {
+            return Err(DbError::Other(
+                "tenant-owned accounts cannot be shared outside their owner tenant".into(),
+            ));
+        }
+        let active = txn
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT 1 FROM tenants target WHERE target.id=$2 AND target.status='active'
+               AND ($1::uuid IS NULL OR EXISTS(
+                 SELECT 1 FROM tenants owner WHERE owner.id=$1 AND owner.status='active'))",
+                [account.tenant_id.into(), tenant_id.into()],
+            ))
+            .await?
+            .is_some();
         let supported = match account.provider.as_str() {
             "openai" => account
                 .api_capabilities
@@ -123,8 +140,6 @@ impl PassthroughBinding {
         if !active || !account.enabled || !supported {
             return Err(DbError::Other("account and tenant must be active and the account must declare a supported native API capability".into()));
         }
-        // An authenticated platform administrator is explicitly granting access;
-        // legacy account visibility is not a prerequisite for the new grant.
         Ok(account)
     }
 
@@ -182,25 +197,23 @@ impl PassthroughBinding {
         }
         Ok(())
     }
-    async fn suppress_legacy_pool(db: &impl ConnectionTrait, account: Uuid) -> Result<(), DbError> {
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-            "UPDATE accounts SET pool_enabled=FALSE,updated_at=GREATEST(updated_at,statement_timestamp())+INTERVAL '1 microsecond' WHERE id=$1 AND pool_enabled",
-            [account.into()])).await?;
-        Ok(())
-    }
     pub async fn create(
         db: &DatabaseConnection,
         req: &CreatePassthroughBindingRequest,
     ) -> Result<Self, DbError> {
         let txn = db.begin().await?;
         lock_configuration(&txn).await?;
-        Self::validate_account(&txn, req.account_id, req.tenant_id).await?;
+        let account = Self::validate_account(&txn, req.account_id, req.tenant_id).await?;
+        if account.tenant_id.is_some() && req.is_global {
+            return Err(DbError::Other(
+                "tenant-owned accounts cannot be globally shared".into(),
+            ));
+        }
         Self::ensure_no_overlap(&txn, req.account_id, req.tenant_id, req.is_global, None).await?;
         let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
             "INSERT INTO passthrough_bindings(account_id,tenant_id,is_global,pool_enabled) VALUES($1,$2,$3,$4) RETURNING *",
             [req.account_id.into(),req.tenant_id.into(),req.is_global.into(),req.pool_enabled.into()])).one(&txn).await?
             .ok_or_else(||DbError::Other("passthrough binding insert returned no row".into()))?;
-        Self::suppress_legacy_pool(&txn, req.account_id).await?;
         txn.commit().await?;
         Ok(row)
     }
@@ -230,7 +243,12 @@ impl PassthroughBinding {
             && (!global || current.is_global)
             && (!pool || current.pool_enabled);
         if !only_restricting {
-            Self::validate_account(&txn, account, tenant).await?;
+            let target = Self::validate_account(&txn, account, tenant).await?;
+            if target.tenant_id.is_some() && global {
+                return Err(DbError::Other(
+                    "tenant-owned accounts cannot be globally shared".into(),
+                ));
+            }
         }
         // Narrowing authority is safe even if out-of-band configuration
         // created a namespace conflict. Never block revocation on repair.
@@ -240,8 +258,6 @@ impl PassthroughBinding {
         let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
             "UPDATE passthrough_bindings SET account_id=$1,tenant_id=$2,is_global=$3,pool_enabled=$4,revision=revision+1,updated_at=GREATEST(updated_at,statement_timestamp())+INTERVAL '1 microsecond' WHERE id=$5 AND revision=$6 RETURNING *",
             [account.into(),tenant.into(),global.into(),pool.into(),self.id.into(),req.expected_revision.into()])).one(&txn).await?.ok_or_else(||conflict(self.id))?;
-        Self::suppress_legacy_pool(&txn, current.account_id).await?;
-        Self::suppress_legacy_pool(&txn, account).await?;
         txn.commit().await?;
         Ok(row)
     }
@@ -258,7 +274,6 @@ impl PassthroughBinding {
         if current.revision != expected_revision {
             return Err(conflict(self.id));
         }
-        Self::suppress_legacy_pool(&txn, current.account_id).await?;
         let n = txn
             .execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,

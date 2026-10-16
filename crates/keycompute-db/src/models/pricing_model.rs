@@ -496,7 +496,7 @@ impl PricingModel {
         }
         Self::list_target(
             db,
-            "JOIN users actor ON actor.id=$1 AND actor.status='active' AND actor.platform_role='root' AND actor.token_version=$2",
+            "JOIN users actor ON actor.id=$1 AND actor.status='active' AND actor.platform_role IN ('root','operator') AND actor.token_version=$2",
             vec![scope.actor_user_id().into(), scope.token_version().into()],
             target,
             search,
@@ -518,7 +518,7 @@ impl PricingModel {
         }
         Self::count_target(
             db,
-            "JOIN users actor ON actor.id=$1 AND actor.status='active' AND actor.platform_role='root' AND actor.token_version=$2",
+            "JOIN users actor ON actor.id=$1 AND actor.status='active' AND actor.platform_role IN ('root','operator') AND actor.token_version=$2",
             vec![scope.actor_user_id().into(), scope.token_version().into()],
             target,
             search,
@@ -538,7 +538,7 @@ impl PricingModel {
         }
         Self::detail_target(
             db,
-            "JOIN users actor ON actor.id=$1 AND actor.status='active' AND actor.platform_role='root' AND actor.token_version=$2",
+            "JOIN users actor ON actor.id=$1 AND actor.status='active' AND actor.platform_role IN ('root','operator') AND actor.token_version=$2",
             vec![scope.actor_user_id().into(), scope.token_version().into()],
             target,
             id,
@@ -561,7 +561,7 @@ impl PricingModel {
         }
         let row = TargetRow::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT p.scope_type,p.tenant_id FROM pricing_models p JOIN users actor ON actor.id=$1 AND actor.status='active' AND actor.platform_role='root' AND actor.token_version=$2 WHERE p.id=$3",
+            "SELECT p.scope_type,p.tenant_id FROM pricing_models p JOIN users actor ON actor.id=$1 AND actor.status='active' AND actor.platform_role IN ('root','operator') AND actor.token_version=$2 WHERE p.id=$3",
             [scope.actor_user_id().into(), scope.token_version().into(), id.into()],
         ))
         .one(db)

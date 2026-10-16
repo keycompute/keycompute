@@ -53,9 +53,16 @@ impl Fixture {
         let user = create_test_user(&db, tenant, "settings-user", "isolated")
             .await
             .id;
-        let operator = create_test_user(&db, tenant, "settings-operator", "isolated")
-            .await
-            .id;
+        let operator = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: "monitoring-operator@fixture.invalid".into(),
+                name: Some("monitoring-operator".into()),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
@@ -135,6 +142,37 @@ impl Fixture {
             .get_jwt_validator()
             .unwrap()
             .generate_identity_token(id, tenant, user.token_version, tv, mv, seconds)
+            .unwrap()
+    }
+
+    async fn tenant_token(
+        &self,
+        state: &AppState,
+        id: Uuid,
+        tenant_id: Uuid,
+        seconds: i64,
+    ) -> String {
+        let user = User::find_by_id(&self.db, id).await.unwrap().unwrap();
+        let tenant = keycompute_db::Tenant::find_by_id(&self.db, tenant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let membership = keycompute_db::TenantMembership::find(&self.db, tenant_id, id)
+            .await
+            .unwrap()
+            .unwrap();
+        state
+            .auth
+            .get_jwt_validator()
+            .unwrap()
+            .generate_identity_token(
+                id,
+                Some(tenant_id),
+                user.token_version,
+                Some(tenant.authz_version),
+                Some(membership.authz_version),
+                seconds,
+            )
             .unwrap()
     }
 }
@@ -270,11 +308,11 @@ async fn trace(f: &Fixture, tenant: Uuid, owner: Uuid, model: &str, currency: &s
     id
 }
 #[tokio::test]
-async fn bare_monitoring_handlers_require_root_not_tenant_operator_or_inference_credentials() {
+async fn bare_monitoring_handlers_allow_platform_roles_not_tenants_or_inference_credentials() {
     isolated(|f|async move {
         let state=f.state();let app=bare(state.clone());
         let admin=f.token(&state,f.admin,true,3600).await;let member=f.token(&state,f.user,true,3600).await;let op=f.token(&state,f.operator,false,3600).await;
-        for token in [&admin,&member,&op,&f.key] {
+        for token in [&admin,&member,&f.key] {
             for path in ["/overview".to_owned(),"/requests".into(),format!("/requests/{}",Uuid::new_v4()),"/summary".into(),"/targets".into()] {
                 let response=call(app.clone(),"GET",&path,token,Value::Null).await;
                 assert_eq!(response.0,StatusCode::FORBIDDEN,"{path}: {}",response.1);
@@ -286,6 +324,8 @@ async fn bare_monitoring_handlers_require_root_not_tenant_operator_or_inference_
         assert_eq!(row.try_get::<i64>("","n").unwrap(),0);
         let root=f.token(&state,f.root,false,3600).await;
         assert_eq!(call(app,"GET","/overview",&root,Value::Null).await.0,StatusCode::OK);
+        let app=bare(state);
+        assert_eq!(call(app,"GET","/overview",&op,Value::Null).await.0,StatusCode::OK);
     }).await;
 }
 #[tokio::test]
@@ -470,7 +510,7 @@ async fn wait_exact_lock(db: &DatabaseConnection, pid: i32, relation: &str) {
     }).await.expect("exact monitoring backend must reach the lock");
 }
 #[tokio::test]
-async fn a_root_role_change_committed_while_read_lock_waits_cannot_release_a_stale_snapshot() {
+async fn a_platform_token_change_committed_while_read_lock_waits_cannot_release_a_stale_snapshot() {
     isolated(|f| async move {
         let single = single_connection(&f).await;
         let pid: i32 = single
@@ -498,14 +538,7 @@ async fn a_root_role_change_committed_while_read_lock_waits_cannot_release_a_sta
         wait_exact_lock(&f.db, pid, "users").await;
         hold.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
-            [f.admin.into()],
-        ))
-        .await
-        .unwrap();
-        hold.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            "UPDATE users SET token_version=token_version+1 WHERE id=$1",
             [f.root.into()],
         ))
         .await
@@ -653,6 +686,40 @@ async fn probe_server(f: &Fixture, revoke: bool) -> ProbeServer {
         task,
     }
 }
+async fn create_probe_account_at(
+    state: &AppState,
+    server: &ProbeServer,
+    dual: bool,
+    token: &str,
+    path: &str,
+    name: &str,
+) -> Uuid {
+    let result = call(
+        create_router(state.clone()),
+        "POST",
+        path,
+        token,
+        json!({
+            "name": name,
+            "provider": "openai",
+            "api_key": "PROBE_SECRET_NOT_FOR_CLIENTS",
+            "api_base": server.url,
+            "models": ["probe-model"],
+            "api_capabilities": if dual {
+                vec!["chat_completions", "responses"]
+            } else {
+                vec!["chat_completions"]
+            },
+            "rpm_limit": 100,
+            "tpm_limit": 100000,
+            "priority": 1,
+            "pool_enabled": true,
+        }),
+    )
+    .await;
+    ok(result)["id"].as_str().unwrap().parse().unwrap()
+}
+
 async fn create_probe_account(
     f: &Fixture,
     state: &AppState,
@@ -660,12 +727,35 @@ async fn create_probe_account(
     dual: bool,
 ) -> Uuid {
     let token = f.token(state, f.root, false, 3600).await;
-    let result=call(create_router(state.clone()),"POST","/api/v1/accounts",&token,json!({
-        "tenant_id":f.tenant,"name":"isolated probe","provider":"openai","api_key":"PROBE_SECRET_NOT_FOR_CLIENTS",
-        "api_base":server.url,"models":["probe-model"],"api_capabilities":if dual {vec!["chat_completions","responses"]} else {vec!["chat_completions"]},
-        "rpm_limit":100,"tpm_limit":100000,"priority":1,"pool_enabled":true,
-    })).await;
-    ok(result)["id"].as_str().unwrap().parse().unwrap()
+    create_probe_account_at(
+        state,
+        server,
+        dual,
+        &token,
+        "/api/v1/platform/accounts",
+        "isolated platform probe",
+    )
+    .await
+}
+
+async fn create_tenant_probe_account(
+    f: &Fixture,
+    state: &AppState,
+    server: &ProbeServer,
+    tenant_id: Uuid,
+    admin_id: Uuid,
+    name: &str,
+) -> Uuid {
+    let token = f.tenant_token(state, admin_id, tenant_id, 3600).await;
+    create_probe_account_at(
+        state,
+        server,
+        false,
+        &token,
+        &format!("/api/v1/tenants/{tenant_id}/accounts"),
+        name,
+    )
+    .await
 }
 #[tokio::test]
 async fn batch_probe_revalidates_original_session_between_physical_capability_requests() {
@@ -732,39 +822,190 @@ async fn probe_intent_audit_failure_prevents_network_and_repeated_ids_probe_once
 
 #[tokio::test]
 async fn target_health_filter_uses_resource_owner_tenant_instead_of_returning_every_tenant() {
-    isolated(|f|async move {
-        let state=f.state();let server=probe_server(&f,false).await;
-        let own=create_probe_account(&f,&state,&server,false).await;
-        let other=create_test_tenant(&f.db,"health-foreign","monitoring").await;
-        let token=f.token(&state,f.root,false,3600).await;let app=create_router(state);
-        let foreign=ok(call(app.clone(),"POST","/api/v1/accounts",&token,json!({"tenant_id":other.id,"name":"foreign provider","provider":"openai","api_key":"foreign-secret","api_base":server.url,"models":["probe-model"],"api_capabilities":["chat_completions"],"rpm_limit":60,"tpm_limit":100000})).await)["id"].as_str().unwrap().to_owned();
-        let own_page=ok(call(app.clone(),"GET",&format!("/api/v1/platform/monitoring/targets/health?tenant_id={}",f.tenant),&token,Value::Null).await);
-        assert_eq!(own_page["providers"].as_array().unwrap().len(),1);assert_eq!(own_page["providers"][0]["id"],own.to_string());assert!(!own_page.to_string().contains(&foreign));
-        let all=ok(call(app.clone(),"GET","/api/v1/platform/monitoring/targets/health",&token,Value::Null).await);assert_eq!(all["providers"].as_array().unwrap().len(),2);
-        assert_eq!(call(app,"GET","/api/v1/platform/monitoring/targets/health?tenant_id=00000000-0000-0000-0000-000000000000",&token,Value::Null).await.0,StatusCode::BAD_REQUEST);
-    }).await;
+    isolated(|f| async move {
+        let state = f.state();
+        let server = probe_server(&f, false).await;
+        let own = create_tenant_probe_account(
+            &f,
+            &state,
+            &server,
+            f.tenant,
+            f.admin,
+            "own tenant provider",
+        )
+        .await;
+        let other = create_test_tenant(&f.db, "health-foreign", "monitoring").await;
+        let other_admin = create_test_user(
+            &f.db,
+            other.id,
+            "health-foreign-admin",
+            "monitoring",
+        )
+        .await;
+        f.db
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
+                [other.id.into(), other_admin.id.into()],
+            ))
+            .await
+            .unwrap();
+        let foreign = create_tenant_probe_account(
+            &f,
+            &state,
+            &server,
+            other.id,
+            other_admin.id,
+            "foreign tenant provider",
+        )
+        .await;
+        let token = f.token(&state, f.root, false, 3600).await;
+        let app = create_router(state);
+        let own_page = ok(call(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/platform/monitoring/targets/health?tenant_id={}",
+                f.tenant
+            ),
+            &token,
+            Value::Null,
+        )
+        .await);
+        assert_eq!(own_page["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(own_page["providers"][0]["id"], own.to_string());
+        assert!(!own_page.to_string().contains(&foreign.to_string()));
+        let all = ok(call(
+            app.clone(),
+            "GET",
+            "/api/v1/platform/monitoring/targets/health",
+            &token,
+            Value::Null,
+        )
+        .await);
+        assert_eq!(all["providers"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            call(
+                app,
+                "GET",
+                "/api/v1/platform/monitoring/targets/health?tenant_id=00000000-0000-0000-0000-000000000000",
+                &token,
+                Value::Null,
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn console_probe_material_checks_selected_tenant_owner_and_current_config_without_shared_secret_grants()
  {
-    isolated(|f|async move {
+    isolated(|f| async move {
         use keycompute_db::models::financial_scope::FinancialMembership;
-        let state=f.state();let server=probe_server(&f,false).await;let id=create_probe_account(&f,&state,&server,false).await;
-        let tenant=keycompute_db::Tenant::find_by_id(&f.db,f.tenant).await.unwrap().unwrap();
-        let member=keycompute_db::TenantMembership::find(&f.db,f.tenant,f.admin).await.unwrap().unwrap();
-        let user=User::find_by_id(&f.db,f.admin).await.unwrap().unwrap();
-        let selected=FinancialSession{user_id:f.admin,credential_kind:CredentialKind::Jwt,token_version:user.token_version,expires_at:Utc::now().timestamp()+3600,selected:Some(FinancialMembership{tenant_id:f.tenant,tenant_role:keycompute_types::TenantRole::Admin,tenant_authz_version:tenant.authz_version,membership_authz_version:member.authz_version})};
-        let scope=FinancialScope::tenant_admin(keycompute_types::TenantScope::checked(f.tenant,f.admin,keycompute_types::TenantRole::Admin).unwrap(),selected).unwrap();
-        let own=keycompute_db::Account::load_console_probe(&f.db,scope,id).await.unwrap().unwrap();
-        assert!(keycompute_db::Account::console_probe_is_current(&f.db,scope,&own,false).await.unwrap());
-        let other=create_test_tenant(&f.db,"foreign-probe-owner","monitoring").await;
-        let token=f.token(&state,f.root,false,3600).await;
-        let other_id:Uuid=ok(call(create_router(state),"POST","/api/v1/accounts",&token,json!({"tenant_id":other.id,"name":"shared but not owned","provider":"openai","api_key":"secret","api_base":server.url,"models":["probe-model"],"api_capabilities":["chat_completions"],"visibility":"global","rpm_limit":60,"tpm_limit":100000})).await)["id"].as_str().unwrap().parse().unwrap();
-        assert!(keycompute_db::Account::load_console_probe(&f.db,scope,other_id).await.unwrap().is_none());
-        f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"UPDATE accounts SET endpoint='http://127.0.0.1:1/v1' WHERE id=$1",[id.into()])).await.unwrap();
-        assert!(!keycompute_db::Account::console_probe_is_current(&f.db,scope,&own,false).await.unwrap());
-        f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"UPDATE tenant_memberships SET status='suspended' WHERE tenant_id=$1 AND user_id=$2",[f.tenant.into(),f.admin.into()])).await.unwrap();
-        assert!(keycompute_db::Account::load_console_probe(&f.db,scope,id).await.unwrap().is_none());
-    }).await;
+        let state = f.state();
+        let server = probe_server(&f, false).await;
+        let id = create_tenant_probe_account(
+            &f,
+            &state,
+            &server,
+            f.tenant,
+            f.admin,
+            "owned probe material",
+        )
+        .await;
+        let tenant = keycompute_db::Tenant::find_by_id(&f.db, f.tenant)
+            .await
+            .unwrap()
+            .unwrap();
+        let member = keycompute_db::TenantMembership::find(&f.db, f.tenant, f.admin)
+            .await
+            .unwrap()
+            .unwrap();
+        let user = User::find_by_id(&f.db, f.admin).await.unwrap().unwrap();
+        let selected = FinancialSession {
+            user_id: f.admin,
+            credential_kind: CredentialKind::Jwt,
+            token_version: user.token_version,
+            expires_at: Utc::now().timestamp() + 3600,
+            selected: Some(FinancialMembership {
+                tenant_id: f.tenant,
+                tenant_role: keycompute_types::TenantRole::Admin,
+                tenant_authz_version: tenant.authz_version,
+                membership_authz_version: member.authz_version,
+            }),
+        };
+        let scope = FinancialScope::tenant_admin(
+            keycompute_types::TenantScope::checked(
+                f.tenant,
+                f.admin,
+                keycompute_types::TenantRole::Admin,
+            )
+            .unwrap(),
+            selected,
+        )
+        .unwrap();
+        let own = keycompute_db::Account::load_console_probe(&f.db, scope, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            keycompute_db::Account::console_probe_is_current(&f.db, scope, &own, false)
+                .await
+                .unwrap()
+        );
+        let other = create_test_tenant(&f.db, "foreign-probe-owner", "monitoring").await;
+        let other_admin =
+            create_test_user(&f.db, other.id, "foreign-probe-admin", "monitoring").await;
+        f.db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
+            [other.id.into(), other_admin.id.into()],
+        ))
+        .await
+        .unwrap();
+        let other_id = create_tenant_probe_account(
+            &f,
+            &state,
+            &server,
+            other.id,
+            other_admin.id,
+            "foreign probe material",
+        )
+        .await;
+        assert!(
+            keycompute_db::Account::load_console_probe(&f.db, scope, other_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        f.db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE accounts SET endpoint='http://127.0.0.1:1/v1' WHERE id=$1",
+            [id.into()],
+        ))
+        .await
+        .unwrap();
+        assert!(
+            !keycompute_db::Account::console_probe_is_current(&f.db, scope, &own, false)
+                .await
+                .unwrap()
+        );
+        f.db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE tenant_memberships SET status='suspended' WHERE tenant_id=$1 AND user_id=$2",
+            [f.tenant.into(), f.admin.into()],
+        ))
+        .await
+        .unwrap();
+        assert!(
+            keycompute_db::Account::load_console_probe(&f.db, scope, id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    })
+    .await;
 }

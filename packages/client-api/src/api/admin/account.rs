@@ -94,8 +94,8 @@ impl AccountQueryParams {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccountInfo {
     pub id: String,
-    /// 所属租户 ID
-    pub tenant_id: String,
+    /// 所属租户 ID；None 表示平台共享账号。
+    pub tenant_id: Option<String>,
     /// 所属租户是否处于活跃状态
     #[serde(default = "default_tenant_active")]
     pub tenant_active: bool,
@@ -134,7 +134,7 @@ pub struct AccountInfo {
     #[serde(default)]
     pub last_probe_error_code: Option<String>,
     pub priority: i32,
-    /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
+    /// 由 tenant_id 推导的只读范围：tenant 或 global。
     pub visibility: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
@@ -247,7 +247,6 @@ impl CreateAccountRequest {
 /// 更新账号请求
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UpdateAccountRequest {
-    pub tenant_id: Option<String>,
     pub name: Option<String>,
     pub api_key: Option<String>,
     pub api_base: Option<String>,
@@ -261,8 +260,6 @@ pub struct UpdateAccountRequest {
     pub tpm_limit: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
-    /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
-    pub visibility: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_enabled: Option<bool>,
 }
@@ -270,11 +267,6 @@ pub struct UpdateAccountRequest {
 impl UpdateAccountRequest {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
-        self.tenant_id = Some(tenant_id.into());
-        self
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -314,11 +306,6 @@ impl UpdateAccountRequest {
 
     pub fn with_tpm_limit(mut self, tpm_limit: i32) -> Self {
         self.tpm_limit = Some(tpm_limit);
-        self
-    }
-
-    pub fn with_visibility(mut self, visibility: impl Into<String>) -> Self {
-        self.visibility = Some(visibility.into());
         self
     }
 
@@ -466,5 +453,30 @@ mod tests {
         assert_eq!(account.tpm_limit, 100_000);
         assert!(!account.pool_enabled);
         assert_eq!(account.passthrough_binding_count, 0);
+    }
+
+    #[test]
+    fn platform_account_deserializes_without_a_tenant() {
+        let value = serde_json::json!({
+            "id": "account_platform",
+            "tenant_id": null,
+            "name": "Local Ollama",
+            "provider": "openai",
+            "api_key_preview": "olla...",
+            "api_base": "http://ollama:11434/v1",
+            "models": ["gemma3:270m"],
+            "api_capabilities": ["chat_completions"],
+            "rpm_limit": 60,
+            "current_rpm": 0,
+            "is_active": true,
+            "is_healthy": true,
+            "priority": 0,
+            "visibility": "global",
+            "created_at": "2024-01-01T00:00:00Z",
+            "last_used_at": null
+        });
+        let account: AccountInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(account.tenant_id, None);
+        assert_eq!(account.visibility, "global");
     }
 }

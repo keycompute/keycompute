@@ -1,7 +1,7 @@
 //! Explicit management scopes for account-to-tenant bindings.
 //!
 //! A binding is not an ownership transfer. Tenant administrators can manage
-//! only bindings for accounts owned by their tenant; root can create and
+//! only bindings for accounts owned by their tenant; platform admins can create and
 //! revoke foreign/global grants, which remain consumption-only for consumers.
 
 use super::super::{
@@ -109,7 +109,14 @@ fn management_scope(scope: AccountManagementScope) -> Scope {
 fn validate_read(scope: Scope) -> Result<(), DbError> {
     match scope {
         Scope::Tenant(scope) if scope.tenant_role() == TenantRole::Admin => Ok(()),
-        Scope::Platform(scope) if scope.platform_role() == PlatformRole::Root => Ok(()),
+        Scope::Platform(scope)
+            if matches!(
+                scope.platform_role(),
+                PlatformRole::Root | PlatformRole::Operator
+            ) =>
+        {
+            Ok(())
+        }
         _ => Err(denied()),
     }
 }
@@ -123,8 +130,10 @@ fn validate_audit(scope: Scope, audit: &AuditContext) -> Result<(), DbError> {
             if scope.tenant_role() == TenantRole::Admin
                 && scope.user_id() == audit.actor_user_id => {}
         Scope::Platform(scope)
-            if scope.platform_role() == PlatformRole::Root
-                && scope.user_id() == audit.actor_user_id => {}
+            if matches!(
+                scope.platform_role(),
+                PlatformRole::Root | PlatformRole::Operator
+            ) && scope.user_id() == audit.actor_user_id => {}
         _ => return Err(denied()),
     }
     Ok(())
@@ -151,12 +160,12 @@ const VIEW_COLUMNS: &str = r#"
     CASE WHEN a.enabled
               AND ((a.provider='openai' AND a.api_capabilities && ARRAY['chat_completions','responses']::TEXT[])
                 OR (a.provider='anthropic' AND 'messages'=ANY(a.api_capabilities)))
-              AND owner.status='active' AND t.status='active'
+              AND COALESCE(owner.status='active',TRUE) AND t.status='active'
          THEN a.health_status ELSE 'unavailable' END AS health_status,
     CASE WHEN a.enabled
               AND ((a.provider='openai' AND a.api_capabilities && ARRAY['chat_completions','responses']::TEXT[])
                 OR (a.provider='anthropic' AND 'messages'=ANY(a.api_capabilities)))
-              AND owner.status='active' AND t.status='active'
+              AND COALESCE(owner.status='active',TRUE) AND t.status='active'
          THEN a.health_reason ELSE 'inactive_owner_or_binding_tenant' END AS health_reason_code,
     pb.created_at,pb.updated_at
 "#;
@@ -184,7 +193,8 @@ fn query(
             filter.tenant_id,
             "($1::uuid IS NULL OR pb.tenant_id=$1) AND EXISTS(
                 SELECT 1 FROM users actor
-                WHERE actor.id=$2 AND actor.platform_role='root' AND actor.status='active'
+                WHERE actor.id=$2 AND actor.platform_role IN ('root','operator')
+                  AND actor.status='active'
             )",
         ),
     };
@@ -204,7 +214,7 @@ fn query(
          FROM passthrough_bindings pb
          JOIN accounts a ON a.id=pb.account_id
          JOIN tenants t ON t.id=pb.tenant_id
-         JOIN tenants owner ON owner.id=a.tenant_id
+         LEFT JOIN tenants owner ON owner.id=a.tenant_id
          WHERE {authority}
            AND ($3::uuid IS NULL OR pb.id=$3)
            AND ($4::text IS NULL OR a.name ILIKE '%'||$4||'%' ESCAPE '\\'
@@ -320,13 +330,12 @@ async fn lock_authority(
     }
     let platform_role = role.parse().map_err(DbError::Other)?;
     let tenant_role = match scope {
-        Scope::Platform(_) if platform_role == PlatformRole::Root => None,
-        Scope::Tenant(scope)
-            if matches!(
-                platform_role,
-                PlatformRole::None | PlatformRole::Operator | PlatformRole::Root
-            ) =>
+        Scope::Platform(_)
+            if matches!(platform_role, PlatformRole::Root | PlatformRole::Operator) =>
         {
+            None
+        }
+        Scope::Tenant(scope) if platform_role == PlatformRole::None => {
             let member = tx
                 .query_one(Statement::from_sql_and_values(
                     DbBackend::Postgres,
@@ -417,7 +426,7 @@ async fn audit(
 struct BindingMetadata {
     account_id: Uuid,
     binding_tenant_id: Uuid,
-    owner_tenant_id: Uuid,
+    owner_tenant_id: Option<Uuid>,
     revision: i64,
 }
 
@@ -452,7 +461,8 @@ async fn authorized_binding_metadata(
              WHERE pb.id=$1
                AND EXISTS(
                    SELECT 1 FROM users u
-                   WHERE u.id=$2 AND u.platform_role='root' AND u.status='active'
+                   WHERE u.id=$2 AND u.platform_role IN ('root','operator')
+                     AND u.status='active'
                )",
             vec![id.into(), scope.user_id().into()],
         ),
@@ -471,7 +481,7 @@ async fn authorized_account_owner(
     tx: &DatabaseTransaction,
     scope: Scope,
     account_id: Uuid,
-) -> Result<Uuid, DbError> {
+) -> Result<Option<Uuid>, DbError> {
     let (sql, values) = match scope {
         Scope::Tenant(scope) => (
             "SELECT a.tenant_id
@@ -497,7 +507,8 @@ async fn authorized_account_owner(
              WHERE a.id=$1
                AND EXISTS(
                    SELECT 1 FROM users u
-                   WHERE u.id=$2 AND u.platform_role='root' AND u.status='active'
+                   WHERE u.id=$2 AND u.platform_role IN ('root','operator')
+                     AND u.status='active'
                )",
             vec![account_id.into(), scope.user_id().into()],
         ),
@@ -532,13 +543,20 @@ async fn binding_for_update(
 fn check_tenant_owner(
     scope: Scope,
     binding_tenant: Uuid,
-    owner_tenant: Uuid,
+    owner_tenant: Option<Uuid>,
     is_global: bool,
 ) -> Result<(), DbError> {
     if let Some(tenant) = tenant_scope(scope)
-        && (tenant != binding_tenant || tenant != owner_tenant || is_global)
+        && (tenant != binding_tenant || Some(tenant) != owner_tenant || is_global)
     {
         return Err(denied());
+    }
+    if let Some(owner_tenant) = owner_tenant
+        && (owner_tenant != binding_tenant || is_global)
+    {
+        return Err(DbError::Other(
+            "tenant-owned accounts cannot be shared outside their owner tenant".into(),
+        ));
     }
     Ok(())
 }
@@ -565,8 +583,11 @@ async fn validate_target(
     let active = tx
         .query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT 1 FROM tenants owner JOIN tenants target ON target.id=$2
-             WHERE owner.id=$1 AND owner.status='active' AND target.status='active'",
+            "SELECT 1 FROM tenants target
+             WHERE target.id=$2 AND target.status='active'
+               AND ($1::uuid IS NULL OR EXISTS(
+                 SELECT 1 FROM tenants owner
+                 WHERE owner.id=$1 AND owner.status='active'))",
             [account.tenant_id.into(), binding_tenant.into()],
         ))
         .await?
@@ -611,18 +632,6 @@ async fn ensure_no_overlap(
     if conflict {
         return Err(DbError::Other("passthrough_binding_ambiguous".into()));
     }
-    Ok(())
-}
-
-async fn suppress_pool(db: &impl ConnectionTrait, account_id: Uuid) -> Result<(), DbError> {
-    db.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE accounts SET pool_enabled=FALSE,
-         updated_at=GREATEST(updated_at,statement_timestamp())+INTERVAL '1 microsecond'
-         WHERE id=$1",
-        [account_id.into()],
-    ))
-    .await?;
     Ok(())
 }
 
@@ -836,17 +845,15 @@ impl PassthroughBinding {
         let tx = begin(db).await?;
         let result = async {
             let metadata = authorized_binding_metadata(&tx, scope, id).await?;
-            let audit_ctx = lock_authority(
-                &tx,
-                scope,
-                &[metadata.binding_tenant_id, metadata.owner_tenant_id],
-                audit_ctx,
-                snapshot,
-            )
-            .await?;
+            let tenants = [Some(metadata.binding_tenant_id), metadata.owner_tenant_id]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            let audit_ctx = lock_authority(&tx, scope, &tenants, audit_ctx, snapshot).await?;
             let account = Account::find_by_statement(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT * FROM accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",
+                "SELECT * FROM accounts
+                 WHERE id=$1 AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE",
                 [metadata.account_id.into(), metadata.owner_tenant_id.into()],
             ))
             .one(&tx)
@@ -935,18 +942,18 @@ impl PassthroughBinding {
         let tx = begin(db).await?;
         let result = async {
             let metadata = authorized_binding_metadata(&tx, scope, binding.id).await?;
-            let audit_ctx =
-                lock_authority(
-                    &tx,
-                    scope,
-                    &[metadata.binding_tenant_id, metadata.owner_tenant_id],
-                    audit_ctx,
-                    snapshot,
-                )
-                    .await?;
+            let tenants = [
+                Some(metadata.binding_tenant_id),
+                metadata.owner_tenant_id,
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            let audit_ctx = lock_authority(&tx, scope, &tenants, audit_ctx, snapshot).await?;
             let account = Account::find_by_statement(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT * FROM accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",
+                "SELECT * FROM accounts
+                 WHERE id=$1 AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE",
                 [metadata.account_id.into(), metadata.owner_tenant_id.into()],
             ))
             .one(&tx)
@@ -980,10 +987,11 @@ impl PassthroughBinding {
             let active_tenants = tx
                 .query_one(Statement::from_sql_and_values(
                     DbBackend::Postgres,
-                    "SELECT 1 FROM tenants owner
-                     JOIN tenants target ON target.id=$2
-                     WHERE owner.id=$1
-                       AND owner.status='active' AND target.status='active'",
+                    "SELECT 1 FROM tenants target
+                     WHERE target.id=$2 AND target.status='active'
+                       AND ($1::uuid IS NULL OR EXISTS(
+                         SELECT 1 FROM tenants owner
+                         WHERE owner.id=$1 AND owner.status='active'))",
                     [account.tenant_id.into(), current.tenant_id.into()],
                 ))
                 .await?
@@ -1036,7 +1044,7 @@ async fn create_scoped(
     }
     if matches!(scope, Scope::Tenant(_)) && req.is_global {
         return Err(DbError::Other(
-            "global passthrough grants require root platform authorization".into(),
+            "global passthrough grants require platform authorization".into(),
         ));
     }
     if let Scope::Tenant(scope) = scope
@@ -1047,24 +1055,21 @@ async fn create_scoped(
     let tx = begin(db).await?;
     let result = async {
         let owner_tenant = authorized_account_owner(&tx, scope, req.account_id).await?;
-        let audit_ctx =
-            lock_authority(
-                &tx,
-                scope,
-                &[owner_tenant, req.tenant_id],
-                audit_ctx,
-                snapshot,
-            )
-            .await?;
+        let tenants = [owner_tenant, Some(req.tenant_id)]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let audit_ctx = lock_authority(&tx, scope, &tenants, audit_ctx, snapshot).await?;
         let account = Account::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",
+            "SELECT * FROM accounts
+             WHERE id=$1 AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE",
             [req.account_id.into(), owner_tenant.into()],
         ))
         .one(&tx)
         .await?
         .ok_or_else(|| DbError::not_found("account", req.account_id))?;
-        let account = validate_target(
+        validate_target(
             &tx,
             scope,
             account,
@@ -1087,7 +1092,6 @@ async fn create_scoped(
         .one(&tx)
         .await?
         .ok_or_else(|| DbError::Other("passthrough binding insert returned no row".into()))?;
-        suppress_pool(&tx, account.id).await?;
         audit(
             &tx,
             scope,
@@ -1129,7 +1133,7 @@ async fn update_scoped(
     }
     if matches!(scope, Scope::Tenant(_)) && req.is_global == Some(true) {
         return Err(DbError::Other(
-            "global passthrough grants require root platform authorization".into(),
+            "global passthrough grants require platform authorization".into(),
         ));
     }
     let tx = begin(db).await?;
@@ -1146,15 +1150,19 @@ async fn update_scoped(
             return Err(denied());
         }
         let requested_owner = authorized_account_owner(&tx, scope, requested_account).await?;
+        let tenants = [
+            metadata.owner_tenant_id,
+            Some(metadata.binding_tenant_id),
+            requested_owner,
+            Some(requested_tenant),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
         let audit_ctx = lock_authority(
             &tx,
             scope,
-            &[
-                metadata.owner_tenant_id,
-                metadata.binding_tenant_id,
-                requested_owner,
-                requested_tenant,
-            ],
+            &tenants,
             audit_ctx,
             snapshot,
         )
@@ -1170,7 +1178,8 @@ async fn update_scoped(
             };
             Account::find_by_statement(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT * FROM accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",
+                "SELECT * FROM accounts
+                 WHERE id=$1 AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE",
                 [account_id.into(), owner_tenant.into()],
             ))
             .one(&tx)
@@ -1192,7 +1201,8 @@ async fn update_scoped(
         }
         let current_account = Account::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",
+            "SELECT * FROM accounts
+             WHERE id=$1 AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE",
             [current.account_id.into(), metadata.owner_tenant_id.into()],
         ))
         .one(&tx)
@@ -1207,7 +1217,8 @@ async fn update_scoped(
         } else {
             Account::find_by_statement(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT * FROM accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",
+                "SELECT * FROM accounts
+                 WHERE id=$1 AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE",
                 [requested_account.into(), requested_owner.into()],
             ))
             .one(&tx)
@@ -1274,8 +1285,6 @@ async fn update_scoped(
             entity: "passthrough binding".into(),
             id: id.to_string(),
         })?;
-        suppress_pool(&tx, current.account_id).await?;
-        suppress_pool(&tx, requested_account).await?;
         audit(
             &tx,
             scope,
@@ -1318,17 +1327,25 @@ async fn delete_scoped(
     let tx = begin(db).await?;
     let result = async {
         let metadata = authorized_binding_metadata(&tx, scope, id).await?;
+        let tenants = [
+            Some(metadata.binding_tenant_id),
+            metadata.owner_tenant_id,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
         let audit_ctx = lock_authority(
             &tx,
             scope,
-            &[metadata.binding_tenant_id, metadata.owner_tenant_id],
+            &tenants,
             audit_ctx,
             snapshot,
         )
         .await?;
         let account = Account::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",
+            "SELECT * FROM accounts
+             WHERE id=$1 AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE",
             [metadata.account_id.into(), metadata.owner_tenant_id.into()],
         ))
         .one(&tx)
@@ -1353,7 +1370,6 @@ async fn delete_scoped(
                 id: id.to_string(),
             });
         }
-        suppress_pool(&tx, current.account_id).await?;
         let deleted = tx
             .execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
@@ -1420,12 +1436,13 @@ async fn options(
             None,
             scope.user_id(),
             "EXISTS(SELECT 1 FROM users actor
-                    WHERE actor.id=$2 AND actor.platform_role='root' AND actor.status='active')",
+                    WHERE actor.id=$2 AND actor.platform_role IN ('root','operator')
+                      AND actor.status='active')",
         ),
     };
     let from = format!(
-        "FROM accounts a JOIN tenants t ON t.id=a.tenant_id
-         WHERE a.enabled AND t.status='active' AND {authority}
+        "FROM accounts a LEFT JOIN tenants t ON t.id=a.tenant_id
+         WHERE a.enabled AND (a.tenant_id IS NULL OR t.status='active') AND {authority}
            AND ((a.provider='openai' AND a.api_capabilities && ARRAY['chat_completions','responses']::TEXT[])
              OR (a.provider='anthropic' AND 'messages'=ANY(a.api_capabilities))
            ) AND ($3::text IS NULL OR a.name ILIKE '%'||$3||'%' ESCAPE '\\')"

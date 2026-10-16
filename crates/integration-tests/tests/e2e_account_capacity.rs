@@ -34,7 +34,7 @@ impl Fixture {
         let account = Account::create(
             &db,
             &CreateAccountRequest {
-                tenant_id: owner,
+                tenant_id: None,
                 provider: "openai".into(),
                 name: format!("capacity-{run}"),
                 endpoint: "https://provider.example/v1".into(),
@@ -48,7 +48,6 @@ impl Fixture {
                 models_supported: vec![MODEL.into()],
                 api_capabilities: vec!["chat_completions".into(), "responses".into()],
                 pool_enabled: None,
-                visibility: Some("global".into()),
             },
         )
         .await
@@ -121,13 +120,19 @@ async fn account_quota_two_replicas_aggregate_distinct_tenants_users_and_api_key
 }
 
 #[tokio::test]
-async fn account_policy_rechecks_visibility_enabled_model_and_capability() {
+async fn account_policy_rechecks_scope_enabled_model_and_capability() {
     let mut f = Fixture::new().await;
     let policy = f.policy();
     let ctx = f.context(f.consumer);
     let target = f.target();
+    f.update(&format!("tenant_id='{}',visibility='tenant'", f.owner))
+        .await;
+    assert!(matches!(
+        policy.admit(&ctx, &target).await,
+        Err(KeyComputeError::PermissionDenied(_))
+    ));
+    f.update("tenant_id=NULL,visibility='global'").await;
     for (change, restore) in [
-        ("visibility='tenant'", "visibility='global'"),
         ("enabled=FALSE", "enabled=TRUE"),
         (
             "models_supported=ARRAY[]::TEXT[]",
@@ -186,6 +191,8 @@ async fn account_policy_rejects_changed_connection_and_inactive_account_owner() 
     ))
     .await
     .unwrap();
+    f.update(&format!("tenant_id='{}',visibility='tenant'", f.owner))
+        .await;
     assert!(matches!(
         policy.admit(&ctx, &target).await,
         Err(KeyComputeError::PermissionDenied(_))

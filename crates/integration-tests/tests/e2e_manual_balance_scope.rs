@@ -11,7 +11,7 @@ use integration_tests::{
 };
 use keycompute_db::{
     AuditContext, DbRouter, ManualBalanceCommand, ManualBalanceOperationDecision as Decision,
-    ManualBalanceOperationKind as Kind, UserBalance,
+    ManualBalanceOperationKind as Kind, User, UserBalance,
     models::financial_scope::{FinancialMembership, FinancialScope, FinancialSession},
 };
 use keycompute_server::{AppState, create_router};
@@ -43,21 +43,42 @@ impl Fixture {
         let guard = TestDataGuard::new(db.clone(), &run);
         let tenant = create_test_tenant(&db, "wallet-scope", &run).await.id;
         let foreign = create_test_tenant(&db, "wallet-foreign", &run).await.id;
-        let root = create_test_user(&db, tenant, "wallet-root", &run).await.id;
         let user = create_test_user(&db, tenant, "wallet-user", &run).await.id;
         let admin = create_test_user(&db, tenant, "wallet-admin", &run).await.id;
-        let operator = create_test_user(&db, tenant, "wallet-operator", &run)
-            .await
-            .id;
-        for (id, role) in [(root, "root"), (operator, "operator")] {
-            db.execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "UPDATE users SET platform_role=$2 WHERE id=$1",
-                [id.into(), role.into()],
-            ))
-            .await
-            .unwrap();
-        }
+        let root = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: format!("wallet-platform-actor-{run}@fixture.invalid"),
+                name: Some("wallet-platform-actor".into()),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        let operator = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: format!("wallet-operator-{run}@fixture.invalid"),
+                name: Some("wallet-operator".into()),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            [root.into()],
+        ))
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            [operator.into()],
+        ))
+        .await
+        .unwrap();
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
@@ -96,8 +117,16 @@ impl Fixture {
     async fn scope(&self, id: Uuid, target: Uuid) -> FinancialScope {
         // A forged type is deliberately possible here: SQL must independently deny non-root actors.
         FinancialScope::platform_tenant(
-            PlatformScope::checked(id, PlatformRole::Root).unwrap(),
+            PlatformScope::checked(id, PlatformRole::Operator).unwrap(),
             self.session(id).await,
+            target,
+        )
+        .unwrap()
+    }
+    async fn operator_scope(&self, target: Uuid) -> FinancialScope {
+        FinancialScope::platform_tenant(
+            PlatformScope::checked(self.operator, PlatformRole::Operator).unwrap(),
+            self.session(self.operator).await,
             target,
         )
         .unwrap()
@@ -138,7 +167,7 @@ fn audit(id: Uuid) -> AuditContext {
     AuditContext {
         actor_user_id: id,
         credential_kind: CredentialKind::Jwt,
-        actor_platform_role: PlatformRole::Root,
+        actor_platform_role: PlatformRole::Operator,
         actor_tenant_role: None,
         request_id: Some(Uuid::new_v4()),
     }
@@ -175,11 +204,11 @@ async fn post(app: Router, tenant: Uuid, user: Uuid, token: &str) -> (StatusCode
 }
 
 #[tokio::test]
-async fn manual_wallet_commands_require_current_root_and_matching_console_actor() {
+async fn manual_wallet_commands_require_a_current_platform_actor_and_matching_audit() {
     let f = Fixture::new().await;
     let key = Uuid::new_v4().to_string();
     let cmd = command(f.user, Kind::Recharge, &key);
-    for id in [f.user, f.admin, f.operator] {
+    for id in [f.user, f.admin] {
         assert!(
             UserBalance::apply_admin_manual_operation(
                 &f.db,
@@ -248,6 +277,17 @@ async fn manual_wallet_commands_require_current_root_and_matching_console_actor(
     );
     assert_eq!(f.claims().await, 0);
     assert_eq!(f.balance().await.available_balance, Decimal::from(10));
+    let mut operator_audit = audit(f.operator);
+    operator_audit.actor_platform_role = PlatformRole::Operator;
+    UserBalance::apply_admin_manual_operation(
+        &f.db,
+        f.operator_scope(f.tenant).await,
+        &operator_audit,
+        &cmd,
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.balance().await.available_balance, Decimal::from(11));
     f.finish().await;
 }
 
@@ -382,7 +422,7 @@ async fn wait_locked(db: &DatabaseConnection, pid: i32) {
 }
 
 #[tokio::test]
-async fn queued_http_wallet_command_rejects_root_demotion_before_claiming_idempotency() {
+async fn queued_http_wallet_command_rejects_platform_token_rotation_before_claiming_idempotency() {
     let f = Fixture::new().await;
     let (db, pid) = one_connection().await;
     let state = AppState::with_pool(DbRouter::single(db.clone()));
@@ -400,7 +440,7 @@ async fn queued_http_wallet_command_rejects_root_demotion_before_claiming_idempo
     blocker
         .execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            "UPDATE users SET token_version=token_version+1 WHERE id=$1",
             [f.root.into()],
         ))
         .await
@@ -427,7 +467,7 @@ async fn wallet_lock_wait_past_signed_expiry_rolls_back_funds_claim_and_audit() 
     };
     let expiry = session.expires_at;
     let scope = FinancialScope::platform_tenant(
-        PlatformScope::checked(f.root, PlatformRole::Root).unwrap(),
+        PlatformScope::checked(f.root, PlatformRole::Operator).unwrap(),
         session,
         f.tenant,
     )
@@ -849,7 +889,7 @@ async fn canonical_wallet_routes_separate_root_money_commands_from_tenant_expire
         f.tenant, f.user
     );
     let tenant = format!("/api/v1/tenants/{}/users/{}/balance", f.tenant, f.user);
-    for token in [&admin, &member, &operator] {
+    for token in [&admin, &member] {
         let denied = http_json(
             app.clone(),
             "POST",
@@ -860,6 +900,15 @@ async fn canonical_wallet_routes_separate_root_money_commands_from_tenant_expire
         .await;
         assert_eq!(denied.0, StatusCode::FORBIDDEN, "{}", denied.1);
     }
+    let operator_result = http_json(
+        app.clone(),
+        "POST",
+        &platform,
+        &operator,
+        json!({"amount":"1","reason":"operator platform command"}),
+    )
+    .await;
+    assert_eq!(operator_result.0, StatusCode::OK, "{}", operator_result.1);
     let malformed = http_json(
         app.clone(),
         "POST",
@@ -886,7 +935,7 @@ async fn canonical_wallet_routes_separate_root_money_commands_from_tenant_expire
                 .contains("no-store")
         );
     }
-    assert_eq!(f.balance().await.available_balance, Decimal::from(12));
+    assert_eq!(f.balance().await.available_balance, Decimal::from(13));
     let row = reserve(&f, 4).await;
     let get = http_json(
         app.clone(),

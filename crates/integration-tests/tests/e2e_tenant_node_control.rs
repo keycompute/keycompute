@@ -147,21 +147,26 @@ impl Fixture {
         let member = create_test_user(&db, a.id, "node-control-member", &run)
             .await
             .user;
-        let root = create_test_user(&db, b.id, "node-control-root", &run)
+        let root = User::find_by_email(&db, "tenant-test-root@fixture.invalid")
             .await
-            .user;
-        let operator = create_test_user(&db, b.id, "node-control-operator", &run)
-            .await
-            .user;
-        for (id, role) in [(root.id, "root"), (operator.id, "operator")] {
-            db.execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "UPDATE users SET platform_role=$2 WHERE id=$1",
-                [id.into(), role.into()],
-            ))
-            .await
+            .unwrap()
             .unwrap();
-        }
+        let operator = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: format!("node-control-operator-{run}@fixture.invalid"),
+                name: Some("node-control-operator".into()),
+            },
+        )
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            [operator.id.into()],
+        ))
+        .await
+        .unwrap();
         let state = state(db.clone()).await;
         let admin = jwt(&state, &db, a.owner_user_id, Some(a.id)).await;
         let member_token = jwt(&state, &db, member.id, Some(a.id)).await;
@@ -301,7 +306,7 @@ async fn metadata_lists_details_counts_and_personal_views_are_tenant_bound() {
     f.guard.cleanup().await.unwrap();
 }
 #[tokio::test]
-async fn platform_operator_actions_are_allowlisted_and_bare_handlers_enforce_authority() {
+async fn platform_operator_actions_match_root_and_bare_handlers_enforce_authority() {
     let mut f = Fixture::new().await;
     let n = f.node(f.a.id, f.member.id, "node").await;
     assert_eq!(
@@ -316,7 +321,7 @@ async fn platform_operator_actions_are_allowlisted_and_bare_handlers_enforce_aut
         f.get(&f.operator_token, &f.platform("node-registrations"))
             .await
             .0,
-        StatusCode::FORBIDDEN
+        StatusCode::OK
     );
     let command = json!({"expected_updated_at":n.updated_at,"reason":"operator maintenance"});
     let (status, paused, _) = call(
@@ -340,7 +345,7 @@ async fn platform_operator_actions_are_allowlisted_and_bare_handlers_enforce_aut
             )
             .await
             .0,
-            StatusCode::FORBIDDEN
+            StatusCode::OK
         );
     }
     let bare = Router::new()

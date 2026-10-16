@@ -29,7 +29,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, FromQueryResult, Serialize)]
 pub struct AccountManagementView {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub tenant_id: Option<Uuid>,
     pub tenant_active: bool,
     pub provider: String,
     pub name: String,
@@ -71,7 +71,7 @@ pub enum AccountManagementScope {
 /// Immutable authorization values carried by the verified console JWT.
 ///
 /// Tenant-scoped writes must match all three live values under retained locks.
-/// Platform-root writes intentionally carry only the global token version.
+/// Platform writes intentionally carry only the global token version.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderAuthzSnapshot {
     pub token_version: i32,
@@ -114,7 +114,7 @@ enum WriteScope {
 }
 
 const VIEW_COLUMNS: &str = r#"
-    a.id,a.tenant_id,(owner.status='active') AS tenant_active,
+    a.id,a.tenant_id,COALESCE(owner.status='active',TRUE) AS tenant_active,
     a.provider,a.name,
     CASE WHEN a.endpoint LIKE '%@%'
               OR a.endpoint LIKE '%?%'
@@ -172,7 +172,10 @@ fn validate_audit(scope: WriteScope, audit: &AuditContext) -> Result<(), DbError
         WriteScope::Tenant(s)
             if s.tenant_role() == TenantRole::Admin && audit.actor_user_id == s.user_id() => {}
         WriteScope::Platform(s)
-            if s.platform_role() == PlatformRole::Root && audit.actor_user_id == s.user_id() => {}
+            if matches!(
+                s.platform_role(),
+                PlatformRole::Root | PlatformRole::Operator
+            ) && audit.actor_user_id == s.user_id() => {}
         _ => return Err(denied()),
     }
     Ok(())
@@ -181,7 +184,14 @@ fn validate_audit(scope: WriteScope, audit: &AuditContext) -> Result<(), DbError
 fn validate_read(scope: ReadScope) -> Result<(), DbError> {
     match scope {
         ReadScope::Tenant(scope) if scope.tenant_role() == TenantRole::Admin => Ok(()),
-        ReadScope::Platform(scope) if scope.platform_role() == PlatformRole::Root => Ok(()),
+        ReadScope::Platform(scope)
+            if matches!(
+                scope.platform_role(),
+                PlatformRole::Root | PlatformRole::Operator
+            ) =>
+        {
+            Ok(())
+        }
         _ => Err(denied()),
     }
 }
@@ -239,7 +249,8 @@ fn account_query(
             scope.user_id(),
             "($1::uuid IS NULL OR a.tenant_id=$1) AND EXISTS (
                 SELECT 1 FROM users actor
-                WHERE actor.id=$2 AND actor.platform_role='root' AND actor.status='active'
+                WHERE actor.id=$2 AND actor.platform_role IN ('root','operator')
+                  AND actor.status='active'
             )",
         ),
     };
@@ -256,7 +267,7 @@ fn account_query(
     };
     let mut sql = format!(
         "SELECT {projection} FROM accounts a
-         JOIN tenants owner ON owner.id=a.tenant_id
+         LEFT JOIN tenants owner ON owner.id=a.tenant_id
          WHERE {authority}
            AND ($3::uuid IS NULL OR a.id=$3)
            AND ($4::text IS NULL OR LOWER(a.provider)=LOWER($4))
@@ -390,13 +401,12 @@ async fn current_actor(
     }
     let platform_role = actor_role.parse().map_err(DbError::Other)?;
     let tenant_role = match scope {
-        WriteScope::Platform(_) if platform_role == PlatformRole::Root => None,
-        WriteScope::Tenant(scope)
-            if matches!(
-                platform_role,
-                PlatformRole::None | PlatformRole::Operator | PlatformRole::Root
-            ) =>
+        WriteScope::Platform(_)
+            if matches!(platform_role, PlatformRole::Root | PlatformRole::Operator) =>
         {
+            None
+        }
+        WriteScope::Tenant(scope) if platform_role == PlatformRole::None => {
             let member = tx
                 .query_one(Statement::from_sql_and_values(
                     DbBackend::Postgres,
@@ -487,7 +497,7 @@ async fn owner_for_account(
     tx: &DatabaseTransaction,
     scope: WriteScope,
     id: Uuid,
-) -> Result<Uuid, DbError> {
+) -> Result<Option<Uuid>, DbError> {
     let (tenant_id, actor_id, authority) = match scope {
         WriteScope::Tenant(scope) => (
             Some(scope.tenant_id()),
@@ -507,7 +517,8 @@ async fn owner_for_account(
             scope.user_id(),
             "EXISTS (
                  SELECT 1 FROM users actor
-                 WHERE actor.id=$3 AND actor.platform_role='root' AND actor.status='active'
+                 WHERE actor.id=$3 AND actor.platform_role IN ('root','operator')
+                   AND actor.status='active'
              )",
         ),
     };
@@ -525,11 +536,11 @@ async fn owner_for_account(
 async fn account_for_update(
     tx: &DatabaseTransaction,
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: Option<Uuid>,
 ) -> Result<Account, DbError> {
     Account::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "SELECT * FROM accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE",
+        "SELECT * FROM accounts WHERE id=$1 AND tenant_id IS NOT DISTINCT FROM $2 FOR UPDATE",
         [id.into(), tenant_id.into()],
     ))
     .one(tx)
@@ -540,11 +551,11 @@ async fn account_for_update(
 async fn account_for_key_share(
     tx: &DatabaseTransaction,
     id: Uuid,
-    tenant_id: Uuid,
+    tenant_id: Option<Uuid>,
 ) -> Result<Account, DbError> {
     Account::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "SELECT * FROM accounts WHERE id=$1 AND tenant_id=$2 FOR KEY SHARE",
+        "SELECT * FROM accounts WHERE id=$1 AND tenant_id IS NOT DISTINCT FROM $2 FOR KEY SHARE",
         [id.into(), tenant_id.into()],
     ))
     .one(tx)
@@ -579,9 +590,9 @@ async fn ensure_active_tenants(
     Ok(())
 }
 
-fn verify_owner(scope: WriteScope, owner_tenant: Uuid) -> Result<(), DbError> {
+fn verify_owner(scope: WriteScope, owner_tenant: Option<Uuid>) -> Result<(), DbError> {
     if let Some(tenant) = scope_tenant(scope)
-        && tenant != owner_tenant
+        && Some(tenant) != owner_tenant
     {
         return Err(denied());
     }
@@ -718,7 +729,7 @@ impl Account {
         Self::create_scoped(
             db,
             WriteScope::Tenant(scope),
-            scope.tenant_id(),
+            Some(scope.tenant_id()),
             req,
             audit_ctx,
             snapshot,
@@ -729,7 +740,6 @@ impl Account {
     pub async fn create_platform(
         db: &(impl ConnectionTrait + TransactionTrait),
         scope: PlatformScope,
-        tenant_id: Uuid,
         req: &CreateAccountRequest,
         audit_ctx: &AuditContext,
         snapshot: ProviderAuthzSnapshot,
@@ -737,7 +747,7 @@ impl Account {
         Self::create_scoped(
             db,
             WriteScope::Platform(scope),
-            tenant_id,
+            None,
             req,
             audit_ctx,
             snapshot,
@@ -748,40 +758,24 @@ impl Account {
     async fn create_scoped(
         db: &(impl ConnectionTrait + TransactionTrait),
         scope: WriteScope,
-        tenant_id: Uuid,
+        tenant_id: Option<Uuid>,
         req: &CreateAccountRequest,
         audit_ctx: &AuditContext,
         snapshot: ProviderAuthzSnapshot,
     ) -> Result<Account, DbError> {
         validate_audit(scope, audit_ctx)?;
-        if tenant_id.is_nil() || req.tenant_id != tenant_id {
+        if tenant_id.is_some_and(|id| id.is_nil()) || req.tenant_id != tenant_id {
             return Err(denied());
-        }
-        if matches!(scope, WriteScope::Tenant(_))
-            && req.visibility.as_deref().unwrap_or("tenant") == "global"
-        {
-            return Err(DbError::Other(
-                "global account publication requires root platform authorization".into(),
-            ));
         }
         validate_priority(req.priority)?;
         validate_rate_limits(req.rpm_limit, req.tpm_limit)?;
         validate_endpoint(&req.endpoint)?;
         let tx = begin(db).await?;
         let result = async {
-            let audit_ctx =
-                current_actor(&tx, scope, &[tenant_id], audit_ctx, snapshot).await?;
-            ensure_active_tenants(&tx, &[tenant_id]).await?;
-            let tenant = tx
-                .query_one(Statement::from_sql_and_values(
-                    DbBackend::Postgres,
-                    "SELECT status FROM tenants WHERE id=$1",
-                    [tenant_id.into()],
-                ))
-                .await?
-                .ok_or_else(|| DbError::not_found("tenant", tenant_id))?;
-            if tenant.try_get::<String>("", "status")? != "active" {
-                return Err(DbError::Other("active tenant required".into()));
+            let tenant_ids = tenant_id.into_iter().collect::<Vec<_>>();
+            let audit_ctx = current_actor(&tx, scope, &tenant_ids, audit_ctx, snapshot).await?;
+            if !tenant_ids.is_empty() {
+                ensure_active_tenants(&tx, &tenant_ids).await?;
             }
             let account = Account::find_by_statement(Statement::from_sql_and_values(
                 DbBackend::Postgres,
@@ -803,7 +797,7 @@ impl Account {
                     req.priority.unwrap_or(0).into(),
                     req.models_supported.clone().into(),
                     req.api_capabilities.clone().into(),
-                    req.visibility.as_deref().unwrap_or("tenant").into(),
+                    (if tenant_id.is_some() { "tenant" } else { "global" }).into(),
                     req.pool_enabled.unwrap_or(true).into(),
                 ],
             ))
@@ -896,57 +890,19 @@ impl Account {
         }
         let tx = begin(db).await?;
         let result = async {
-            let pre_tenant = owner_for_account(&tx, scope, id).await?;
-            let requested_tenant = req.tenant_id.unwrap_or(pre_tenant);
-            if requested_tenant.is_nil() {
-                return Err(DbError::Other("account tenant must be valid".into()));
+            let owner_tenant = owner_for_account(&tx, scope, id).await?;
+            let tenants = owner_tenant.into_iter().collect::<Vec<_>>();
+            let audit_ctx = current_actor(&tx, scope, &tenants, audit_ctx, snapshot).await?;
+            verify_owner(scope, owner_tenant)?;
+            if !tenants.is_empty() {
+                ensure_active_tenants(&tx, &tenants).await?;
             }
-            if matches!(scope, WriteScope::Tenant(_)) && requested_tenant != pre_tenant {
-                return Err(DbError::Other(
-                    "account ownership cannot be reassigned through an account update".into(),
-                ));
-            }
-            let tenants = vec![pre_tenant, requested_tenant];
-            let audit_ctx =
-                current_actor(&tx, scope, &tenants, audit_ctx, snapshot).await?;
-            verify_owner(scope, pre_tenant)?;
-            ensure_active_tenants(&tx, &[requested_tenant]).await?;
-            let current = account_for_update(&tx, id, pre_tenant).await?;
-            if current.tenant_id != pre_tenant {
+            let current = account_for_update(&tx, id, owner_tenant).await?;
+            if current.tenant_id != owner_tenant {
                 return Err(DbError::OptimisticConflict {
                     entity: "account".into(),
                     id: id.to_string(),
                 });
-            }
-            let transfer = requested_tenant != pre_tenant;
-            if transfer && !matches!(scope, WriteScope::Platform(_)) {
-                return Err(DbError::Other(
-                    "account ownership cannot be reassigned by a tenant administrator".into(),
-                ));
-            }
-            if let Some(visibility) = req.visibility.as_deref() {
-                if !matches!(visibility, "tenant" | "global") {
-                    return Err(DbError::Other("visibility must be tenant or global".into()));
-                }
-                if matches!(scope, WriteScope::Tenant(_)) && visibility != current.visibility {
-                    return Err(DbError::Other(
-                        "tenant administrators cannot change account visibility".into(),
-                    ));
-                }
-            }
-            if req.pool_enabled.is_some()
-                && tx
-                    .query_one(Statement::from_sql_and_values(
-                        DbBackend::Postgres,
-                        "SELECT 1 FROM passthrough_bindings WHERE account_id=$1 LIMIT 1",
-                        [id.into()],
-                    ))
-                    .await?
-                    .is_some()
-            {
-                return Err(DbError::Other(
-                    "account pool participation is managed by passthrough bindings".into(),
-                ));
             }
             let endpoint_changed = req
                 .endpoint
@@ -965,7 +921,7 @@ impl Account {
                 .as_ref()
                 .is_some_and(|capabilities| capabilities != &current.api_capabilities);
             let connection_changed = endpoint_changed || credential_changed;
-            if connection_changed || transfer {
+            if connection_changed {
                 if ResponseAffinity::lock_account_routes_and_has_deletion_blocker(&tx, id).await? {
                     return Err(DbError::Other(
                         "account has pending Responses work".into(),
@@ -974,14 +930,6 @@ impl Account {
                 if connection_changed {
                     ResponseAffinity::delete_settled_account_routes(&tx, id).await?;
                 }
-            }
-            if transfer {
-                tx.query_all(Statement::from_sql_and_values(
-                    DbBackend::Postgres,
-                    "SELECT id FROM passthrough_bindings WHERE account_id=$1 ORDER BY id FOR UPDATE",
-                    [id.into()],
-                ))
-                .await?;
             }
             let account = Account::find_by_statement(Statement::from_sql_and_values(
                 DbBackend::Postgres,
@@ -996,9 +944,7 @@ impl Account {
                        enabled=COALESCE($8,enabled),
                        models_supported=COALESCE($9,models_supported),
                        api_capabilities=COALESCE($10,api_capabilities),
-                       visibility=COALESCE($11,visibility),
-                       pool_enabled=COALESCE($12,pool_enabled),
-                       tenant_id=COALESCE($13,tenant_id),
+                       pool_enabled=COALESCE($11,pool_enabled),
                        health_updated_at=CASE WHEN
                          COALESCE($2,endpoint) IS DISTINCT FROM endpoint OR
                          COALESCE($3,upstream_api_key_encrypted) IS DISTINCT FROM upstream_api_key_encrypted OR
@@ -1020,7 +966,8 @@ impl Account {
                          THEN GREATEST(upstream_config_version,statement_timestamp())+INTERVAL '1 microsecond'
                          ELSE upstream_config_version END,
                        updated_at=GREATEST(updated_at,NOW())+INTERVAL '1 microsecond'
-                   WHERE id=$14 AND tenant_id=$15 AND upstream_config_version=$16
+                   WHERE id=$12 AND tenant_id IS NOT DISTINCT FROM $13
+                     AND upstream_config_version=$14
                    RETURNING *"#,
                 [
                     req.name.clone().into(),
@@ -1033,11 +980,9 @@ impl Account {
                     req.enabled.into(),
                     req.models_supported.clone().into(),
                     req.api_capabilities.clone().into(),
-                    req.visibility.clone().into(),
                     req.pool_enabled.into(),
-                    requested_tenant.into(),
                     id.into(),
-                    pre_tenant.into(),
+                    owner_tenant.into(),
                     expected_config_version.into(),
                 ],
             ))
@@ -1056,7 +1001,6 @@ impl Account {
                 account.id,
                 serde_json::json!({
                     "tenant_id": account.tenant_id,
-                    "previous_tenant_id": pre_tenant,
                     "connection_changed": connection_changed,
                     "models_changed": models_changed,
                     "capabilities_changed": capabilities_changed,
@@ -1112,14 +1056,8 @@ impl Account {
         let tx = begin(db).await?;
         let result = async {
             let owner_tenant = owner_for_account(&tx, scope, id).await?;
-            let audit_ctx = current_actor(
-                &tx,
-                scope,
-                &[owner_tenant],
-                audit_ctx,
-                snapshot,
-            )
-            .await?;
+            let tenants = owner_tenant.into_iter().collect::<Vec<_>>();
+            let audit_ctx = current_actor(&tx, scope, &tenants, audit_ctx, snapshot).await?;
             verify_owner(scope, owner_tenant)?;
             let existing = account_for_update(&tx, id, owner_tenant).await?;
             if existing.tenant_id != owner_tenant {
@@ -1148,7 +1086,9 @@ impl Account {
             let deleted = tx
                 .execute(Statement::from_sql_and_values(
                     DbBackend::Postgres,
-                    "DELETE FROM accounts WHERE id=$1 AND tenant_id=$2 AND upstream_config_version=$3",
+                    "DELETE FROM accounts WHERE id=$1
+                       AND tenant_id IS NOT DISTINCT FROM $2
+                       AND upstream_config_version=$3",
                     [
                         id.into(),
                         owner_tenant.into(),
@@ -1214,9 +1154,12 @@ impl Account {
         let tx = begin(db).await?;
         let result = async {
             let owner_tenant = owner_for_account(&tx, scope, id).await?;
-            let audit_ctx = current_actor(&tx, scope, &[owner_tenant], audit_ctx, snapshot).await?;
+            let tenants = owner_tenant.into_iter().collect::<Vec<_>>();
+            let audit_ctx = current_actor(&tx, scope, &tenants, audit_ctx, snapshot).await?;
             verify_owner(scope, owner_tenant)?;
-            ensure_active_tenants(&tx, &[owner_tenant]).await?;
+            if !tenants.is_empty() {
+                ensure_active_tenants(&tx, &tenants).await?;
+            }
             let row = Account::find_by_statement(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "UPDATE accounts SET health_status='unknown',health_reason=NULL,
@@ -1225,7 +1168,7 @@ impl Account {
                  health_last_success_at=NULL,health_last_failure_at=NULL,
                  health_updated_at=GREATEST(health_updated_at,NOW())+INTERVAL '1 microsecond',
                  health_generation=health_generation+1
-                 WHERE id=$1 AND tenant_id=$2 RETURNING *",
+                 WHERE id=$1 AND tenant_id IS NOT DISTINCT FROM $2 RETURNING *",
                 [id.into(), owner_tenant.into()],
             ))
             .one(&tx)
@@ -1282,7 +1225,8 @@ impl Account {
         let tx = begin(db).await?;
         let result = async {
             let owner_tenant = owner_for_account(&tx, write, id).await?;
-            let actor = current_actor(&tx, write, &[owner_tenant], audit_ctx, snapshot).await?;
+            let tenants = owner_tenant.into_iter().collect::<Vec<_>>();
+            let actor = current_actor(&tx, write, &tenants, audit_ctx, snapshot).await?;
             verify_owner(write, owner_tenant)?;
             let account = account_for_key_share(&tx, id, owner_tenant).await?;
             if probe_intent {
@@ -1356,16 +1300,17 @@ impl Account {
                 snapshot.tenant_authz_version,
                 snapshot.membership_authz_version,
             ),
-            WriteScope::Platform(scope) => (None, scope.user_id(), "root", None, None),
+            WriteScope::Platform(scope) => (None, scope.user_id(), "platform", None, None),
         };
         let row = Account::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT a.* FROM accounts a
-                 JOIN tenants owner ON owner.id=a.tenant_id AND owner.status='active'
+                 LEFT JOIN tenants owner ON owner.id=a.tenant_id
                  JOIN users u ON u.id=$2 AND u.status='active' AND u.token_version=$4
                  WHERE a.id=$1
+                   AND (a.tenant_id IS NULL OR owner.status='active')
                    AND ($3::uuid IS NULL OR a.tenant_id=$3)
-                   AND (($5='root' AND u.platform_role='root')
+                   AND (($5='platform' AND u.platform_role IN ('root','operator'))
                      OR ($5='admin' AND EXISTS(
                        SELECT 1 FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id
                        WHERE m.tenant_id=a.tenant_id AND m.user_id=$2

@@ -187,7 +187,7 @@ fn tenant_audit(access: &TenantAdmin, request_id: RequestId) -> AuditContext {
     access.audit(request_id)
 }
 
-fn root_audit(auth: &GlobalConsoleAuth, request_id: RequestId) -> AuditContext {
+fn platform_audit(auth: &GlobalConsoleAuth, request_id: RequestId) -> AuditContext {
     AuditContext {
         actor_user_id: auth.user_id,
         credential_kind: auth.credential_kind,
@@ -212,17 +212,17 @@ fn tenant_control_scope(
     )
 }
 
-fn root_control_scope(
+fn platform_control_scope(
     auth: &GlobalConsoleAuth,
     request_id: RequestId,
     tenant_id: Uuid,
     reason: impl Into<String>,
 ) -> Result<store::ResponseControlScope> {
     let platform = auth.require_platform(AuthorizationAction::ManagePlatform)?;
-    store::ResponseControlScope::root(
+    store::ResponseControlScope::platform_admin(
         platform,
         tenant_id,
-        root_audit(auth, request_id),
+        platform_audit(auth, request_id),
         store::ResponseControlSession {
             token_version: auth.token_version,
             jwt_expires_at: auth.credential_expires_at.unwrap_or_default(),
@@ -918,9 +918,11 @@ pub async fn platform_responses(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Page<ResponseSummary>>> {
     let reason = q.reason.clone().ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Responses access".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Responses access".into(),
+        )
     })?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     list_response_page(state, control, q).await
 }
 
@@ -959,9 +961,11 @@ pub async fn platform_response_count(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Count>> {
     let reason = q.reason.clone().ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Responses access".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Responses access".into(),
+        )
     })?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     response_count(state, control, q).await
 }
 
@@ -985,7 +989,7 @@ pub async fn platform_response_detail(
     Query(reason): Query<RootReason>,
     headers: HeaderMap,
 ) -> Result<Response> {
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason.reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason.reason)?;
     response_detail(state, control, path, headers).await
 }
 
@@ -1124,9 +1128,11 @@ pub async fn platform_response_cancel(
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Responses mutation".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Responses mutation".into(),
+        )
     })?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     mutate_response(state, control, path, body, false, headers).await
 }
 
@@ -1139,9 +1145,11 @@ pub async fn platform_response_delete(
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Responses mutation".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Responses mutation".into(),
+        )
     })?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     mutate_response(state, control, path, body, true, headers).await
 }
 
@@ -1167,7 +1175,7 @@ pub async fn platform_response_input_items(
     headers: HeaderMap,
 ) -> Result<Response> {
     let reason = reason_from_raw(query.as_deref())?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     response_input_items(state, control, path, query, headers).await
 }
 
@@ -1247,7 +1255,9 @@ fn reason_from_raw(raw: Option<&str>) -> Result<String> {
         }
     }
     reason.ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Responses access".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Responses access".into(),
+        )
     })
 }
 
@@ -1326,9 +1336,11 @@ pub async fn platform_conversations(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Page<ConversationSummary>>> {
     let reason = q.reason.clone().ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Conversations access".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Conversations access".into(),
+        )
     })?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     list_conversation_page(state, control, q).await
 }
 
@@ -1374,9 +1386,11 @@ pub async fn platform_conversation_count(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Count>> {
     let reason = q.reason.clone().ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Conversations access".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Conversations access".into(),
+        )
     })?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     conversation_count(state, control, q).await
 }
 
@@ -1453,7 +1467,7 @@ pub async fn platform_conversation_detail(
     Query(reason): Query<RootReason>,
     headers: HeaderMap,
 ) -> Result<Response> {
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason.reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason.reason)?;
     conversation_detail(state, control, path, headers).await
 }
 
@@ -1590,9 +1604,11 @@ pub async fn platform_conversation_update(
     Json(body): Json<MetadataBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Conversations mutation".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Conversations mutation".into(),
+        )
     })?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     let metadata = store::metadata(Some(&body.metadata))?;
     mutate_conversation(
         state,
@@ -1614,9 +1630,11 @@ pub async fn platform_conversation_delete(
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Conversations mutation".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Conversations mutation".into(),
+        )
     })?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     mutate_conversation(
         state,
         control,
@@ -1650,7 +1668,7 @@ pub async fn platform_conversation_items(
     headers: HeaderMap,
 ) -> Result<Response> {
     let reason = reason_from_raw(query.as_deref())?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     conversation_items(state, control, path, query, headers).await
 }
 
@@ -1725,9 +1743,11 @@ pub async fn platform_conversation_append(
     Json(body): Json<AppendItemsBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Conversations mutation".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Conversations mutation".into(),
+        )
     })?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     mutate_conversation(
         state,
         control,
@@ -1761,9 +1781,11 @@ pub async fn platform_conversation_remove_item(
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
-        ApiError::BadRequest("root reason is required for platform Conversations mutation".into())
+        ApiError::BadRequest(
+            "platform administrator reason is required for Conversations mutation".into(),
+        )
     })?;
-    let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
+    let control = platform_control_scope(&auth, request_id, path.tenant_id, reason)?;
     remove_item(state, control, path, body, headers).await
 }
 

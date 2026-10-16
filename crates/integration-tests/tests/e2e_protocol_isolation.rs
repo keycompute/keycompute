@@ -76,7 +76,7 @@ async fn create_test_account(
     Account::create(
         pool,
         &CreateAccountRequest {
-            tenant_id,
+            tenant_id: Some(tenant_id),
             provider: provider.to_string(),
             name: format!("e2e-{provider}"),
             endpoint: format!("https://{provider}.example.com/v1"),
@@ -92,7 +92,6 @@ async fn create_test_account(
                 vec!["chat_completions".to_string(), "responses".to_string()]
             },
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -118,17 +117,6 @@ async fn build_admin_app(
     )
     .await
     .expect("create admin user");
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE users SET platform_role='root' WHERE id=$1",
-        [admin.id.into()],
-    ))
-    .await
-    .expect("promote protocol test admin");
-    let admin = User::find_by_id(pool, admin.id)
-        .await
-        .expect("reload protocol test admin")
-        .expect("protocol test admin");
     pool.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'admin','active')",

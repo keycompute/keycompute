@@ -108,8 +108,12 @@ pub struct UserListResponse {
 pub struct UpdateUserRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    // Security changes are intentionally a separate server-authorized API;
-    // this profile request cannot claim a platform role or tenant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_role: Option<PlatformRole>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<UserStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl UpdateUserRequest {
@@ -119,6 +123,21 @@ impl UpdateUserRequest {
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    pub fn with_platform_role(mut self, role: PlatformRole) -> Self {
+        self.platform_role = Some(role);
+        self
+    }
+
+    pub fn with_status(mut self, status: UserStatus) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
         self
     }
 }
@@ -323,11 +342,20 @@ mod tests {
     }
 
     #[test]
-    fn update_user_request_serializes_profile_only() {
-        let request = UpdateUserRequest::new().with_name("Alice");
+    fn update_user_request_serializes_profile_and_explicit_security_changes() {
+        let request = UpdateUserRequest::new()
+            .with_name("Alice")
+            .with_platform_role(PlatformRole::Operator)
+            .with_status(UserStatus::Active)
+            .with_reason("approved platform assignment");
         assert_eq!(
             serde_json::to_value(request).expect("request should serialize"),
-            serde_json::json!({"name": "Alice"})
+            serde_json::json!({
+                "name": "Alice",
+                "platform_role": "operator",
+                "status": "active",
+                "reason": "approved platform assignment"
+            })
         );
 
         let unchanged = UpdateUserRequest::new();

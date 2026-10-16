@@ -137,7 +137,7 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_all_generation_endpo
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-all-routes-openai-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -149,7 +149,6 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_all_generation_endpo
             models_supported: vec![chat_model.clone(), responses_model.clone()],
             api_capabilities: vec!["chat_completions".to_string(), "responses".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -158,7 +157,7 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_all_generation_endpo
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "anthropic".to_string(),
             name: format!("db-all-routes-anthropic-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -170,7 +169,6 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_all_generation_endpo
             models_supported: vec![anthropic_model.clone()],
             api_capabilities: vec!["messages".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -331,7 +329,7 @@ async fn postgres_tenant_rpm_cap_is_not_widened_by_a_provider_account() {
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-tenant-cap-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -343,7 +341,6 @@ async fn postgres_tenant_rpm_cap_is_not_widened_by_a_provider_account() {
             models_supported: vec![model.clone()],
             api_capabilities: vec!["chat_completions".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -414,7 +411,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-triplet-pass-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -426,7 +423,6 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["chat_completions".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -435,7 +431,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-triplet-block-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -447,7 +443,6 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["chat_completions".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -558,7 +553,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "anthropic".to_string(),
             name: format!("db-rpm-messages-pass-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -570,7 +565,6 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["messages".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -579,7 +573,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "anthropic".to_string(),
             name: format!("db-rpm-messages-block-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -591,7 +585,6 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["messages".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -705,7 +698,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-rpm-responses-pass-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -717,7 +710,6 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["responses".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -726,7 +718,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-rpm-responses-block-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -738,7 +730,6 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["responses".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -862,7 +853,7 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_all_generation_endpo
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-all-tpm-openai-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -874,7 +865,6 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_all_generation_endpo
             models_supported: vec![chat_model.clone(), responses_model.clone()],
             api_capabilities: vec!["chat_completions".to_string(), "responses".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -883,7 +873,7 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_all_generation_endpo
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "anthropic".to_string(),
             name: format!("db-all-tpm-anthropic-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -895,7 +885,6 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_all_generation_endpo
             models_supported: vec![anthropic_model.clone()],
             api_capabilities: vec!["messages".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -1045,7 +1034,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-tpm-triplet-pass-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -1057,7 +1046,6 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["chat_completions".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -1066,7 +1054,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-tpm-triplet-block-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -1078,7 +1066,6 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["chat_completions".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -1190,7 +1177,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "anthropic".to_string(),
             name: format!("db-tpm-triplet-pass-messages-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -1202,7 +1189,6 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["messages".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -1211,7 +1197,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "anthropic".to_string(),
             name: format!("db-tpm-triplet-block-messages-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -1223,7 +1209,6 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["messages".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -1337,7 +1322,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-tpm-triplet-pass-responses-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -1349,7 +1334,6 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["responses".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -1358,7 +1342,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-tpm-triplet-block-responses-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -1370,7 +1354,6 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["responses".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -1484,7 +1467,7 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_request_key_triplet(
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-rpm-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -1496,7 +1479,6 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_request_key_triplet(
             models_supported: vec![model.clone()],
             api_capabilities: vec!["chat_completions".to_string(), "responses".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -1605,7 +1587,7 @@ async fn postgres_responses_rpm_rejection_releases_idempotency_claim_for_retry()
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-rpm-responses-cleanup-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -1617,7 +1599,6 @@ async fn postgres_responses_rpm_rejection_releases_idempotency_claim_for_retry()
             models_supported: vec![model.clone()],
             api_capabilities: vec!["responses".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await
@@ -1707,7 +1688,7 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_triplet_key() {
     keycompute_db::Account::create(
         &pool,
         &CreateAccountRequest {
-            tenant_id: tenant.id,
+            tenant_id: Some(tenant.id),
             provider: "openai".to_string(),
             name: format!("db-tpm-account-{test_id}"),
             endpoint: "http://127.0.0.1:1/v1".to_string(),
@@ -1719,7 +1700,6 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_triplet_key() {
             models_supported: vec![model.clone()],
             api_capabilities: vec!["chat_completions".to_string(), "responses".to_string()],
             pool_enabled: None,
-            visibility: Some("tenant".to_string()),
         },
     )
     .await

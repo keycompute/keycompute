@@ -88,7 +88,10 @@ fn routing_probes(accounts: &[AccountInfo], tenant_id: &str) -> Vec<RoutingProbe
         account.tenant_active
             && account.routing_eligible
             && account.current_rpm >= 0
-            && (account.tenant_id == tenant_id || account.visibility == "global")
+            && account
+                .tenant_id
+                .as_deref()
+                .is_none_or(|owner| owner == tenant_id)
     }) {
         let Some(entry) = RoutingEntry::for_provider(&account.provider) else {
             continue;
@@ -671,7 +674,7 @@ mod tests {
     }
 
     fn account(
-        tenant_id: &str,
+        tenant_id: Option<&str>,
         visibility: &str,
         provider: &str,
         is_active: bool,
@@ -679,8 +682,8 @@ mod tests {
         models: &[&str],
     ) -> AccountInfo {
         AccountInfo {
-            id: format!("account-{tenant_id}-{provider}"),
-            tenant_id: tenant_id.to_string(),
+            id: format!("account-{}-{provider}", tenant_id.unwrap_or("global")),
+            tenant_id: tenant_id.map(str::to_string),
             tenant_active: true,
             name: "Test account".to_string(),
             provider: provider.to_string(),
@@ -716,7 +719,7 @@ mod tests {
     #[test]
     fn probe_catalog_uses_current_tenant_accounts_without_requiring_pricing_rows() {
         let mut inactive_tenant_account = account(
-            TENANT,
+            Some(TENANT),
             "tenant",
             "openai",
             true,
@@ -726,32 +729,32 @@ mod tests {
         inactive_tenant_account.tenant_active = false;
         let accounts = vec![
             account(
-                TENANT,
+                Some(TENANT),
                 "tenant",
                 "openai",
                 true,
                 0,
                 &["tenant-priced", "fallback-priced", ""],
             ),
+            account(None, "global", "openai", true, 0, &["global-visible"]),
             account(
-                OTHER_TENANT,
-                "global",
-                "openai",
-                true,
-                0,
-                &["global-visible"],
-            ),
-            account(
-                OTHER_TENANT,
+                Some(OTHER_TENANT),
                 "tenant",
                 "openai",
                 true,
                 0,
                 &["other-private"],
             ),
-            account(TENANT, "tenant", "anthropic", true, 0, &["anthropic-only"]),
-            account(TENANT, "tenant", "openai", false, 0, &["disabled"]),
-            account(TENANT, "tenant", "openai", true, -1, &["cooling"]),
+            account(
+                Some(TENANT),
+                "tenant",
+                "anthropic",
+                true,
+                0,
+                &["anthropic-only"],
+            ),
+            account(Some(TENANT), "tenant", "openai", false, 0, &["disabled"]),
+            account(Some(TENANT), "tenant", "openai", true, -1, &["cooling"]),
             inactive_tenant_account,
         ];
 
@@ -781,7 +784,7 @@ mod tests {
             .collect::<Vec<_>>();
         let accounts = vec![AccountInfo {
             id: "many-models".to_string(),
-            tenant_id: TENANT.to_string(),
+            tenant_id: Some(TENANT.to_string()),
             tenant_active: true,
             name: "Many models".to_string(),
             provider: "openai".to_string(),
@@ -820,9 +823,16 @@ mod tests {
 
     #[test]
     fn chat_routing_diagnostics_skip_responses_only_accounts() {
-        let mut responses_only = account(TENANT, "tenant", "openai", true, 0, &["responses-model"]);
+        let mut responses_only = account(
+            Some(TENANT),
+            "tenant",
+            "openai",
+            true,
+            0,
+            &["responses-model"],
+        );
         responses_only.api_capabilities = vec!["responses".to_string()];
-        let chat = account(TENANT, "tenant", "openai", true, 0, &["chat-model"]);
+        let chat = account(Some(TENANT), "tenant", "openai", true, 0, &["chat-model"]);
 
         assert_eq!(
             routing_probes(&[responses_only, chat], TENANT),
@@ -836,16 +846,16 @@ mod tests {
     #[test]
     fn probe_catalog_keeps_protocols_separate_and_avoids_duplicate_requests() {
         let accounts = vec![
-            account(TENANT, "tenant", "openai", true, 0, &["shared"]),
+            account(Some(TENANT), "tenant", "openai", true, 0, &["shared"]),
             account(
-                TENANT,
+                Some(TENANT),
                 "tenant",
                 "openai",
                 true,
                 0,
                 &["shared", "openai-second"],
             ),
-            account(TENANT, "tenant", "anthropic", true, 0, &["shared"]),
+            account(Some(TENANT), "tenant", "anthropic", true, 0, &["shared"]),
         ];
 
         assert_eq!(
@@ -872,7 +882,7 @@ mod tests {
         let mut accounts = (0..MAX_ROUTING_PROBES)
             .map(|index| {
                 account(
-                    TENANT,
+                    Some(TENANT),
                     "tenant",
                     "anthropic",
                     true,
@@ -883,7 +893,7 @@ mod tests {
             .collect::<Vec<_>>();
         accounts.extend((0..MAX_ROUTING_PROBES).map(|index| {
             account(
-                TENANT,
+                Some(TENANT),
                 "tenant",
                 "openai",
                 true,
@@ -915,7 +925,7 @@ mod tests {
         let accounts = (0..MAX_ROUTING_PROBES + 2)
             .map(|index| {
                 account(
-                    TENANT,
+                    Some(TENANT),
                     "tenant",
                     "openai",
                     true,
@@ -938,8 +948,8 @@ mod tests {
     #[test]
     fn probe_catalog_retains_a_diagnostic_fallback_when_no_account_is_eligible() {
         let accounts = vec![
-            account(TENANT, "tenant", "openai", false, 0, &["disabled"]),
-            account(TENANT, "tenant", "anthropic", true, -1, &["cooling"]),
+            account(Some(TENANT), "tenant", "openai", false, 0, &["disabled"]),
+            account(Some(TENANT), "tenant", "anthropic", true, -1, &["cooling"]),
         ];
 
         assert_eq!(

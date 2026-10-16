@@ -180,15 +180,7 @@ async fn tenant_response_control_revalidates_authority_and_preserves_owner_scope
     );
     assert_eq!(deleted_again["deleted"], true);
 
-    let root_user = create_test_user(&f.db, tenant_id, "response-control-root", &f.run).await;
-    f.db.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE users SET platform_role='root' WHERE id=$1",
-        [root_user.id.into()],
-    ))
-    .await
-    .unwrap();
-    let root = keycompute_db::User::find_by_id(&f.db, root_user.id)
+    let root = keycompute_db::User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
         .await
         .unwrap()
         .unwrap();
@@ -376,18 +368,26 @@ async fn local_control_covers_both_families_and_preserves_personal_resource_boun
     let mut f = Fixture::new().await;
     let admin = tenant_owner_console_token(&f).await;
     let member = scoped_jwt(&f.state, &f.user).await;
-    let root = create_test_user(&f.db, f.user.tenant_id, "local-resource-root", &f.run).await;
-    let operator =
-        create_test_user(&f.db, f.user.tenant_id, "local-resource-operator", &f.run).await;
-    for (id, role) in [(root.id, "root"), (operator.id, "operator")] {
-        f.db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role=$2 WHERE id=$1",
-            [id.into(), role.into()],
-        ))
+    let root = keycompute_db::User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
         .await
+        .unwrap()
         .unwrap();
-    }
+    let operator = keycompute_db::User::create(
+        &f.db,
+        &keycompute_db::CreateUserRequest {
+            email: format!("local-resource-operator-{}@fixture.invalid", f.run),
+            name: Some("local-resource-operator".into()),
+        },
+    )
+    .await
+    .unwrap();
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE users SET platform_role='operator' WHERE id=$1",
+        [operator.id.into()],
+    ))
+    .await
+    .unwrap();
     let root_token = token_for(&f, &f.state, root.id, None, 3600).await;
     let op_token = token_for(&f, &f.state, operator.id, None, 3600).await;
     for (mode, prefix) in [("passthrough", "/pt/v1"), ("node_dispatch", "/nt/v1")] {
@@ -440,7 +440,7 @@ async fn local_control_covers_both_families_and_preserves_personal_resource_boun
                 None,
             )
             .await,
-            StatusCode::FORBIDDEN,
+            StatusCode::OK,
         );
         expect(
             http(
@@ -614,24 +614,27 @@ async fn queued_authority_case(change: &str, root: bool) {
     let id = stored_response(&f, "passthrough").await;
     let rev = revision(&f, "response", &id).await;
     let (state, connection, pid) = single_connection_state().await;
-    let actor = if root {
-        let origin = create_test_tenant(&f.db, "response-root-origin", &f.run).await;
-        let actor = create_test_user(&f.db, origin.id, "response-queued-root", &f.run).await;
+    let (actor_id, actor_tenant) = if root {
+        let actor = keycompute_db::User::create(
+            &f.db,
+            &keycompute_db::CreateUserRequest {
+                email: format!("response-queued-platform-{}@fixture.invalid", f.run),
+                name: Some("response-queued-platform".into()),
+            },
+        )
+        .await
+        .unwrap();
         f.db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
             [actor.id.into()],
         ))
         .await
         .unwrap();
-        actor
+        (actor.id, None)
     } else {
-        delegated_admin(&f, "response-queued-admin").await
-    };
-    let origin = if root && change == "root_global" {
-        None
-    } else {
-        Some(actor.tenant_id)
+        let actor = delegated_admin(&f, "response-queued-admin").await;
+        (actor.id, Some(actor.tenant_id))
     };
     if change == "expiry" {
         // A lower bound alone also accepted 999ms, leaving just 1ms for
@@ -644,8 +647,8 @@ async fn queued_authority_case(change: &str, root: bool) {
     let token = token_for(
         &f,
         &state,
-        actor.id,
-        origin,
+        actor_id,
+        actor_tenant,
         if change == "expiry" { 1 } else { 3600 },
     )
     .await;
@@ -686,7 +689,7 @@ async fn queued_authority_case(change: &str, root: bool) {
             f.db.execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "UPDATE users SET token_version=token_version+1 WHERE id=$1",
-                [actor.id.into()],
+                [actor_id.into()],
             ))
             .await
             .unwrap();
@@ -694,13 +697,13 @@ async fn queued_authority_case(change: &str, root: bool) {
         "member" => {
             f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
                 "UPDATE tenant_memberships SET status='suspended' WHERE tenant_id=$1 AND user_id=$2",
-                [actor.tenant_id.into(),actor.id.into()])).await.unwrap();
+                [actor_tenant.unwrap().into(),actor_id.into()])).await.unwrap();
         }
         "tenant" | "origin" => {
             f.db.execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "UPDATE tenants SET authz_version=authz_version+1 WHERE id=$1",
-                [actor.tenant_id.into()],
+                [actor_tenant.unwrap().into()],
             ))
             .await
             .unwrap();
@@ -709,7 +712,7 @@ async fn queued_authority_case(change: &str, root: bool) {
             for role in ["member", "admin"] {
                 f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
                     "UPDATE tenant_memberships SET tenant_role=$3 WHERE tenant_id=$1 AND user_id=$2",
-                    [actor.tenant_id.into(),actor.id.into(),role.into()])).await.unwrap();
+                    [actor_tenant.unwrap().into(),actor_id.into(),role.into()])).await.unwrap();
             }
         }
         "expiry" => {
@@ -740,7 +743,7 @@ async fn queued_authority_case(change: &str, root: bool) {
     );
     let row=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT COUNT(*)::bigint AS n FROM tenant_audit_events WHERE actor_user_id=$1 AND action='response.delete'",
-        [actor.id.into()])).await.unwrap().unwrap();
+        [actor_id.into()])).await.unwrap().unwrap();
     assert_eq!(row.try_get::<i64>("", "n").unwrap(), 0);
     drop(state);
     connection.close().await.unwrap();
@@ -753,10 +756,8 @@ async fn waiting_controls_reject_changed_or_regranted_memberships() {
     }
 }
 #[tokio::test]
-async fn waiting_root_controls_revalidate_global_and_selected_origin_authority() {
-    for change in ["root_global", "origin"] {
-        queued_authority_case(change, true).await;
-    }
+async fn waiting_platform_controls_revalidate_global_authority() {
+    queued_authority_case("root_global", true).await;
 }
 #[tokio::test]
 async fn queued_control_credentials_expire_before_resource_mutation() {
@@ -1538,14 +1539,10 @@ async fn native_account_pool_response_control_is_exact_owner_account_and_kind_sc
     .await
     .unwrap();
 
-    let root = create_test_user(&f.db, tenant, "native-control-root", &f.run).await;
-    f.db.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE users SET platform_role='root' WHERE id=$1",
-        [root.id.into()],
-    ))
-    .await
-    .unwrap();
+    let root = keycompute_db::User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
+        .await
+        .unwrap()
+        .unwrap();
     let root_token = token_for(&f, &f.state, root.id, None, 3600).await;
     let root_path = base.replacen("/api/v1/tenants/", "/api/v1/platform/tenants/", 1);
     expect(

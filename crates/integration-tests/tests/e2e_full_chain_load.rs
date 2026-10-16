@@ -373,7 +373,7 @@ async fn sustained_real_http_database_redis_and_billing_profile() {
         Account::create(
             &db,
             &CreateAccountRequest {
-                tenant_id: tenant_ids[0],
+                tenant_id: None,
                 provider: "openai".into(),
                 name: format!("load-{n}"),
                 endpoint: format!("http://{}/v1", upstream.address),
@@ -389,7 +389,6 @@ async fn sustained_real_http_database_redis_and_billing_profile() {
                 models_supported: vec!["gpt-4o".into()],
                 api_capabilities: vec!["chat_completions".into()],
                 pool_enabled: None,
-                visibility: Some("global".into()),
             },
         )
         .await

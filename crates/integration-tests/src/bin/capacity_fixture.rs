@@ -182,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
                 Account::create(
                     &db,
                     &CreateAccountRequest {
-                        tenant_id: tids[0],
+                        tenant_id: None,
                         provider: if protocol == "anthropic" {
                             "anthropic"
                         } else {
@@ -209,7 +209,6 @@ async fn main() -> anyhow::Result<()> {
                             .into(),
                         ],
                         pool_enabled: None,
-                        visibility: Some("global".into()),
                     },
                 )
                 .await?;

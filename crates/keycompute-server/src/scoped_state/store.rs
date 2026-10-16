@@ -24,7 +24,7 @@ pub const STORED_TTL: i64 = 30 * 24 * 60 * 60;
 pub const TEMP_TTL: i64 = 600;
 pub const MAX_RETAINED_RESPONSES: i64 = 1024;
 pub const MAX_CONVERSATIONS: i64 = 256;
-const ROOT_REASON_MAX: usize = 500;
+const PLATFORM_REASON_MAX: usize = 500;
 #[derive(Debug, Clone, Copy)]
 pub struct Scope {
     pub tenant: Uuid,
@@ -186,7 +186,7 @@ enum ResponseControlAuthority {
         membership_authz_version: i64,
         jwt_expires_at: i64,
     },
-    Root {
+    PlatformAdmin {
         scope: PlatformScope,
         token_version: i32,
         jwt_expires_at: i64,
@@ -200,7 +200,7 @@ pub struct ResponseControlScope {
     tenant_id: Uuid,
     audit: AuditContext,
     authority: ResponseControlAuthority,
-    root_reason: Option<String>,
+    platform_reason: Option<String>,
 }
 
 impl ResponseControlScope {
@@ -237,25 +237,27 @@ impl ResponseControlScope {
                 membership_authz_version,
                 jwt_expires_at,
             },
-            root_reason: None,
+            platform_reason: None,
         })
     }
 
-    pub fn root(
+    pub fn platform_admin(
         scope: PlatformScope,
         target_tenant_id: Uuid,
         audit: AuditContext,
         session: ResponseControlSession,
         reason: impl Into<String>,
     ) -> Result<Self> {
-        let reason = validate_root_reason(reason.into())?;
+        let reason = validate_platform_reason(reason.into())?;
         let ResponseControlSession {
             token_version,
             jwt_expires_at,
             selected,
         } = session;
-        if scope.platform_role() != PlatformRole::Root
-            || scope.user_id().is_nil()
+        if !matches!(
+            scope.platform_role(),
+            PlatformRole::Root | PlatformRole::Operator
+        ) || scope.user_id().is_nil()
             || audit.actor_user_id != scope.user_id()
             || audit.credential_kind != CredentialKind::Jwt
             || audit.request_id.is_none_or(|id| id.is_nil())
@@ -264,7 +266,7 @@ impl ResponseControlScope {
             || target_tenant_id.is_nil()
         {
             return Err(ApiError::Forbidden(
-                "root console authority required".into(),
+                "platform console authority required".into(),
             ));
         }
         if selected.is_some_and(|snapshot| {
@@ -279,13 +281,13 @@ impl ResponseControlScope {
         Ok(Self {
             tenant_id: target_tenant_id,
             audit,
-            authority: ResponseControlAuthority::Root {
+            authority: ResponseControlAuthority::PlatformAdmin {
                 scope,
                 token_version,
                 jwt_expires_at,
                 selected,
             },
-            root_reason: Some(reason),
+            platform_reason: Some(reason),
         })
     }
 
@@ -293,14 +295,14 @@ impl ResponseControlScope {
         self.tenant_id
     }
 
-    fn root_reason(&self) -> Option<&str> {
-        self.root_reason.as_deref()
+    fn platform_reason(&self) -> Option<&str> {
+        self.platform_reason.as_deref()
     }
 
     pub(crate) fn check_expiry(&self) -> Result<()> {
         let expires = match self.authority {
             ResponseControlAuthority::TenantAdmin { jwt_expires_at, .. }
-            | ResponseControlAuthority::Root { jwt_expires_at, .. } => jwt_expires_at,
+            | ResponseControlAuthority::PlatformAdmin { jwt_expires_at, .. } => jwt_expires_at,
         };
         if expires <= Utc::now().timestamp() {
             return Err(ApiError::Auth("console session expired".into()));
@@ -340,7 +342,7 @@ impl ResponseControlScope {
                 .ok_or_else(denied)?;
                 row.try_get::<bool>("", "authorized").map_err(storage)?
             }
-            ResponseControlAuthority::Root {
+            ResponseControlAuthority::PlatformAdmin {
                 scope,
                 token_version,
                 selected,
@@ -352,7 +354,7 @@ impl ResponseControlScope {
                 let selected_role = selected.map(|m| m.tenant_role.as_str());
                 let row = timed(db.query_one(Statement::from_sql_and_values(
                     DbBackend::Postgres,
-                    "SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND u.status='active' AND u.token_version=$2 AND u.platform_role='root' AND EXISTS(SELECT 1 FROM tenants target WHERE target.id=$3) AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM tenants t JOIN tenant_memberships m ON m.tenant_id=t.id WHERE t.id=$4 AND t.status='active' AND t.authz_version=$5 AND m.user_id=u.id AND m.status='active' AND m.authz_version=$6 AND m.tenant_role=$7))) AS authorized",
+                    "SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND u.status='active' AND u.token_version=$2 AND u.platform_role IN ('root','operator') AND EXISTS(SELECT 1 FROM tenants target WHERE target.id=$3) AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM tenants t JOIN tenant_memberships m ON m.tenant_id=t.id WHERE t.id=$4 AND t.status='active' AND t.authz_version=$5 AND m.user_id=u.id AND m.status='active' AND m.authz_version=$6 AND m.tenant_role=$7))) AS authorized",
                     [
                         scope.user_id().into(),
                         token_version.into(),
@@ -393,7 +395,7 @@ impl ResponseControlScope {
             ),
         )
         .await?;
-        let (actor, token_version, selected, require_root) = match self.authority {
+        let (actor, token_version, selected, require_platform) = match self.authority {
             ResponseControlAuthority::TenantAdmin {
                 scope,
                 token_version,
@@ -411,7 +413,7 @@ impl ResponseControlScope {
                 }),
                 false,
             ),
-            ResponseControlAuthority::Root {
+            ResponseControlAuthority::PlatformAdmin {
                 scope,
                 token_version,
                 selected,
@@ -450,7 +452,8 @@ impl ResponseControlScope {
             .map_err(storage)?
             .parse()
             .map_err(|_| denied())?;
-        if require_root && platform_role != PlatformRole::Root {
+        if require_platform && !matches!(platform_role, PlatformRole::Root | PlatformRole::Operator)
+        {
             return Err(denied());
         }
         if let Some(origin) = selected {
@@ -470,7 +473,7 @@ impl ResponseControlScope {
         self.check_expiry()?;
         Ok(AuditContext {
             actor_platform_role: platform_role,
-            actor_tenant_role: if require_root {
+            actor_tenant_role: if require_platform {
                 None
             } else {
                 Some(TenantRole::Admin)
@@ -480,13 +483,14 @@ impl ResponseControlScope {
     }
 }
 
-fn validate_root_reason(reason: String) -> Result<String> {
+fn validate_platform_reason(reason: String) -> Result<String> {
     let trimmed = reason.trim();
-    if trimmed.is_empty() || reason.len() > ROOT_REASON_MAX || reason.chars().any(char::is_control)
+    if trimmed.is_empty()
+        || reason.len() > PLATFORM_REASON_MAX
+        || reason.chars().any(char::is_control)
     {
         return Err(ApiError::BadRequest(
-            "root reason must be nonempty, at most 500 bytes and contain no control characters"
-                .into(),
+            "platform administrator reason must be nonempty, at most 500 bytes and contain no control characters".into(),
         ));
     }
     Ok(trimmed.to_owned())
@@ -513,7 +517,7 @@ pub async fn check_account(
         return Ok(());
     };
     let row=timed(db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT 1 FROM accounts a JOIN tenants owner ON owner.id=a.tenant_id AND owner.status='active' JOIN passthrough_bindings p ON p.account_id=a.id JOIN tenants anchor ON anchor.id=p.tenant_id AND anchor.status='active' WHERE a.id=$1 AND a.enabled AND a.provider='openai' AND a.api_capabilities @> ARRAY['responses']::TEXT[] AND (p.tenant_id=$2 OR p.is_global) LIMIT 1",
+        "SELECT 1 FROM accounts a LEFT JOIN tenants owner ON owner.id=a.tenant_id JOIN passthrough_bindings p ON p.account_id=a.id JOIN tenants anchor ON anchor.id=p.tenant_id AND anchor.status='active' WHERE a.id=$1 AND a.enabled AND COALESCE(owner.status='active',TRUE) AND a.provider='openai' AND a.api_capabilities @> ARRAY['responses']::TEXT[] AND (p.tenant_id=$2 OR p.is_global) LIMIT 1",
         [account.into(),scope.tenant.into()]))).await?;
     if row.is_none() {
         return Err(missing());
@@ -1579,7 +1583,7 @@ pub(crate) async fn append_control_audit(
     mut metadata: Value,
 ) -> Result<()> {
     control.check_expiry()?;
-    let (scope, tenant) = if let Some(reason) = control.root_reason() {
+    let (scope, tenant) = if let Some(reason) = control.platform_reason() {
         if let Some(object) = metadata.as_object_mut() {
             object.insert("reason".into(), Value::String(reason.to_owned()));
             object.insert(
@@ -2290,7 +2294,7 @@ mod response_control_scope_tests {
         assert!(old.check_expiry().is_err());
     }
     #[test]
-    fn root_support_requires_explicit_target_reason_and_valid_origin_snapshot() {
+    fn platform_support_requires_explicit_target_reason_and_valid_origin_snapshot() {
         let actor = Uuid::new_v4();
         let target = Uuid::new_v4();
         let root = PlatformScope::checked(actor, PlatformRole::Root).unwrap();
@@ -2300,13 +2304,23 @@ mod response_control_scope_tests {
             jwt_expires_at: Utc::now().timestamp() + 60,
             selected: None,
         };
-        assert!(ResponseControlScope::root(root, target, audit, session, "incident").is_ok());
+        assert!(
+            ResponseControlScope::platform_admin(root, target, audit, session, "incident").is_ok()
+        );
         for reason in ["", "\t", "incident\nprivate"] {
-            assert!(ResponseControlScope::root(root, target, audit, session, reason).is_err());
+            assert!(
+                ResponseControlScope::platform_admin(root, target, audit, session, reason).is_err()
+            );
         }
         let operator = PlatformScope::checked(actor, PlatformRole::Operator).unwrap();
-        assert!(ResponseControlScope::root(operator, target, audit, session, "incident").is_err());
-        assert!(ResponseControlScope::root(root, Uuid::nil(), audit, session, "incident").is_err());
+        assert!(
+            ResponseControlScope::platform_admin(operator, target, audit, session, "incident")
+                .is_ok()
+        );
+        assert!(
+            ResponseControlScope::platform_admin(root, Uuid::nil(), audit, session, "incident")
+                .is_err()
+        );
         let invalid = ResponseControlSession {
             selected: Some(ResponseControlMembership {
                 tenant_id: target,
@@ -2316,6 +2330,8 @@ mod response_control_scope_tests {
             }),
             ..session
         };
-        assert!(ResponseControlScope::root(root, target, audit, invalid, "incident").is_err());
+        assert!(
+            ResponseControlScope::platform_admin(root, target, audit, invalid, "incident").is_err()
+        );
     }
 }

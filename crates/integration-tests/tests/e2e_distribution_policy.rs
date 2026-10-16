@@ -45,15 +45,23 @@ impl Fixture {
         let member = create_test_user(&db, a.id, "policy-member", &run)
             .await
             .user;
-        let mut root = create_test_user(&db, b.id, "policy-root", &run).await.user;
+        let root = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: format!("policy-platform-actor-{run}@fixture.invalid"),
+                name: Some("Policy platform actor".into()),
+            },
+        )
+        .await
+        .unwrap();
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
             [root.id.into()],
         ))
         .await
         .unwrap();
-        root = User::find_by_id(&db, root.id).await.unwrap().unwrap();
+        let root = User::find_by_id(&db, root.id).await.unwrap().unwrap();
         let state = AppState::with_pool(DbRouter::single(db.clone()));
         Self {
             db,
@@ -301,14 +309,23 @@ async fn credentials_foreign_ids_and_root_without_membership_follow_distinct_rou
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{created}");
+    let operator = User::create(
+        &f.db,
+        &keycompute_db::CreateUserRequest {
+            email: format!("policy-operator-{}@fixture.invalid", f.run),
+            name: Some("Policy operator".into()),
+        },
+    )
+    .await
+    .unwrap();
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE users SET platform_role='operator' WHERE id=$1",
-        [f.root.id.into()],
+        [operator.id.into()],
     ))
     .await
     .unwrap();
-    let operator = f.token(f.root.id, None).await;
+    let operator = f.token(operator.id, None).await;
     assert_eq!(
         request(
             create_router(f.state.clone()),
@@ -319,7 +336,7 @@ async fn credentials_foreign_ids_and_root_without_membership_follow_distinct_rou
         )
         .await
         .0,
-        StatusCode::FORBIDDEN
+        StatusCode::OK
     );
     let raw = keycompute_auth::ProduceAiKeyValidator::generate_key();
     integration_tests::db::create_test_api_key(
@@ -568,14 +585,14 @@ async fn same_revision_race_and_concurrent_defaults_are_atomic() {
     );
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     let platform = dao::PolicyActor::platform(
-        PlatformScope::checked(f.root.id, PlatformRole::Root).unwrap(),
+        PlatformScope::checked(f.root.id, PlatformRole::Operator).unwrap(),
         f.a.id,
         f.root.token_version,
     )
     .unwrap();
     let ra = AuditContext {
         actor_user_id: f.root.id,
-        actor_platform_role: PlatformRole::Root,
+        actor_platform_role: PlatformRole::Operator,
         actor_tenant_role: None,
         ..audit
     };
@@ -718,7 +735,7 @@ async fn renewed_roles_and_tokens_do_not_revalidate_old_policy_authority() {
         .is_err()
     );
     let stale = dao::PolicyActor::platform(
-        PlatformScope::checked(f.root.id, PlatformRole::Root).unwrap(),
+        PlatformScope::checked(f.root.id, PlatformRole::Operator).unwrap(),
         f.a.id,
         f.root.token_version,
     )
@@ -732,7 +749,7 @@ async fn renewed_roles_and_tokens_do_not_revalidate_old_policy_authority() {
     .unwrap();
     let actor = AuditContext {
         actor_user_id: f.root.id,
-        actor_platform_role: PlatformRole::Root,
+        actor_platform_role: PlatformRole::Operator,
         actor_tenant_role: None,
         ..audit
     };

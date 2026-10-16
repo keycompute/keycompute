@@ -45,13 +45,14 @@ fn predicate(
             predicates.push(current_tenant_actor(true));
         }
         ReadScope::Platform(scope) => {
-            // Operator may consume separate aggregate diagnostics, not raw
-            // individual orders, provider payloads or payment credentials.
-            if scope.platform_role() != PlatformRole::Root {
+            if !matches!(
+                scope.platform_role(),
+                PlatformRole::Root | PlatformRole::Operator
+            ) {
                 return Err(DbError::Other("platform billing scope required".into()));
             }
             values.push(scope.user_id().into());
-            predicates.push("EXISTS (SELECT 1 FROM users actor WHERE actor.id=$1 AND actor.status='active' AND actor.platform_role='root')".into());
+            predicates.push("EXISTS (SELECT 1 FROM users actor WHERE actor.id=$1 AND actor.status='active' AND actor.platform_role IN ('root','operator'))".into());
         }
     }
     if let Some(status) = status {
@@ -261,12 +262,12 @@ mod tests {
         }
     }
     #[test]
-    fn tenant_member_and_platform_operator_cannot_request_all_orders() {
+    fn tenant_member_is_scoped_but_platform_operator_can_request_all_orders() {
         let user = Uuid::new_v4();
         let tenant = TenantScope::checked(Uuid::new_v4(), user, TenantRole::Member).unwrap();
         assert!(predicate(ReadScope::Tenant(tenant), None, None).is_err());
         let operator = PlatformScope::checked(user, PlatformRole::Operator).unwrap();
-        assert!(predicate(ReadScope::Platform(operator), None, None).is_err());
+        assert!(predicate(ReadScope::Platform(operator), None, None).is_ok());
     }
 }
 

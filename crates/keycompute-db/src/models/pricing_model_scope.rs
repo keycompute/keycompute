@@ -72,7 +72,7 @@ impl TenantPricingScope {
 }
 
 /// A platform pricing scope is deliberately narrower than a generic
-/// PlatformScope: pricing management is a root-only action.
+/// PlatformScope and is available to both platform administrator roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlatformPricingScope {
     actor_user_id: Uuid,
@@ -330,8 +330,8 @@ pub(crate) async fn lock_platform_authority(
         .platform_role
         .parse::<PlatformRole>()
         .map_err(DbError::Other)?;
-    if role != PlatformRole::Root {
-        return Err(DbError::Other("root pricing authority required".into()));
+    if !matches!(role, PlatformRole::Root | PlatformRole::Operator) {
+        return Err(DbError::Other("platform pricing authority required".into()));
     }
     Ok(AuditContext {
         actor_platform_role: role,

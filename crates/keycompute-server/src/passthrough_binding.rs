@@ -22,13 +22,13 @@ pub(crate) const HEALTH_TTL_SECS: i64 = 300;
 const SNAPSHOT_SQL: &str = r#"
 SELECT DISTINCT ON (a.id,declared.model) a.*, pb.id AS binding_id,pb.revision AS binding_revision,
        pb.tenant_id AS binding_tenant_id,anchor.name AS tenant_name,pb.is_global,pb.pool_enabled AS binding_pool_enabled,
-       (anchor.status='active') AS anchor_active,(owner.status='active') AS owner_active,
+       (anchor.status='active') AS anchor_active,COALESCE(owner.status='active',TRUE) AS owner_active,
        EXISTS(SELECT 1 FROM tenants consumer WHERE consumer.id=$1 AND consumer.status='active') AS caller_active,
        declared.model AS binding_model,h.status AS model_status,h.account_config_version AS model_config_version,
        h.generation AS model_generation,h.expires_at AS model_expires_at,
        statement_timestamp() AS database_now
 FROM passthrough_bindings pb JOIN accounts a ON a.id=pb.account_id
-JOIN tenants anchor ON anchor.id=pb.tenant_id JOIN tenants owner ON owner.id=a.tenant_id
+JOIN tenants anchor ON anchor.id=pb.tenant_id LEFT JOIN tenants owner ON owner.id=a.tenant_id
 CROSS JOIN LATERAL unnest(a.models_supported) AS declared(model)
 LEFT JOIN account_model_health h ON h.account_id=a.id AND h.api_capability=$3 AND h.model=declared.model
 WHERE (pb.tenant_id=$1 OR pb.is_global) AND ($2::TEXT IS NULL OR declared.model=$2)

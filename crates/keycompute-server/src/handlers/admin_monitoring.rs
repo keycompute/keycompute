@@ -899,7 +899,7 @@ pub async fn probe_monitoring_targets(
         None => {
             // Read IDs only. Do not materialize credentials for a candidate list.
             let rows=access.connection().query_all(Statement::from_string(DbBackend::Postgres,
-                "SELECT a.id FROM accounts a JOIN tenants t ON t.id=a.tenant_id WHERE a.enabled AND t.status='active' ORDER BY a.id LIMIT 51")).await?;
+                "SELECT a.id FROM accounts a LEFT JOIN tenants t ON t.id=a.tenant_id WHERE a.enabled AND COALESCE(t.status='active',TRUE) ORDER BY a.id LIMIT 51")).await?;
             let ids = rows
                 .into_iter()
                 .map(|row| row.try_get::<Uuid>("", "id"))

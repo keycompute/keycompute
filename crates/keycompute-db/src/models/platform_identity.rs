@@ -1,4 +1,4 @@
-//! Platform identity/lifecycle entrypoints with current signed root authority.
+//! Platform identity/lifecycle entrypoints with current signed platform authority.
 use crate::{
     AuditContext, CreateTenantRequest, DbError, Tenant, TenantAuditEvent, UpdateTenantRequest,
     User,
@@ -130,7 +130,7 @@ impl PlatformIdentity {
         limit: i64,
         offset: i64,
     ) -> Result<PlatformPage<PlatformUserInfo>, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         let search = page(limit, offset, search)?;
         let mut values = scope.values();
         values.extend([
@@ -162,7 +162,7 @@ impl PlatformIdentity {
         scope: FinancialScope,
         id: Uuid,
     ) -> Result<PlatformUserInfo, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         if id.is_nil() {
             return Err(invalid());
         }
@@ -188,7 +188,7 @@ impl PlatformIdentity {
         limit: i64,
         offset: i64,
     ) -> Result<PlatformPage<PlatformTenantInfo>, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         let search = page(limit, offset, search)?;
         let mut values = scope.values();
         values.extend([search.into(), limit.into(), offset.into()]);
@@ -214,7 +214,7 @@ impl PlatformIdentity {
         scope: FinancialScope,
         id: Uuid,
     ) -> Result<PlatformTenantInfo, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         if id.is_nil() {
             return Err(invalid());
         }
@@ -242,7 +242,7 @@ impl PlatformIdentity {
         patch: &PlatformUserPatch,
         why: &str,
     ) -> Result<PlatformUserInfo, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         let why = reason(why)?;
         if id.is_nil()
             || patch
@@ -258,8 +258,34 @@ impl PlatformIdentity {
             let parents=tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT id FROM tenants WHERE owner_user_id=$1 ORDER BY id",[id.into()])).await?.into_iter().map(|r|r.try_get("","id").map_err(DbError::from)).collect::<Result<Vec<Uuid>,_>>()?;
             let actor=scope.lock_related(&tx,audit,&parents,&[id]).await?;
             let before=Self::user(&tx,scope,id).await?;
+            let actor_role=scope.platform_role();
+            let target_role: PlatformRole=before.platform_role.parse().map_err(DbError::Other)?;
+            if actor_role==PlatformRole::Operator
+                && matches!(target_role,PlatformRole::Root|PlatformRole::Operator)
+            {
+                return Err(denied());
+            }
+            if patch.platform_role==Some(PlatformRole::Root)
+                && target_role!=PlatformRole::Root
+            {
+                return Err(denied());
+            }
+            if patch.platform_role==Some(PlatformRole::Operator)
+                && actor_role!=PlatformRole::Root
+            {
+                return Err(denied());
+            }
             let role=patch.platform_role.unwrap_or(before.platform_role.parse().map_err(DbError::Other)?);
             let status=patch.status.unwrap_or(before.status.parse().map_err(DbError::Other)?);
+            if matches!(role,PlatformRole::Root|PlatformRole::Operator)
+                && tx.query_one(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT 1 FROM tenant_memberships WHERE user_id=$1 AND status<>'removed' LIMIT 1",
+                    [id.into()],
+                )).await?.is_some()
+            {
+                return Err(DbError::Other("platform_identity_has_tenant_membership".into()));
+            }
             let security_changed=before.platform_role!=role.as_str()||before.status!=status.as_str();
             let name_changed=patch.name.as_ref().is_some_and(|name|before.name.as_ref()!=Some(name));
             let user=if security_changed {
@@ -283,7 +309,7 @@ impl PlatformIdentity {
         audit: &AuditContext,
         id: Uuid,
     ) -> Result<(), DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         if id.is_nil() || id == scope.user_id() {
             return Err(invalid());
         }
@@ -303,6 +329,13 @@ impl PlatformIdentity {
                 .collect::<Result<Vec<Uuid>, _>>()?;
             let actor = scope.lock_related(&tx, audit, &parents, &[id]).await?;
             let current = Self::user(&tx, scope, id).await?;
+            let target_role: PlatformRole = current.platform_role.parse().map_err(DbError::Other)?;
+            if target_role == PlatformRole::Root
+                || (target_role == PlatformRole::Operator
+                    && scope.platform_role() != PlatformRole::Root)
+            {
+                return Err(denied());
+            }
             let user = User::set_security_for_platform_command(
                 &tx,
                 id,
@@ -319,7 +352,7 @@ impl PlatformIdentity {
                 "user",
                 id,
                 None,
-                "root requested identity deletion",
+                "platform administrator requested identity deletion",
                 serde_json::json!({"before":{"platform_role":current.platform_role,"status":current.status}}),
             )
             .await?;
@@ -336,7 +369,7 @@ impl PlatformIdentity {
         request: &CreateTenantRequest,
         owner: Uuid,
     ) -> Result<PlatformTenantInfo, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         if owner.is_nil() {
             return Err(invalid());
         }
@@ -358,7 +391,7 @@ impl PlatformIdentity {
         id: Uuid,
         request: &UpdateTenantRequest,
     ) -> Result<PlatformTenantInfo, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         if id.is_nil() {
             return Err(invalid());
         }
@@ -367,7 +400,7 @@ impl PlatformIdentity {
             let actor=scope.lock_related(&tx,audit,&[id],&[]).await?;
             let before=Tenant::find_by_id_for_update(&tx,id).await?.ok_or_else(||DbError::not_found("Tenant",id))?;
             let current=before.update(&tx,request).await?;
-            change_audit(&tx,&actor,"tenant.update","tenant",id,Some(id),"root updated tenant",serde_json::json!({"tenant_id":id,"previous_status":before.status,"status":current.status,"authz_version":current.authz_version})).await?;
+            change_audit(&tx,&actor,"tenant.update","tenant",id,Some(id),"platform administrator updated tenant",serde_json::json!({"tenant_id":id,"previous_status":before.status,"status":current.status,"authz_version":current.authz_version})).await?;
             // The authorized target may be the selected tenant; construct its
             // safe result directly rather than trying to renew an invalid token.
             let result=PlatformTenantInfo{id:current.id,name:current.name,slug:current.slug,description:current.description,user_count:Tenant::count_users(&tx,id).await?,account_count:Tenant::count_accounts(&tx,id).await?,is_active:current.status=="active",status:current.status,created_at:current.created_at,updated_at:current.updated_at};
@@ -381,7 +414,7 @@ impl PlatformIdentity {
         audit: &AuditContext,
         id: Uuid,
     ) -> Result<(), DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         if id.is_nil() {
             return Err(invalid());
         }
@@ -403,7 +436,7 @@ impl PlatformIdentity {
                 "tenant",
                 id,
                 Some(id),
-                "root deleted empty tenant",
+                "platform administrator deleted empty tenant",
                 serde_json::json!({"tenant_id":id,"deleted_tenant_id":id,"tenant_name":tenant.name,"tenant_slug":tenant.slug}),
             )
             .await?;

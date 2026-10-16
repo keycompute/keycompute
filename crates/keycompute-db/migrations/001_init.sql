@@ -287,7 +287,10 @@ FOR EACH ROW EXECUTE FUNCTION enforce_key_issuance_identity();
 -- accounts: 上游 Provider 账号池
 CREATE TABLE IF NOT EXISTS accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    -- NULL means a platform-owned account. Platform accounts are visible to
+    -- every active caller tenant; tenant-owned accounts are private to their
+    -- single owning tenant.
+    tenant_id UUID REFERENCES tenants(id) ON DELETE RESTRICT,
     provider VARCHAR(50) NOT NULL,
     name VARCHAR(255) NOT NULL,
     endpoint VARCHAR(500) NOT NULL,
@@ -328,6 +331,10 @@ CREATE TABLE IF NOT EXISTS accounts (
             OR
             (provider = 'anthropic' AND api_capabilities <@ ARRAY['messages']::TEXT[])
         )
+    ),
+    CONSTRAINT ck_accounts_scope_visibility CHECK (
+        (tenant_id IS NULL AND visibility = 'global')
+        OR (tenant_id IS NOT NULL AND visibility = 'tenant')
     ),
     CONSTRAINT ck_accounts_probe_status
         CHECK (last_probe_status IS NULL OR last_probe_status IN ('succeeded', 'failed')),
@@ -2240,8 +2247,32 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM users WHERE platform_role='root' AND status='active') THEN
         RAISE EXCEPTION 'at least one active root is required' USING ERRCODE='23514';
     END IF;
+    IF EXISTS (
+        SELECT 1 FROM tenant_memberships m
+        JOIN users u ON u.id=m.user_id
+        WHERE u.platform_role IN ('root','operator') AND m.status<>'removed'
+    ) THEN
+        RAISE EXCEPTION 'platform identities cannot belong to a tenant' USING ERRCODE='23514';
+    END IF;
     RETURN NULL;
 END; $$ LANGUAGE plpgsql;
+
+-- A root identity is permanent. Profile and credential rotation remain
+-- possible, but its authority and existence cannot be changed by any role.
+CREATE OR REPLACE FUNCTION protect_root_identity() RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP='DELETE' AND OLD.platform_role='root' THEN
+        RAISE EXCEPTION 'root identity cannot be deleted' USING ERRCODE='23514';
+    END IF;
+    IF TG_OP='UPDATE' AND OLD.platform_role='root'
+       AND ROW(NEW.platform_role,NEW.status) IS DISTINCT FROM ROW(OLD.platform_role,OLD.status) THEN
+        RAISE EXCEPTION 'root authority is immutable' USING ERRCODE='23514';
+    END IF;
+    RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS protected_root_identity ON users;
+CREATE TRIGGER protected_root_identity BEFORE UPDATE OF platform_role,status OR DELETE ON users
+    FOR EACH ROW EXECUTE FUNCTION protect_root_identity();
 DROP TRIGGER IF EXISTS identity_users_guard ON users;
 CREATE CONSTRAINT TRIGGER identity_users_guard AFTER INSERT OR UPDATE OF platform_role,status OR DELETE ON users
     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION assert_identity_invariants();

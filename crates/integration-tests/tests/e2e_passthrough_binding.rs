@@ -54,6 +54,15 @@ async fn scoped_jwt(state: &AppState, user: &TenantActor) -> String {
         .access_token
 }
 
+fn global_jwt(state: &AppState, user: &User) -> String {
+    state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_identity_token(user.id, None, user.token_version, None, None, 3600)
+        .unwrap()
+}
+
 #[derive(Clone, Debug)]
 struct Call {
     channel: String,
@@ -251,17 +260,11 @@ impl Fixture {
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "binding", &run).await;
-        let mut user = create_test_user(&db, tenant.id, "binding", &run).await;
-        // These endpoints are platform APIs. Tenant membership alone must not
-        // be treated as the old unrestricted admin role.
-        db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
-            [user.id.into()],
-        ))
-        .await
-        .unwrap();
-        user.user = User::find_by_id(&db, user.id).await.unwrap().unwrap();
+        let user = create_test_user(&db, tenant.id, "binding", &run).await;
+        let root = User::find_by_email(&db, "tenant-test-root@fixture.invalid")
+            .await
+            .unwrap()
+            .unwrap();
         UserBalance::recharge(
             &db,
             tenant.id,
@@ -296,7 +299,7 @@ impl Fixture {
                 Account::create(
                     &db,
                     &CreateAccountRequest {
-                        tenant_id: tenant.id,
+                        tenant_id: Some(tenant.id),
                         provider: "openai".into(),
                         name: format!("binding-{channel}-{run}"),
                         endpoint: format!("http://{address}/{channel}/v1"),
@@ -312,7 +315,6 @@ impl Fixture {
                         models_supported: models.to_vec(),
                         api_capabilities: vec!["chat_completions".into()],
                         pool_enabled: None,
-                        visibility: Some("tenant".into()),
                     },
                 )
                 .await
@@ -325,7 +327,7 @@ impl Fixture {
         let state = AppState::try_with_pool_and_config(DbRouter::single(db.clone()), config)
             .await
             .unwrap();
-        let admin = scoped_jwt(&state, &user).await;
+        let admin = global_jwt(&state, &root);
         let key = ProduceAiKeyValidator::generate_key();
         let key_id = integration_tests::db::create_test_api_key(
             &db,
@@ -554,7 +556,7 @@ async fn passthrough_single_attempt_preserves_native_json() {
 }
 
 #[tokio::test]
-async fn passthrough_delete_revokes_grant_without_reopening_pool() {
+async fn passthrough_delete_revokes_grant_without_changing_account_pool() {
     let mut f = Fixture::new().await;
     let b = f.bind(true).await;
     let del = f
@@ -573,7 +575,7 @@ async fn passthrough_delete_revokes_grant_without_reopening_pool() {
         .await
         .unwrap()
         .unwrap();
-    assert!(!account.pool_enabled);
+    assert!(account.pool_enabled);
     f.finish().await;
 }
 
@@ -592,12 +594,12 @@ async fn passthrough_health_bad_model_isolated() {
 }
 
 #[tokio::test]
-async fn passthrough_global_grant_allows_cross_owner_anchor_and_deduplicates() {
+async fn platform_account_allows_multiple_tenant_bindings_and_deduplicates() {
     let mut f = Fixture::new().await;
     let other = create_test_tenant(&f.db, "other", &f.run).await;
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE accounts SET visibility='global' WHERE id=$1",
+        "UPDATE accounts SET tenant_id=NULL, visibility='global' WHERE id=$1",
         [f.accounts[0].id.into()],
     ))
     .await
@@ -729,14 +731,13 @@ async fn passthrough_ambiguous_accounts_fail_before_upstream_io() {
 }
 
 #[tokio::test]
-async fn account_pool_checkbox_cannot_override_a_bound_grant() {
+async fn account_pool_checkbox_is_independent_of_a_bound_grant() {
     let mut f = Fixture::new().await;
     let _ = f.bind(true).await;
-    let err = f.accounts[0]
+    let updated = f.accounts[0]
         .update(
             &f.db,
             &UpdateAccountRequest {
-                tenant_id: None,
                 name: None,
                 endpoint: None,
                 upstream_api_key_encrypted: None,
@@ -747,12 +748,12 @@ async fn account_pool_checkbox_cannot_override_a_bound_grant() {
                 enabled: None,
                 models_supported: None,
                 api_capabilities: None,
-                visibility: None,
                 pool_enabled: Some(false),
             },
         )
-        .await;
-    assert!(err.is_err());
+        .await
+        .unwrap();
+    assert!(!updated.pool_enabled);
     f.finish().await;
 }
 
@@ -1075,42 +1076,17 @@ async fn passthrough_probe_cas_rejects_stale_generation_and_changed_account_conf
 }
 
 #[tokio::test]
-async fn passthrough_global_account_owner_lifecycle_is_rechecked() {
+async fn platform_account_has_no_tenant_owner_lifecycle() {
     let mut f = Fixture::new().await;
     let owner = create_test_tenant(&f.db, "passthrough-owner", &f.run).await;
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE accounts SET tenant_id=$2,visibility='global' WHERE id=$1",
-        [f.accounts[0].id.into(), owner.id.into()],
+        "UPDATE accounts SET tenant_id=NULL,visibility='global' WHERE id=$1",
+        [f.accounts[0].id.into()],
     ))
     .await
     .unwrap();
     let passthrough = f.bind(false).await;
-    // An unrelated global offering remains visible after this account's
-    // owner is deactivated. Make that coexistence deterministic rather than
-    // relying on timing between independent parallel tests.
-    let unrelated_model = format!("global-independent-{}", f.run);
-    expect(
-        f.admin(
-            Method::PUT,
-            &format!("/api/v1/accounts/{}", f.accounts[1].id),
-            Some(json!({"models":[unrelated_model]})),
-        )
-        .await,
-        StatusCode::OK,
-    );
-    expect(
-        f.admin(
-            Method::POST,
-            ADMIN,
-            Some(json!({
-                "account_id": f.accounts[1].id, "tenant_id": f.user.tenant_id,
-                "is_global": true, "pool_enabled": false,
-            })),
-        )
-        .await,
-        StatusCode::OK,
-    );
     f.probe(&passthrough).await;
     expect(f.chat(PT, f.body(0)).await, StatusCode::OK);
     f.db.execute(Statement::from_sql_and_values(
@@ -1121,17 +1097,10 @@ async fn passthrough_global_account_owner_lifecycle_is_rechecked() {
     .await
     .unwrap();
     let body = f.body(0);
-    expect(
-        f.chat(PT, body.clone()).await,
-        StatusCode::SERVICE_UNAVAILABLE,
-    );
-    assert!(f.mock.calls_for(&body).is_empty());
+    expect(f.chat(PT, body.clone()).await, StatusCode::OK);
+    assert_eq!(f.mock.calls_for(&body).len(), 1);
     let listed = f.listed().await;
-    assert!(f.models.iter().all(|model| !listed.contains(model)));
-    assert!(
-        listed.contains(&unrelated_model),
-        "unrelated global grants must remain visible"
-    );
+    assert!(f.models.iter().all(|model| listed.contains(model)));
     f.finish().await;
 }
 
@@ -1358,130 +1327,34 @@ async fn exclusive_grant_blocks_existing_response_resources_and_continuations() 
 }
 
 #[tokio::test]
-async fn private_account_grants_apply_scope_and_pool_matrix_to_discovery_and_execution() {
+async fn tenant_account_cannot_be_granted_outside_its_owner_tenant() {
     let mut f = Fixture::new().await;
-    // Legacy visibility deliberately stays private: the grant must authorize
-    // both the router and rate-limit/admission layers, without owner leakage.
-    for account in &f.accounts[1..] {
-        f.db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE accounts SET enabled=FALSE WHERE id=$1",
-            [account.id.into()],
-        ))
-        .await
-        .unwrap();
-    }
-    let mut consumers = Vec::new();
-    for name in ["grant-target", "grant-outsider"] {
-        let tenant = create_test_tenant(&f.db, name, &f.run).await;
-        let user = integration_tests::db::create_test_user(&f.db, tenant.id, name, &f.run).await;
-        UserBalance::recharge(
-            &f.db,
-            tenant.id,
-            user.id,
-            Decimal::from(1000),
-            None,
-            Some("isolated account grant matrix"),
-        )
-        .await
-        .unwrap();
-        let key = ProduceAiKeyValidator::generate_key();
-        integration_tests::db::create_test_api_key(
-            &f.db,
-            &CreateProduceAiKeyRequest {
-                tenant_id: tenant.id,
-                user_id: user.id,
-                name: "grant-matrix".into(),
-                produce_ai_key_hash: ProduceAiKeyValidator::hash_key(&key),
-                produce_ai_key_preview: "sk-test****".into(),
-                expires_at: None,
-            },
-        )
-        .await
-        .unwrap();
-        consumers.push((tenant.id, key));
-    }
-    let mut binding = expect(
-        f.admin(
+    let other = create_test_tenant(&f.db, "grant-outsider", &f.run).await;
+    let denied = f
+        .admin(
             Method::POST,
             ADMIN,
             Some(json!({
-                "account_id":f.accounts[0].id,"tenant_id":consumers[0].0,
+                "account_id": f.accounts[0].id,
+                "tenant_id": other.id,
+                "is_global": true,
             })),
         )
-        .await,
-        StatusCode::OK,
-    );
+        .await;
+    assert_eq!(denied.status, StatusCode::BAD_REQUEST);
+
+    let binding = f.bind(false).await;
+    assert_eq!(binding["tenant_id"], f.user.tenant_id.to_string());
     assert_eq!(binding["is_global"], false);
-    assert_eq!(binding["pool_enabled"], false);
-    for (global, pool_enabled) in [(false, false), (false, true), (true, false), (true, true)] {
-        binding = expect(f.admin(Method::PUT, &format!("{ADMIN}/{}",binding["id"].as_str().unwrap()),
-            Some(json!({"expected_revision":binding["revision"],"is_global":global,"pool_enabled":pool_enabled}))).await, StatusCode::OK);
-        for (key, scope_allows) in [
-            (&consumers[0].1, true),
-            (&consumers[1].1, global),
-            (&f.key, global),
-        ] {
-            for (path, allowed) in [
-                (PT, scope_allows),
-                ("/v1/chat/completions", scope_allows && pool_enabled),
-            ] {
-                let body = f.body(1);
-                expect(
-                    api(
-                        f.app.clone(),
-                        Method::POST,
-                        path,
-                        Some(key),
-                        Some(body.clone()),
-                    )
-                    .await,
-                    if allowed {
-                        StatusCode::OK
-                    } else {
-                        StatusCode::NOT_FOUND
-                    },
-                );
-                let calls = f.mock.calls_for(&body);
-                assert_eq!(
-                    calls.len(),
-                    usize::from(allowed),
-                    "{path}: global={global}, pool={pool_enabled}"
-                );
-                if allowed {
-                    assert_eq!(calls[0].channel, "A");
-                }
-            }
-            for (path, allowed) in [
-                ("/pt/v1/models", scope_allows),
-                ("/v1/models", scope_allows && pool_enabled),
-            ] {
-                let list = expect(
-                    api(f.app.clone(), Method::GET, path, Some(key), None).await,
-                    StatusCode::OK,
-                );
-                for model in &f.models {
-                    assert_eq!(
-                        list["data"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .any(|m| m["id"] == *model),
-                        allowed,
-                        "discovery {path}: global={global}, pool={pool_enabled}"
-                    );
-                }
-            }
-        }
-    }
     let account = Account::find_by_id(&f.db, f.accounts[0].id)
         .await
         .unwrap()
         .unwrap();
     assert!(
-        !account.pool_enabled,
-        "binding flags must not reopen legacy account exposure"
+        account.pool_enabled,
+        "binding flags must not change account-pool eligibility"
     );
+    assert_eq!(account.tenant_id, Some(f.user.tenant_id));
     assert_eq!(account.visibility, "tenant");
     f.finish().await;
 }

@@ -1313,7 +1313,7 @@ async fn resolve_response_account(
 
 #[cfg(test)]
 fn responses_account_is_visible_to_tenant(account: &Account, tenant_id: uuid::Uuid) -> bool {
-    account.tenant_id == tenant_id || account.visibility == "global"
+    account.tenant_id.is_none() || account.tenant_id == Some(tenant_id)
 }
 
 async fn proxy_response_resource(
@@ -4868,7 +4868,7 @@ mod tests {
     }
 
     #[test]
-    fn affinity_routing_revalidates_current_account_visibility() {
+    fn affinity_routing_derives_visibility_from_account_ownership() {
         let owner = uuid::Uuid::new_v4();
         let other = uuid::Uuid::new_v4();
         let mut account = conversation_test_account(owner, 0);
@@ -4876,11 +4876,10 @@ mod tests {
         assert!(responses_account_is_visible_to_tenant(&account, owner));
         assert!(!responses_account_is_visible_to_tenant(&account, other));
 
-        account.visibility = "global".to_string();
+        account.tenant_id = None;
         assert!(responses_account_is_visible_to_tenant(&account, other));
 
-        account.visibility = "tenant".to_string();
-        account.tenant_id = other;
+        account.tenant_id = Some(other);
         assert!(!responses_account_is_visible_to_tenant(&account, owner));
     }
 
@@ -4888,7 +4887,7 @@ mod tests {
         let now = chrono::Utc::now();
         Account {
             id: uuid::Uuid::new_v4(),
-            tenant_id,
+            tenant_id: Some(tenant_id),
             provider: "openai".to_string(),
             name: format!("responses-{priority}"),
             endpoint: "https://example.com/v1".to_string(),

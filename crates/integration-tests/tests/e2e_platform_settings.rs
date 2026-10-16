@@ -54,9 +54,16 @@ impl Fixture {
         let user = create_test_user(&db, tenant, "settings-user", "isolated")
             .await
             .id;
-        let operator = create_test_user(&db, tenant, "settings-operator", "isolated")
-            .await
-            .id;
+        let operator = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: "settings-operator@fixture.invalid".into(),
+                name: Some("settings-operator".into()),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
@@ -104,6 +111,23 @@ impl Fixture {
             PlatformScope::checked(id, PlatformRole::Root).unwrap(),
             FinancialSession {
                 user_id: id,
+                credential_kind: CredentialKind::Jwt,
+                token_version: user.token_version,
+                expires_at: Utc::now().timestamp() + 3600,
+                selected: None,
+            },
+        )
+        .unwrap()
+    }
+    async fn operator_scope(&self) -> FinancialScope {
+        let user = User::find_by_id(&self.db, self.operator)
+            .await
+            .unwrap()
+            .unwrap();
+        FinancialScope::platform_global(
+            PlatformScope::checked(self.operator, PlatformRole::Operator).unwrap(),
+            FinancialSession {
+                user_id: self.operator,
                 credential_kind: CredentialKind::Jwt,
                 token_version: user.token_version,
                 expires_at: Utc::now().timestamp() + 3600,
@@ -235,7 +259,7 @@ fn ok(r: (StatusCode, Value, HeaderMap)) -> Value {
 }
 
 #[tokio::test]
-async fn global_root_and_bare_handlers_reject_tenant_roles_keys_and_operators() {
+async fn global_platform_handlers_allow_root_and_operator_but_reject_tenant_and_api_keys() {
     isolated(|f| async move {
         let state = f.state();
         let app = create_router(state.clone());
@@ -264,7 +288,13 @@ async fn global_root_and_bare_handlers_reject_tenant_roles_keys_and_operators() 
                     .unwrap()
                     .contains("no-store")
             );
-            for token in [&admin, &member, &operator, &f.key] {
+            assert_eq!(
+                call(app.clone(), "GET", path, &operator, Value::Null)
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+            for token in [&admin, &member, &f.key] {
                 let denied = call(app.clone(), "GET", path, token, Value::Null).await;
                 assert!(
                     matches!(denied.0, StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED),
@@ -275,7 +305,8 @@ async fn global_root_and_bare_handlers_reject_tenant_roles_keys_and_operators() 
             }
         }
         ok(call(bare.clone(), "GET", "/settings", &root, Value::Null).await);
-        for token in [&admin, &member, &operator, &f.key] {
+        ok(call(bare.clone(), "GET", "/settings", &operator, Value::Null).await);
+        for token in [&admin, &member, &f.key] {
             assert!(matches!(
                 call(bare.clone(), "GET", "/settings", token, Value::Null)
                     .await
@@ -365,15 +396,8 @@ async fn ratio_cas_and_generic_paths_cannot_bypass_policy_or_audit() {
 #[tokio::test]
 async fn concurrent_root_ratio_commands_have_one_version_winner() {
     isolated(|f| async move {
-        f.db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
-            [f.admin.into()],
-        ))
-        .await
-        .unwrap();
         let a = f.scope(f.root).await;
-        let b = f.scope(f.admin).await;
+        let b = f.operator_scope().await;
         let old = TipRatioSetting::read(&f.db, a).await.unwrap();
         let ac = UpdateTipRatio {
             ratio: "0.1234".into(),
@@ -386,7 +410,7 @@ async fn concurrent_root_ratio_commands_have_one_version_winner() {
             reason: "second contender".into(),
         };
         let aa = audit(f.root);
-        let ba = audit(f.admin);
+        let ba = audit(f.operator);
         let (one, two) = tokio::join!(
             TipRatioSetting::update(&f.db, a, &aa, &ac),
             TipRatioSetting::update(&f.db, b, &ba, &bc)
@@ -501,7 +525,7 @@ async fn wait_for_exact_backend(db: &DatabaseConnection, pid: i32, relation: &st
     }).await.expect("the exact test request must reach the expected relation lock");
 }
 #[tokio::test]
-async fn queued_settings_write_rechecks_root_role_before_modifying_any_key() {
+async fn queued_settings_write_rechecks_platform_token_before_modifying_any_key() {
     isolated(|f| async move {
         let single = single_connection(&f).await;
         let pid: i32 = single
@@ -531,17 +555,9 @@ async fn queued_settings_write_rechecks_root_role_before_modifying_any_key() {
             .await
         });
         wait_for_exact_backend(&f.db, pid, "identity_admin_fence").await;
-        // Keep another root, preserving the database's last-root invariant.
         hold.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
-            [f.admin.into()],
-        ))
-        .await
-        .unwrap();
-        hold.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            "UPDATE users SET token_version=token_version+1 WHERE id=$1",
             [f.root.into()],
         ))
         .await
@@ -594,17 +610,10 @@ async fn ratio_audit_failure_rolls_back_the_policy_even_after_outer_commit() {
 #[tokio::test]
 async fn concurrent_partial_payment_limit_updates_cannot_commit_an_invalid_pair() {
     isolated(|f| async move {
-        f.db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE users SET platform_role='root' WHERE id=$1",
-            [f.admin.into()],
-        ))
-        .await
-        .unwrap();
         let a = f.scope(f.root).await;
-        let b = f.scope(f.admin).await;
+        let b = f.operator_scope().await;
         let aa = audit(f.root);
-        let ba = audit(f.admin);
+        let ba = audit(f.operator);
         let av = changes(&[("min_recharge_amount", "100")]);
         let bv = changes(&[("max_recharge_amount", "50")]);
         let (one, two) = tokio::join!(

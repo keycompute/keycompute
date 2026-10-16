@@ -52,7 +52,12 @@ impl PolicyActor {
         tenant: Uuid,
         token_version: i32,
     ) -> Result<Self, DbError> {
-        if scope.platform_role() != PlatformRole::Root || tenant.is_nil() || token_version < 0 {
+        if !matches!(
+            scope.platform_role(),
+            PlatformRole::Root | PlatformRole::Operator
+        ) || tenant.is_nil()
+            || token_version < 0
+        {
             return Err(denied());
         }
         Ok(Self {
@@ -186,7 +191,9 @@ async fn lock(
             let user = User::find_by_id_for_update(tx, scope.user_id())
                 .await?
                 .filter(|u| {
-                    u.status == "active" && u.platform_role == "root" && u.token_version == version
+                    u.status == "active"
+                        && matches!(u.platform_role.as_str(), "root" | "operator")
+                        && u.token_version == version
                 })
                 .ok_or_else(denied)?;
             (
@@ -553,7 +560,7 @@ mod tests {
         assert!(reason(&"x".repeat(501)).is_err());
     }
     #[test]
-    fn roles_and_invalid_versions_do_not_construct_write_scopes() {
+    fn platform_admin_roles_construct_write_scopes_but_invalid_targets_do_not() {
         let t = Uuid::new_v4();
         let u = Uuid::new_v4();
         let s = TenantScope::checked(t, u, TenantRole::Member).unwrap();
@@ -569,7 +576,7 @@ mod tests {
                 t,
                 0
             )
-            .is_err()
+            .is_ok()
         );
         assert!(
             PolicyActor::platform(

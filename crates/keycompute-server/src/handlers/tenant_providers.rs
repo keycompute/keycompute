@@ -201,7 +201,7 @@ fn account_request(
         .map_err(ApiError::BadRequest)?;
     let (encrypted, preview) = encrypt_api_key(&request.api_key)?;
     Ok(CreateAccountRequest {
-        tenant_id,
+        tenant_id: Some(tenant_id),
         provider: protocol.as_str().to_owned(),
         name: request.name,
         endpoint,
@@ -212,7 +212,6 @@ fn account_request(
         priority: request.priority,
         models_supported: models,
         api_capabilities: capabilities,
-        visibility: Some("tenant".into()),
         pool_enabled: request.pool_enabled,
     })
 }
@@ -346,7 +345,6 @@ pub async fn update_account(
         None => (None, None),
     };
     let update = UpdateAccountRequest {
-        tenant_id: None,
         name: request.name,
         endpoint,
         upstream_api_key_encrypted: encrypted,
@@ -357,7 +355,6 @@ pub async fn update_account(
         enabled: request.is_active,
         models_supported: models,
         api_capabilities: capabilities,
-        visibility: None,
         pool_enabled: request.pool_enabled,
     };
     let tx = write_transaction(&state).await?;

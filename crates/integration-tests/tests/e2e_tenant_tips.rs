@@ -85,8 +85,8 @@ struct Fixture {
     b: Tenant,
     user: TenantActor,
     admin: TenantActor,
-    root: TenantActor,
-    operator: TenantActor,
+    root: User,
+    operator: User,
     key: String,
 }
 impl Fixture {
@@ -113,17 +113,26 @@ impl Fixture {
         ))
         .await
         .unwrap();
-        let root = create_test_user(&db, b.id, "tip-root", &run).await;
-        let operator = create_test_user(&db, b.id, "tip-operator", &run).await;
-        for (user, role) in [(root.id, "root"), (operator.id, "operator")] {
-            db.execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "UPDATE users SET platform_role=$2 WHERE id=$1",
-                [user.into(), role.into()],
-            ))
+        let root = User::find_by_email(&db, "tenant-test-root@fixture.invalid")
             .await
+            .unwrap()
             .unwrap();
-        }
+        let operator = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: format!("tip-operator-{run}@fixture.invalid"),
+                name: Some("tip-operator".into()),
+            },
+        )
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            [operator.id.into()],
+        ))
+        .await
+        .unwrap();
         let key = ProduceAiKeyValidator::generate_key();
         integration_tests::db::create_test_api_key(
             &db,
@@ -417,7 +426,7 @@ async fn personal_earnings_and_conversion_are_fixed_to_selected_tenant_and_curre
 }
 
 #[tokio::test]
-async fn tenant_review_is_metadata_only_and_root_payout_requires_explicit_audited_access() {
+async fn tenant_review_is_metadata_only_and_platform_payout_requires_audited_access() {
     let f = Fixture::new().await;
     f.seed(&f.a, "CNY", 100).await;
     let app = create_router(f.state.clone());
@@ -465,20 +474,14 @@ async fn tenant_review_is_metadata_only_and_root_payout_requires_explicit_audite
         f.a.id
     );
     assert_eq!(
-        call(app.clone(), "GET", &support, &operator, Value::Null)
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
         call(app.clone(), "GET", &support, &admin, Value::Null)
             .await
             .0,
         StatusCode::FORBIDDEN
     );
-    let secret = ok(call(app.clone(), "GET", &support, &root, Value::Null).await);
+    let secret = ok(call(app.clone(), "GET", &support, &operator, Value::Null).await);
     assert_eq!(secret["alipay_account"], "secret-payee@example.invalid");
-    let audit=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT metadata FROM tenant_audit_events WHERE tenant_id=$1 AND actor_user_id=$2 AND action='withdrawal.payout_access'",[f.a.id.into(),f.root.id.into()])).await.unwrap().unwrap();
+    let audit=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT metadata FROM tenant_audit_events WHERE tenant_id=$1 AND actor_user_id=$2 AND action='withdrawal.payout_access'",[f.a.id.into(),f.operator.id.into()])).await.unwrap().unwrap();
     assert!(
         !audit
             .try_get::<Value>("", "metadata")
@@ -518,7 +521,7 @@ async fn tenant_review_is_metadata_only_and_root_payout_requires_explicit_audite
             .0,
         StatusCode::FORBIDDEN
     );
-    let done = ok(call(app.clone(), "POST", &complete, &root, command.clone()).await);
+    let done = ok(call(app.clone(), "POST", &complete, &operator, command.clone()).await);
     assert_eq!(done["status"], "completed");
     assert_eq!(
         ok(call(app, "POST", &complete, &root, command).await)["id"],

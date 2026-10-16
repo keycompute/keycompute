@@ -50,9 +50,16 @@ impl Fixture {
         let b = create_test_tenant(&db, "operations-b", "isolated").await.id;
         let admin = create_test_user(&db, a, "ops-admin", "isolated").await.id;
         let user = create_test_user(&db, a, "ops-member", "isolated").await.id;
-        let operator = create_test_user(&db, a, "ops-operator", "isolated")
-            .await
-            .id;
+        let operator = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: "ops-operator@fixture.invalid".into(),
+                name: Some("ops-operator".into()),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
@@ -294,11 +301,10 @@ async fn root_and_operator_read_global_audit_with_exact_intersection_filters() {
         let app = create_router(state.clone());
         let root = f.token(&state, f.root, false).await;
         let operator = f.token(&state, f.operator, false).await;
-        let selected_operator = f.token(&state, f.operator, true).await;
         let admin = f.token(&state, f.admin, true).await;
         let member = f.token(&state, f.user, true).await;
 
-        for token in [&root, &operator, &selected_operator] {
+        for token in [&root, &operator] {
             let response = call(
                 app.clone(),
                 "GET",
@@ -441,7 +447,6 @@ async fn operator_global_identity_reads_explicit_tenant_health_without_membershi
         let state = f.state();
         let app = create_router(state.clone());
         let op = f.token(&state, f.operator, false).await;
-        let selected_op = f.token(&state, f.operator, true).await;
         let root = f.token(&state, f.root, false).await;
         let admin = f.token(&state, f.admin, true).await;
         let member = f.token(&state, f.user, true).await;
@@ -451,7 +456,7 @@ async fn operator_global_identity_reads_explicit_tenant_health_without_membershi
             "/api/v1/platform/operations/usage".to_owned(),
             "/api/v1/platform/operations/capacity".to_owned(),
         ] {
-            for token in [&op, &selected_op, &root] {
+            for token in [&op, &root] {
                 let r = call(app.clone(), "GET", &target, token).await;
                 assert_eq!(r.0, StatusCode::OK, "{target} {}", r.1);
                 assert!(r.2["cache-control"].to_str().unwrap().contains("no-store"));
@@ -722,18 +727,7 @@ async fn forged_or_stale_operational_scopes_cannot_authorize_live_reads() {
                 .is_err()
             );
         }
-        // A selected tenant in the console must not narrow the global
-        // platform-operations projection.
-        let selected = f.scope(f.operator, PlatformRole::Operator, true).await;
         let global = f.scope(f.operator, PlatformRole::Operator, false).await;
-        f.db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
-            [f.a.into(), f.operator.into()],
-        ))
-        .await
-        .unwrap();
-        assert!(selected.tenants(&f.db, &query).await.is_ok());
         assert!(global.tenants(&f.db, &query).await.is_ok());
         f.db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -761,7 +755,6 @@ async fn inactive_target_is_visible_operationally_but_invalid_dates_and_targets_
 {
     isolated(|f| async move {
         let global = f.scope(f.operator, PlatformRole::Operator, false).await;
-        let selected = f.scope(f.operator, PlatformRole::Operator, true).await;
         f.db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE tenants SET status='inactive' WHERE id=$1",
@@ -770,7 +763,7 @@ async fn inactive_target_is_visible_operationally_but_invalid_dates_and_targets_
         .await
         .unwrap();
         assert_eq!(global.tenant(&f.db, f.a).await.unwrap().status, "inactive");
-        assert!(selected.tenant(&f.db, f.b).await.is_ok());
+        assert!(global.tenant(&f.db, f.b).await.is_ok());
         let now = Utc::now();
         assert!(
             global

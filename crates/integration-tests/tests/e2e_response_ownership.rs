@@ -218,7 +218,7 @@ impl Fixture {
         let account = Account::create(
             &db,
             &CreateAccountRequest {
-                tenant_id: tenant.id,
+                tenant_id: Some(tenant.id),
                 provider: "openai".into(),
                 name: format!("ownership-{run}"),
                 endpoint: format!("http://{address}/v1"),
@@ -234,7 +234,6 @@ impl Fixture {
                 models_supported: vec![model.clone()],
                 api_capabilities: vec!["responses".into()],
                 pool_enabled: Some(true),
-                visibility: Some("tenant".into()),
             },
         )
         .await

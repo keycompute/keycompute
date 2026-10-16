@@ -1,4 +1,4 @@
-//! Root-only global node earnings policy; accepted ledger credits stay immutable.
+//! Platform-administrator global node earnings policy; accepted ledger credits stay immutable.
 use crate::models::{financial_scope::FinancialScope, system_setting::setting_keys};
 use crate::{AuditContext, DbError, TenantAuditEvent};
 use chrono::{DateTime, Utc};
@@ -31,7 +31,7 @@ impl TipRatioSetting {
         Ok(value.to_string())
     }
     pub async fn read(db: &impl ConnectionTrait, scope: FinancialScope) -> Result<Self, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         let mut values = scope.values();
         values.push(setting_keys::NODE_TIP_RATIO.into());
         let sql = format!(
@@ -53,7 +53,7 @@ impl TipRatioSetting {
         audit: &AuditContext,
         command: &UpdateTipRatio,
     ) -> Result<Self, DbError> {
-        scope.require_root_global()?;
+        scope.require_platform_global()?;
         let ratio = Self::normalize(&command.ratio)?;
         let reason = command.reason.trim();
         if reason.is_empty() || reason.len() > 500 || reason.chars().any(char::is_control) {

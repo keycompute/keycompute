@@ -1047,7 +1047,7 @@ async fn authenticated_rate_limit_config_for_selection(
         use sea_orm::ConnectionTrait;
         tokio::time::timeout(std::time::Duration::from_secs(3), pool.write_conn().query_one(
             sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
-            "SELECT 1 FROM passthrough_bindings b JOIN accounts a ON a.id=b.account_id JOIN tenants anchor ON anchor.id=b.tenant_id AND anchor.status='active' JOIN tenants owner ON owner.id=a.tenant_id AND owner.status='active' WHERE b.id=$1 AND b.revision=$2 AND b.account_id=$3 AND (b.tenant_id=$4 OR b.is_global) AND a.enabled AND EXISTS(SELECT 1 FROM tenants caller WHERE caller.id=$4 AND caller.status='active')",
+            "SELECT 1 FROM passthrough_bindings b JOIN accounts a ON a.id=b.account_id JOIN tenants anchor ON anchor.id=b.tenant_id AND anchor.status='active' LEFT JOIN tenants owner ON owner.id=a.tenant_id WHERE b.id=$1 AND b.revision=$2 AND b.account_id=$3 AND (b.tenant_id=$4 OR b.is_global) AND a.enabled AND COALESCE(owner.status='active',TRUE) AND EXISTS(SELECT 1 FROM tenants caller WHERE caller.id=$4 AND caller.status='active')",
             [binding_id.into(), binding_revision.into(), account_id.into(), tenant_id.into()])))
             .await.map_err(|_|ApiError::ServiceUnavailable("Rate limit access lookup timed out".into()))?
             .map_err(|_|ApiError::ServiceUnavailable("Rate limit access state unavailable".into()))?.is_some()
@@ -1765,7 +1765,7 @@ pub(crate) async fn enforce_authenticated_maintenance_mode(
     auth: &AuthExtractor,
 ) -> Result<()> {
     let is_maintenance = maintenance_mode_enabled(state).await;
-    let is_system_admin = auth.has_permission(&Permission::ManageProtectedUsers);
+    let is_system_admin = auth.has_permission(&Permission::ManageSystemSettings);
     if maintenance_mode_allows_request(is_maintenance, is_system_admin) {
         if is_maintenance {
             info!(
@@ -1822,14 +1822,14 @@ pub async fn maintenance_mode_middleware(
     // 维护模式已启用，检查是否为管理员
     // 从请求头提取认证信息
     let is_system_admin = if let Some(auth) = req.extensions().get::<AuthExtractor>() {
-        auth.has_permission(&Permission::ManageProtectedUsers)
+        auth.has_permission(&Permission::ManageSystemSettings)
     } else if let Some(auth_header) = req
         .headers()
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
         && let Some(token) = auth_header.strip_prefix("Bearer ")
         && let Ok(auth_context) = state.auth.verify_token(token).await
-        && auth_context.has_permission(&Permission::ManageProtectedUsers)
+        && auth_context.has_permission(&Permission::ManageSystemSettings)
     {
         info!(
             user_id = %auth_context.user_id,
@@ -1840,7 +1840,7 @@ pub async fn maintenance_mode_middleware(
         false
     };
     if maintenance_mode_allows_request(is_maintenance, is_system_admin) {
-        // 管理员绕过维护模式（基于权限判断，API Key 无 ManageProtectedUsers 权限，无法绕过）
+        // 平台管理员绕过维护模式（API Key 不具备系统设置权限，无法绕过）。
         return next.run(req).await;
     }
 
@@ -3811,7 +3811,7 @@ mod tests {
             let response = app.oneshot(request(Some(&fixture.token))).await.unwrap();
             assert_eq!(
                 response.status(),
-                if role == PlatformRole::Root {
+                if matches!(role, PlatformRole::Root | PlatformRole::Operator) {
                     StatusCode::NO_CONTENT
                 } else {
                     StatusCode::FORBIDDEN

@@ -13,12 +13,6 @@ const ACCOUNT_PRIORITY_MIN: i32 = 0;
 const ACCOUNT_PRIORITY_MAX: i32 = 10;
 const ACCOUNT_RATE_LIMIT_MIN: i32 = 1;
 
-/// A bound account's pool exposure is owned by its grants, not the
-/// resource editor. Omitting this field keeps metadata edits independent.
-fn pool_update_field(pool_enabled: bool, binding_managed: bool) -> Option<bool> {
-    (!binding_managed).then_some(pool_enabled)
-}
-
 fn parse_account_priority(value: &str) -> Option<i32> {
     let priority = value.trim().parse::<i32>().ok()?;
     (ACCOUNT_PRIORITY_MIN..=ACCOUNT_PRIORITY_MAX)
@@ -80,13 +74,10 @@ impl AccountListQuery {
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::i18n::I18n;
-use crate::services::{
-    account_service, api_client::with_auto_refresh, debug_service, tenant_service,
-};
+use crate::services::{account_service, api_client::with_auto_refresh, debug_service};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
 use crate::stores::user_store::UserStore;
-use crate::utils::display::short_id;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 
@@ -130,7 +121,7 @@ pub(crate) const PRESETS: &[(&str, &str, &str, &str)] = &[
         "ollama",
         "accounts.provider_ollama_openai_compatible",
         "openai",
-        "http://localhost:11434/v1",
+        "http://ollama:11434/v1",
     ),
 ];
 
@@ -332,11 +323,7 @@ fn AdminAccountsView() -> Element {
     let mut edit_reset_api_base = use_signal(|| false);
     let mut edit_is_active = use_signal(|| true);
     let mut edit_pool_enabled = use_signal(|| false);
-    let mut edit_has_passthrough_binding = use_signal(|| false);
-    let mut edit_visibility = use_signal(|| "tenant".to_string());
     let mut edit_priority = use_signal(|| "0".to_string());
-    let mut edit_tenant_id = use_signal(String::new);
-    let mut show_tenant_dropdown = use_signal(|| false);
     let mut show_edit = use_signal(|| false);
     let mut edit_saving = use_signal(|| false);
     let mut edit_error = use_signal(String::new);
@@ -379,12 +366,6 @@ fn AdminAccountsView() -> Element {
             .await;
             KeyedResourceValue::new(request_key, result)
         }
-    });
-
-    // 租户列表（编辑弹窗下拉选项）
-    let tenants = use_resource(move || async move {
-        let token = auth_store.token().unwrap_or_default();
-        tenant_service::list_active(&token).await
     });
 
     // 全局重置健康状态处理函数
@@ -490,9 +471,6 @@ fn AdminAccountsView() -> Element {
         let reset_base = edit_reset_api_base();
         let active = edit_is_active();
         let pool_enabled = edit_pool_enabled();
-        let bindings_manage_pool = edit_has_passthrough_binding();
-        let visibility = edit_visibility();
-        let tenant_id = edit_tenant_id();
         let priority_input = edit_priority();
         if name_val.trim().is_empty() {
             *edit_error.write() = i18n.t("accounts.name_required").to_string();
@@ -519,16 +497,12 @@ fn AdminAccountsView() -> Element {
             let mut req = UpdateAccountRequest::new()
                 .with_name(name_val)
                 .with_is_active(active)
-                .with_visibility(visibility)
                 .with_priority(priority)
                 .with_models(models)
                 .with_rpm_limit(rpm_limit)
                 .with_tpm_limit(tpm_limit)
-                .with_api_capabilities(api_capabilities_for_mode(&provider, &api_mode));
-            req.pool_enabled = pool_update_field(pool_enabled, bindings_manage_pool);
-            if !tenant_id.trim().is_empty() {
-                req = req.with_tenant_id(tenant_id);
-            }
+                .with_api_capabilities(api_capabilities_for_mode(&provider, &api_mode))
+                .with_pool_enabled(pool_enabled);
             if !key_val.trim().is_empty() {
                 req = req.with_api_key(key_val);
             }
@@ -688,7 +662,7 @@ fn AdminAccountsView() -> Element {
                                     TableHead { {i18n.t("accounts.provider_model")} }
                                     TableHead { {i18n.t("accounts.runtime_status")} }
                                     TableHead { {i18n.t("accounts.rate_quota")} }
-                                    TableHead { {i18n.t("accounts.tenant_id")} }
+                                    TableHead { {i18n.t("accounts.account_scope")} }
                                     TableHead { {i18n.t("common.time")} }
                                     TableHead { {i18n.t("table.actions")} }
                                 }
@@ -836,8 +810,17 @@ fn AdminAccountsView() -> Element {
                                         }
                                         td {
                                             div { class: "account-tenant-cell",
-                                                span { class: "account-tenant-id",
-                                                    "{acc.tenant_id.chars().take(8).collect::<String>()}"
+                                                if let Some(tenant_id) = &acc.tenant_id {
+                                                    Badge { variant: BadgeVariant::Neutral,
+                                                        {i18n.t("accounts.scope_tenant_private")}
+                                                    }
+                                                    span { class: "account-tenant-id",
+                                                        "{tenant_id.chars().take(8).collect::<String>()}"
+                                                    }
+                                                } else {
+                                                    Badge { variant: BadgeVariant::Info,
+                                                        {i18n.t("accounts.scope_platform_shared")}
+                                                    }
                                                 }
                                             }
                                         }
@@ -877,12 +860,9 @@ fn AdminAccountsView() -> Element {
                                                         let models = acc.models.join(", ");
                                                         let active = acc.is_active;
                                                         let pool_enabled = acc.pool_enabled;
-                                                        let has_passthrough_binding = acc.passthrough_binding_count > 0;
                                                         let priority = acc.priority;
                                                         let rpm_limit = acc.rpm_limit;
                                                         let tpm_limit = acc.tpm_limit;
-                                                        let visibility = acc.visibility.clone();
-                                                        let tenant_id = acc.tenant_id.clone();
                                                         move |_| {
                                                             edit_id.set(id.clone());
                                                             edit_name.set(name.clone());
@@ -896,10 +876,7 @@ fn AdminAccountsView() -> Element {
                                                             edit_reset_api_base.set(false);
                                                             edit_is_active.set(active);
                                                             edit_pool_enabled.set(pool_enabled);
-                                                            edit_has_passthrough_binding.set(has_passthrough_binding);
                                                             edit_priority.set(priority.to_string());
-                                                            edit_visibility.set(visibility.clone());
-                                                            edit_tenant_id.set(tenant_id.clone());
                                                             *edit_error.write() = String::new();
                                                             show_edit.set(true);
                                                         }
@@ -1030,6 +1007,9 @@ fn AdminAccountsView() -> Element {
                             }
                         }
                         div { class: "modal-body",
+                            div { class: "alert alert-info",
+                                {i18n.t("accounts.platform_scope_hint")}
+                            }
                             div {class:"form-group",
                                 label {class:"checkbox-label",input {r#type:"checkbox",checked:create_pool_enabled(),onchange:move|e|create_pool_enabled.set(e.checked())} {i18n.t("models.pool_switch")}}
                                 p {class:"form-hint",{i18n.t("models.pool_switch_help")}}
@@ -1061,6 +1041,13 @@ fn AdminAccountsView() -> Element {
                                             *create_api_base.write() = base_url.to_string();
                                             *create_api_mode.write() =
                                                 default_api_mode_for_preset(&preset_id).to_string();
+                                            if preset_id == "ollama" && create_api_key().is_empty() {
+                                                *create_api_key.write() = "ollama-local".to_string();
+                                            } else if preset_id != "ollama"
+                                                && create_api_key() == "ollama-local"
+                                            {
+                                                create_api_key.write().clear();
+                                            }
                                         }
                                         *create_preset.write() = preset_id;
                                     },
@@ -1146,6 +1133,9 @@ fn AdminAccountsView() -> Element {
                                     value: "{create_api_key}",
                                     oninput: move |e| *create_api_key.write() = e.value(),
                                 }
+                                if create_preset() == "ollama" {
+                                    small { class: "form-hint", {i18n.t("accounts.ollama_api_key_hint")} }
+                                }
                             }
                             div { class: "form-group",
                                 label { class: "form-label", {i18n.t("accounts.custom_base_url")} }
@@ -1196,13 +1186,8 @@ fn AdminAccountsView() -> Element {
                         }
                         div { class: "modal-body",
                             div {class:"form-group",
-                                label {class:"checkbox-label",input {r#type:"checkbox",disabled:edit_has_passthrough_binding(),checked:edit_pool_enabled(),onchange:move|e|edit_pool_enabled.set(e.checked())} {i18n.t("models.pool_switch")}}
+                                label {class:"checkbox-label",input {r#type:"checkbox",checked:edit_pool_enabled(),onchange:move|e|edit_pool_enabled.set(e.checked())} {i18n.t("models.pool_switch")}}
                                 p {class:"form-hint",{i18n.t("models.pool_switch_help")}}
-                                if edit_has_passthrough_binding() {
-                                    p { class: "form-hint", {i18n.t("accounts.pool_managed_by_passthrough")}, " ",
-                                        Link { to: "/admin/upstreams/passthrough", {i18n.t("accounts.view_passthrough_bindings")} }
-                                    }
-                                }
                             }
                             if !edit_error().is_empty() {
                                 div { class: "alert alert-error",
@@ -1313,58 +1298,6 @@ fn AdminAccountsView() -> Element {
                                 }
                             }
                             div { class: "form-group",
-                                label { class: "form-label", {i18n.t("accounts.tenant_id_label")} }
-                                {
-                                    let tenant_list = tenants().and_then(|r| r.ok()).unwrap_or_default();
-                                    let tenant_id = edit_tenant_id();
-                                    let selected_label = if tenant_id.is_empty() {
-                                        i18n.t("accounts.tenant_id_keep").to_string()
-                                    } else {
-                                        tenant_list
-                                            .iter()
-                                            .find(|t| t.id == tenant_id)
-                                            .map(|t| format!("{} ({})", t.name, short_id(&t.id)))
-                                            .unwrap_or_else(|| tenant_id.clone())
-                                    };
-                                    rsx! {
-                                        div { class: "custom-select",
-                                            div {
-                                                class: "custom-select-trigger",
-                                                onclick: move |_| show_tenant_dropdown.set(!show_tenant_dropdown()),
-                                                span { "{selected_label}" }
-                                                span { class: "custom-select-arrow", "▼" }
-                                            }
-                                            if show_tenant_dropdown() {
-                                                div { class: "custom-select-dropdown",
-                                                    div {
-                                                        class: "custom-select-option",
-                                                        onclick: move |_| {
-                                                            edit_tenant_id.set(String::new());
-                                                            show_tenant_dropdown.set(false);
-                                                        },
-                                                        {i18n.t("accounts.tenant_id_keep")}
-                                                    }
-                                                    for t in &tenant_list {
-                                                        div {
-                                                            class: "custom-select-option",
-                                                            onclick: {
-                                                                let id = t.id.clone();
-                                                                move |_| {
-                                                                    edit_tenant_id.set(id.clone());
-                                                                    show_tenant_dropdown.set(false);
-                                                                }
-                                                            },
-                                                            "{t.name} ({t.id.chars().take(8).collect::<String>()}...)"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                small { class: "form-hint", {i18n.t("accounts.tenant_id_hint")} }
-                            }
-                            div { class: "form-group",
                                 label { class: "form-label",
                                     input {
                                         r#type: "checkbox",
@@ -1374,24 +1307,6 @@ fn AdminAccountsView() -> Element {
                                     }
                                     {i18n.t("accounts.enable_channel")}
                                 }
-                            }
-                            div { class: "form-group",
-                                label { class: "form-label",
-                                    input {
-                                        r#type: "checkbox",
-                                        checked: edit_visibility() == "global",
-                                        onchange: move |e| {
-                                            if e.checked() {
-                                                edit_visibility.set("global".to_string());
-                                            } else {
-                                                edit_visibility.set("tenant".to_string());
-                                            }
-                                        },
-                                        style: "margin-right:6px",
-                                    }
-                                    {i18n.t("accounts.global_visibility")}
-                                }
-                                small { class: "form-hint", {i18n.t("accounts.global_visibility_hint")} }
                             }
                         }
                         div { class: "modal-footer",
@@ -1663,21 +1578,5 @@ mod tests {
             vec!["gpt-test".to_string(), "claude-test".to_string()]
         );
         assert!(parse_models_input(" , ").is_empty());
-    }
-}
-
-#[cfg(test)]
-mod passthrough_resource_edit_tests {
-    use super::pool_update_field;
-    use client_api::api::admin::UpdateAccountRequest;
-    #[test]
-    fn bound_account_metadata_edit_does_not_override_grants() {
-        let mut request = UpdateAccountRequest::new().with_name("Renamed account");
-        request.pool_enabled = pool_update_field(true, true);
-        let body = serde_json::to_value(request).unwrap();
-        assert_eq!(body["name"], "Renamed account");
-        assert!(body.get("pool_enabled").is_none());
-        assert_eq!(pool_update_field(false, false), Some(false));
-        assert_eq!(pool_update_field(true, false), Some(true));
     }
 }

@@ -1,6 +1,6 @@
 //! Platform pricing management handlers.
 //!
-//! These legacy URLs remain available only as root platform-console endpoints.
+//! These legacy URLs remain available only as platform-console endpoints.
 //! Tenant pricing is exposed by the tenant route phase through the scoped DAO
 //! methods; this module never treats a selected tenant as a management grant.
 
