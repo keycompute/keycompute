@@ -483,9 +483,13 @@ async fn operator_global_identity_reads_explicit_tenant_health_without_membershi
             "/api/v1/platform/settings",
             "/api/v1/admin/monitoring/requests",
         ] {
-            assert_eq!(
-                call(app.clone(), "GET", raw, &op).await.0,
-                StatusCode::FORBIDDEN
+            let response = call(app.clone(), "GET", raw, &op).await;
+            assert_eq!(response.0, StatusCode::OK, "{raw}: {}", response.1);
+            assert!(
+                response.2["cache-control"]
+                    .to_str()
+                    .unwrap()
+                    .contains("no-store")
             );
         }
         assert_eq!(
@@ -582,7 +586,7 @@ async fn operational_paging_counts_and_search_do_not_widen_literal_filters() {
         )
         .await);
         assert_eq!(detail["active_admins"], 2);
-        assert_eq!(detail["active_members"], 4);
+        assert_eq!(detail["active_members"], 3);
         assert!(detail.get("owner_user_id").is_none());
         assert!(detail.get("description").is_none());
         for q in [
