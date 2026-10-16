@@ -53,6 +53,7 @@ struct Fixture {
     b: Tenant,
     user: TenantActor,
     peer: TenantActor,
+    operator: User,
     own: ProduceAiKey,
     other: ProduceAiKey,
     foreign: ProduceAiKey,
@@ -67,6 +68,23 @@ impl Fixture {
         let b = create_test_tenant(&db, "key-scope-b", &run).await;
         let user = create_test_user(&db, a.id, "key-owner", &run).await;
         let peer = create_test_user(&db, a.id, "key-peer", &run).await;
+        let operator = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: format!("test-key-operator-{run}@example.com"),
+                name: Some("Key platform operator".into()),
+            },
+        )
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            [operator.id.into()],
+        ))
+        .await
+        .unwrap();
+        let operator = User::find_by_id(&db, operator.id).await.unwrap().unwrap();
         let tx = db.begin().await.unwrap();
         TenantMembership::create(
             &tx,
@@ -95,6 +113,7 @@ impl Fixture {
             b,
             user,
             peer,
+            operator,
             own,
             other,
             foreign,
@@ -372,7 +391,7 @@ async fn stale_key_scopes_are_rejected_after_demotion_and_revocation() {
     f.guard.cleanup().await.unwrap();
 }
 #[tokio::test]
-async fn platform_key_access_requires_real_root_and_explicit_tenant() {
+async fn platform_key_access_requires_real_platform_identity_and_explicit_tenant() {
     let mut f = Fixture::new().await;
     let root = User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
         .await
@@ -405,16 +424,17 @@ async fn platform_key_access_requires_real_root_and_explicit_tenant() {
             .unwrap(),
         0
     );
-    assert!(
+    assert_eq!(
         ProduceAiKey::count_platform(
             &f.db,
-            PlatformScope::checked(root.id, PlatformRole::Operator).unwrap(),
+            PlatformScope::checked(f.operator.id, PlatformRole::Operator).unwrap(),
             f.a.id,
             None,
             true
         )
         .await
-        .is_err()
+        .unwrap(),
+        2
     );
     assert!(
         ProduceAiKey::count_platform(&f.db, scope, Uuid::nil(), None, true)

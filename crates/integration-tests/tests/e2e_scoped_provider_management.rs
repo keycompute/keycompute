@@ -348,7 +348,7 @@ async fn global_consumption_does_not_grant_foreign_binding_ownership() {
         )
         .await
         .unwrap()
-        .is_some()
+        .is_none()
     );
     assert!(
         keycompute_db::models::passthrough_binding::PassthroughBinding::find_in_tenant(

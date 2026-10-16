@@ -279,22 +279,62 @@ async fn payment_dao_lists_counts_and_details_share_the_same_explicit_scope() {
             .user_id,
         peer.id
     );
-    // Explicit platform raw-order queries reject operators, even with an otherwise valid scope.
-    let operator = PlatformScope::checked(user.id, PlatformRole::Operator).unwrap();
-    assert!(
-        PaymentOrder::list_platform(&db, operator, None, None, 100, 0)
+    let operator = User::create(
+        &db,
+        &keycompute_db::CreateUserRequest {
+            email: format!("test-payment-operator-{run}@example.com"),
+            name: Some("Payment platform operator".into()),
+        },
+    )
+    .await
+    .unwrap();
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE users SET platform_role='operator' WHERE id=$1",
+        [operator.id.into()],
+    ))
+    .await
+    .unwrap();
+    let operator = PlatformScope::checked(operator.id, PlatformRole::Operator).unwrap();
+    assert_eq!(
+        PaymentOrder::list_platform(&db, operator, None, Some(user.id), 100, 0)
             .await
-            .is_err()
+            .unwrap()
+            .len(),
+        2
     );
-    assert!(
-        PaymentOrder::count_platform(&db, operator, None, None)
+    assert_eq!(
+        PaymentOrder::count_platform(&db, operator, None, Some(user.id))
             .await
-            .is_err()
+            .unwrap(),
+        2
     );
-    assert!(
+    assert_eq!(
         PaymentOrder::find_platform(&db, operator, own.id)
             .await
-            .is_err()
+            .unwrap()
+            .unwrap()
+            .id,
+        own.id
+    );
+    let forged = PlatformScope::checked(user.id, PlatformRole::Operator).unwrap();
+    assert!(
+        PaymentOrder::list_platform(&db, forged, None, None, 100, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        PaymentOrder::count_platform(&db, forged, None, None)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        PaymentOrder::find_platform(&db, forged, own.id)
+            .await
+            .unwrap()
+            .is_none()
     );
     let state = AppState::with_pool(DbRouter::single(db.clone()));
     let jwt = token(&state, &db, user.id, a.id).await;

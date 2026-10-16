@@ -459,13 +459,14 @@ async fn forged_scope_actor_and_non_jwt_credentials_fail_before_mutation() {
 async fn platform_root_and_operator_manage_pricing_without_tenant_membership() {
     let mut fixture = Fixture::new().await;
     let platform = fixture.platform_scope(fixture.root);
+    let model_name = format!("pricing-test-{}-platform", fixture.run_id);
     let row = {
         let tx = fixture.db.begin().await.unwrap();
         let row = PricingModel::create_platform(
             &tx,
             platform,
             PricingTarget::Platform,
-            &fixture.platform_request(&format!("pricing-test-{}-platform", fixture.run_id), true),
+            &fixture.platform_request(&model_name, true),
             &fixture.audit(fixture.root, PlatformRole::Root, None),
         )
         .await
@@ -498,13 +499,18 @@ async fn platform_root_and_operator_manage_pricing_without_tenant_membership() {
         ))
         .await
         .unwrap();
+    let operator = User::find_by_id(&fixture.db, operator.id)
+        .await
+        .unwrap()
+        .unwrap();
     let operator_scope =
-        PlatformPricingScope::checked(operator.id, CredentialKind::Jwt, 0).unwrap();
+        PlatformPricingScope::checked(operator.id, CredentialKind::Jwt, operator.token_version)
+            .unwrap();
     let rows = PricingModel::find_platform_filtered(
         &fixture.db,
         operator_scope,
         PricingTarget::Platform,
-        None,
+        Some(&model_name),
         10,
         0,
     )
