@@ -245,8 +245,12 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
             .total,
         0
     );
-    let audits=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT COUNT(*)::bigint AS n FROM tenant_audit_events WHERE actor_user_id=$1 AND resource_id=$2",[a.owner_user_id.into(),owned.pricing_id.into()])).await.unwrap().unwrap();
-    assert!(audits.try_get::<i64>("", "n").unwrap() >= 4);
+    let audits=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT COUNT(*)::bigint AS n, COUNT(*) FILTER (WHERE platform_role IN ('root','operator'))::bigint AS platform_n, COUNT(*) FILTER (WHERE actor_user_id=$1)::bigint AS tenant_owner_n FROM tenant_audit_events WHERE resource_id=$2 AND tenant_id=$3 AND action LIKE 'pricing.%'",
+        [a.owner_user_id.into(),owned.pricing_id.into(),b.id.into()])).await.unwrap().unwrap();
+    assert_eq!(audits.try_get::<i64>("", "n").unwrap(), 4);
+    assert_eq!(audits.try_get::<i64>("", "platform_n").unwrap(), 4);
+    assert_eq!(audits.try_get::<i64>("", "tenant_owner_n").unwrap(), 0);
     // Remove only this test's unique platform price. The test wrapper owns the entire disposable DB.
     db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"DELETE FROM pricing_models WHERE id=$1 AND scope_type='platform' AND tenant_id IS NULL AND model_name=$2",[Uuid::parse_str(&global.pricing_id).unwrap().into(),model.into()])).await.unwrap();
     cleanup.cleanup().await.unwrap();

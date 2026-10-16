@@ -32,6 +32,15 @@ fn actor(id: Uuid) -> AuditContext {
         request_id: Some(Uuid::new_v4()),
     }
 }
+fn platform_actor(id: Uuid) -> AuditContext {
+    AuditContext {
+        actor_user_id: id,
+        credential_kind: CredentialKind::Jwt,
+        actor_platform_role: PlatformRole::Root,
+        actor_tenant_role: None,
+        request_id: Some(Uuid::new_v4()),
+    }
+}
 async fn root(db: &DatabaseConnection) -> User {
     User::find_by_email(db, "tenant-test-root@fixture.invalid")
         .await
@@ -56,14 +65,14 @@ async fn add(db: &DatabaseConnection, t: &Tenant, user: Uuid, role: TenantRole) 
 async fn security(db: &DatabaseConnection, who: &User, role: PlatformRole) {
     let r = root(db).await;
     let tx = db.begin().await.unwrap();
-    User::set_security(&tx, who.id, role, UserStatus::Active, &actor(r.id))
+    User::set_security(&tx, who.id, role, UserStatus::Active, &platform_actor(r.id))
         .await
         .unwrap();
     tx.commit().await.unwrap();
 }
 
 #[tokio::test]
-async fn tenant_member_projection_preserves_membership_and_hides_global_authority() {
+async fn tenant_member_projection_preserves_memberships_and_excludes_global_identities() {
     let db = create_test_pool().await;
     let run = generate_test_id();
     let mut guard = TestDataGuard::new(db.clone(), run.clone());
@@ -71,7 +80,16 @@ async fn tenant_member_projection_preserves_membership_and_hides_global_authorit
     let b = create_test_tenant(&db, "member-b", &run).await;
     let user = create_test_user(&db, a.id, "shared", &run).await;
     add(&db, &b, user.id, TenantRole::Admin).await;
-    security(&db, &user, PlatformRole::Operator).await;
+    let operator = User::create(
+        &db,
+        &keycompute_db::CreateUserRequest {
+            email: format!("test-member-operator-{run}@example.com"),
+            name: Some("Standalone platform operator".into()),
+        },
+    )
+    .await
+    .unwrap();
+    security(&db, &operator, PlatformRole::Operator).await;
     let in_a = TenantMemberRecord::find_in_tenant(&db, scope(&a), user.id)
         .await
         .unwrap()
@@ -85,6 +103,18 @@ async fn tenant_member_projection_preserves_membership_and_hides_global_authorit
     assert_eq!(in_b.tenant_role, "admin");
     assert_eq!(in_a.tenant_id, a.id);
     assert_eq!(in_b.tenant_id, b.id);
+    assert!(
+        TenantMemberRecord::find_in_tenant(&db, scope(&a), operator.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        TenantMemberRecord::find_in_tenant(&db, scope(&b), operator.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let json = serde_json::to_value(&in_a).unwrap();
     for field in ["platform_role", "token_version", "password", "memberships"] {
         assert!(json.get(field).is_none());
@@ -118,7 +148,7 @@ async fn tenant_member_projection_preserves_membership_and_hides_global_authorit
 }
 
 #[tokio::test]
-async fn platform_user_http_queries_require_root_without_tenant_selection() {
+async fn platform_user_http_queries_require_global_identity_without_tenant_selection() {
     let db = create_test_pool().await;
     let run = generate_test_id();
     let mut guard = TestDataGuard::new(db.clone(), run.clone());
@@ -128,8 +158,23 @@ async fn platform_user_http_queries_require_root_without_tenant_selection() {
         .await
         .unwrap()
         .unwrap();
+    let operator = User::create(
+        &db,
+        &keycompute_db::CreateUserRequest {
+            email: format!("test-platform-operator-{run}@example.com"),
+            name: Some("Platform operator".into()),
+        },
+    )
+    .await
+    .unwrap();
+    security(&db, &operator, PlatformRole::Operator).await;
+    let operator = User::find_by_id(&db, operator.id).await.unwrap().unwrap();
     let state = AppState::with_pool(DbRouter::single(db.clone()));
-    for (user, expected) in [(&root, StatusCode::OK), (&owner, StatusCode::FORBIDDEN)] {
+    for (user, expected) in [
+        (&root, StatusCode::OK),
+        (&operator, StatusCode::OK),
+        (&owner, StatusCode::FORBIDDEN),
+    ] {
         let token = state
             .auth
             .get_jwt_validator()
@@ -139,7 +184,9 @@ async fn platform_user_http_queries_require_root_without_tenant_selection() {
         let response = create_router(state.clone())
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/v1/users?search={run}&page_size=1"))
+                    .uri(format!(
+                        "/api/v1/users?search=owner-platform-member-{run}&page_size=1"
+                    ))
                     .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -161,8 +208,22 @@ async fn platform_user_http_queries_require_root_without_tenant_selection() {
             .unwrap()
             .is_none()
     );
-    let operator = PlatformScope::checked(owner.id, PlatformRole::Operator).unwrap();
-    assert!(User::find_platform(&db, operator, root.id).await.is_err());
+    let forged = PlatformScope::checked(owner.id, PlatformRole::Operator).unwrap();
+    assert!(
+        User::find_platform(&db, forged, root.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let operator_scope = PlatformScope::checked(operator.id, PlatformRole::Operator).unwrap();
+    assert_eq!(
+        User::find_platform(&db, operator_scope, root.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        root.id
+    );
     guard.cleanup().await.unwrap();
 }
 
