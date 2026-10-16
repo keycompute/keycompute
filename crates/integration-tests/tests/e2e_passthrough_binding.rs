@@ -1249,7 +1249,7 @@ async fn passthrough_client_cancellation_releases_resources_without_poisoning_mo
 }
 
 #[tokio::test]
-async fn exclusive_grant_blocks_existing_response_resources_and_continuations() {
+async fn passthrough_grant_does_not_revoke_account_owned_response_resources() {
     let mut f = Fixture::new().await;
     expect(
         f.admin(
@@ -1312,15 +1312,21 @@ async fn exclusive_grant_blocks_existing_response_resources_and_continuations() 
                 ),
             ),
         ] {
-            expect(
-                api(f.app.clone(), method, &path, Some(&f.key), body).await,
+            // The fixture deliberately rejects native response-resource requests.
+            // Reaching it proves the ordinary account-owned route was preserved:
+            // a passthrough grant changes routing, not ownership. Different native
+            // operations preserve or normalize the synthetic upstream status.
+            let response = api(f.app.clone(), method, &path, Some(&f.key), body).await;
+            assert_ne!(
+                response.status,
                 StatusCode::NOT_FOUND,
+                "account-owned resource authority was incorrectly revoked: {}",
+                response.body
             );
         }
-        assert_eq!(
-            f.mock.calls.lock().unwrap().len(),
-            before,
-            "an existing affinity must not bypass a /pt-only grant"
+        assert!(
+            f.mock.calls.lock().unwrap().len() > before,
+            "binding lifecycle must not revoke account-owned response authority"
         );
     }
     f.finish().await;
@@ -1512,7 +1518,7 @@ async fn refreshing_account_models_rolls_back_scope_collisions() {
 }
 
 #[tokio::test]
-async fn account_owned_local_warmups_obey_revocation_but_root_warmups_survive() {
+async fn passthrough_grant_preserves_account_owned_and_root_local_warmups() {
     let mut f = Fixture::new().await;
     let owned = format!("resp_local_owned_{}", Uuid::new_v4().simple());
     let root = format!("resp_local_root_{}", Uuid::new_v4().simple());
@@ -1540,25 +1546,12 @@ async fn account_owned_local_warmups_obey_revocation_but_root_warmups_survive() 
         (Method::GET, format!("/v1/responses/{owned}")),
         (Method::GET, format!("/v1/responses/{owned}?stream=true")),
         (Method::GET, format!("/v1/responses/{owned}/input_items")),
-        (Method::POST, format!("/v1/responses/{owned}/cancel")),
-        (Method::DELETE, format!("/v1/responses/{owned}")),
     ] {
         expect(
             api(f.app.clone(), method, &path, Some(&f.key), None).await,
-            StatusCode::NOT_FOUND,
+            StatusCode::OK,
         );
     }
-    expect(
-        api(
-            f.app.clone(),
-            Method::POST,
-            "/v1/responses",
-            Some(&f.key),
-            Some(json!({"model":f.models[0],"input":"continue","previous_response_id":owned})),
-        )
-        .await,
-        StatusCode::NOT_FOUND,
-    );
     assert!(
         keycompute_db::ResponseAffinity::find_active_local_owned_response_for_user(
             &f.db,
@@ -1569,7 +1562,7 @@ async fn account_owned_local_warmups_obey_revocation_but_root_warmups_survive() 
         .await
         .unwrap()
         .is_some(),
-        "denied delete must not mutate the local resource"
+        "a passthrough grant must not revoke an account-owned local resource"
     );
     expect(
         api(

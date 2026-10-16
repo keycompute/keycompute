@@ -456,7 +456,7 @@ impl AccountModelHealth {
           SELECT a.id,$2,$3,$4,$5,$6,$7,a.upstream_config_version,$9+1 FROM accounts a
           WHERE a.id=$1 AND a.upstream_config_version=$8 AND a.enabled
             AND $3=ANY(a.models_supported) AND $2=ANY(a.api_capabilities)
-            AND EXISTS(SELECT 1 FROM tenants owner WHERE owner.id=a.tenant_id AND owner.status='active')
+            AND (a.tenant_id IS NULL OR EXISTS(SELECT 1 FROM tenants owner WHERE owner.id=a.tenant_id AND owner.status='active'))
             AND ($10::UUID IS NULL OR EXISTS(SELECT 1 FROM passthrough_bindings pb JOIN tenants anchor ON anchor.id=pb.tenant_id
                 WHERE pb.id=$10 AND pb.revision=$11 AND pb.account_id=a.id AND anchor.status='active'))
             AND ($9=0 OR EXISTS(SELECT 1 FROM account_model_health h WHERE h.account_id=a.id AND h.api_capability=$2 AND h.model=$3 AND h.generation=$9))
