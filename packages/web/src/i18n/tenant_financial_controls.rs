@@ -107,6 +107,11 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ),
         ("tenant_financial_controls.reason", "Reason", "原因"),
         (
+            "tenant_financial_controls.reason_required",
+            "Enter an auditable reason before confirming this operation.",
+            "确认操作前必须填写可审计的原因。",
+        ),
+        (
             "tenant_financial_controls.withdrawal_hint",
             "Review metadata only. Recipient account/name stay encrypted and are available only to the explicit platform payout support flow.",
             "这里只审核安全元数据；收款账号和姓名保持加密，仅显式平台付款支持流程可读取。",

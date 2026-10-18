@@ -1968,6 +1968,20 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Grant access without switching workspace. Platform administrators remain outside the tenant member list.",
     );
     m.insert("tenants.access_summary", "Access summary");
+    m.insert("tenants.settings_title", "Tenant settings");
+    m.insert("tenants.active_members", "Active members");
+    m.insert(
+        "tenants.platform_managed_mode",
+        "Platform-managed tenant · actions use platform authority",
+    );
+    m.insert(
+        "tenants.first_admin_owner_hint",
+        "This tenant has no owner. The first ordinary user to accept an administrator invitation becomes the owner.",
+    );
+    m.insert(
+        "tenants.owner_clear_warning",
+        "This also clears the current owner; assign another administrator afterwards.",
+    );
     m.insert(
         "tenants.no_members_yet",
         "No tenant members have been authorized yet.",

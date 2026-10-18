@@ -116,13 +116,13 @@ fn KeyWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
             if !embedded { Link{class:"btn btn-ghost",to:Route::OwnerKeyIssuance{},{i18n.t("tenant_keys.my_requests")}} }
             button{class:"btn btn-primary",onclick:move |_|operation.set(Some(Operation::Request)),{i18n.t("tenant_keys.request")}}
         }
-        section{class:"filter-panel",aria_label:i18n.t("tenant_keys.filter"),
+        form{class:"filter-panel",aria_label:i18n.t("tenant_keys.filter"),onsubmit:move |_|match types::owner_filter(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;operation.set(None);error.set(String::new());},Err(e)=>error.set(user_error_message(i18n, &e))},
             div{class:"filter-grid tenant-key-filter-grid",
                 MemberIdField{scope,input_id:"tenant-key-owner".to_string(),label:i18n.t("tenant_keys.owner").to_string(),value:owner(),on_input:move|value|owner.set(value)}
                 if query().tab==Tab::Keys{label{class:"checkbox-field",input{r#type:"checkbox",checked:query().revoked,onchange:move|e|{query.write().revoked=e.checked();query.write().page=1;}}{i18n.t("tenant_keys.include_revoked")}}}
                 div{class:"filter-actions",
-                    button{class:"btn btn-primary",onclick:move |_|match types::owner_filter(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;operation.set(None);error.set(String::new());},Err(e)=>error.set(user_error_message(i18n, &e))},{i18n.t("tenant_keys.filter")}}
-                    button{class:"btn btn-ghost",onclick:move |_|{operation.set(None);data.restart();},{i18n.t("tenant.reload")}}
+                    button{class:"btn btn-primary",r#type:"submit",{i18n.t("tenant_keys.filter")}}
+                    button{class:"btn btn-ghost",r#type:"button",onclick:move |_|{operation.set(None);data.restart();},{i18n.t("tenant.reload")}}
                 }
             }
         }
@@ -184,7 +184,7 @@ fn KeyRow(
         td { div { class:"action-buttons",style:"display:flex;flex-wrap:wrap;gap:8px",
             button {class:"btn btn-secondary btn-sm",onclick:move |_|on_operation.call(Operation::Edit(edit.clone())),{i18n.t("tenant_keys.edit")}}
             button {class:"btn btn-secondary btn-sm",disabled:!types::live_key(&row),onclick:move |_|on_operation.call(Operation::Rotate(rotate.clone())),{i18n.t("tenant_keys.rotate")}}
-            button {class:"btn btn-secondary btn-sm",disabled:row.revoked,onclick:move |_|on_operation.call(Operation::Revoke(revoke.clone())),{i18n.t("tenant_keys.revoke")}}
+            button {class:"btn btn-danger btn-sm",disabled:row.revoked,onclick:move |_|on_operation.call(Operation::Revoke(revoke.clone())),{i18n.t("tenant_keys.revoke")}}
             button {class:"btn btn-danger btn-sm",onclick:move |_|on_operation.call(Operation::Delete(delete.clone())),{i18n.t("tenant_keys.delete")}}
         }}
     }}
@@ -206,6 +206,6 @@ fn IntentRow(
         td {p {{i18n.t("tenant_keys.claim_by")} " " {format_time(&row.expires_at)}}
             p {{i18n.t("tenant_keys.expiration")} " " {row.requested_expires_at.as_deref().map(format_time).unwrap_or_else(||i18n.t("tenant_keys.never").into())}}
         }
-        td {button {class:"btn btn-secondary btn-sm",onclick:move |_|on_operation.call(Operation::Cancel(cancel.clone())),{i18n.t("tenant_keys.cancel_request")}}}
+        td {button {class:"btn btn-danger btn-sm",onclick:move |_|on_operation.call(Operation::Cancel(cancel.clone())),{i18n.t("tenant_keys.cancel_request")}}}
     }}
 }

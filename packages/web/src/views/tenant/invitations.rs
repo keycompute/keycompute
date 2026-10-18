@@ -1,4 +1,7 @@
-use super::common::{self, CommandDialog, Pager, WorkspaceContext, WorkspaceLinks, WorkspaceScope};
+use super::common::{
+    self, CommandDialog, OneTimeRecoveryLink, Pager, WorkspaceContext, WorkspaceLinks,
+    WorkspaceScope,
+};
 use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::user_error_message,
@@ -199,7 +202,7 @@ fn TenantInvitationsPage() -> Element {
         if let Some(result)=created(){section {class:"alert alert-info",role:"status",
             p {{i18n.t(notification_label(&result.notification))}}
             if result.outcome==InvitationOutcome::AlreadyPending {p {{i18n.t("tenant.already_pending")}}}
-            if let Some(link)=result.acceptance_link {RecoveryLink {link}}
+            if let Some(link)=result.acceptance_link {OneTimeRecoveryLink {link,input_id:"invite-recovery".to_string()}}
             button {class:"btn btn-secondary",onclick:move |_|created.set(None),{i18n.t("tenant.hide")}}
         }}
         button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
@@ -220,15 +223,4 @@ fn TenantInvitationsPage() -> Element {
         }
         if let Some(invitation)=pending(){CommandDialog {title:i18n.t("tenant.revoke").to_string(),target:invitation.email,busy:busy(),on_cancel:move |_|pending.set(None),on_confirm:revoke}}
     }}
-}
-
-#[component]
-fn RecoveryLink(link: String) -> Element {
-    super::workspace_switcher::use_workspace_blocker();
-    let i18n = use_i18n();
-    rsx! {
-        label { class:"form-label", r#for:"invite-recovery", {i18n.t("tenant.recovery_link")} }
-        input { id:"invite-recovery", class:"input-field", readonly:true, value:link, autocomplete:"off" }
-        p { {i18n.t("tenant.recovery_hint")} }
-    }
 }

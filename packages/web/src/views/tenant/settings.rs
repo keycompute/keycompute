@@ -76,18 +76,32 @@ pub fn TenantSettings() -> Element {
     let key = format!("{epoch}:{scope:?}");
     rsx! {
         if let Some(scope) = scope {
-            for identity in [key] { TenantSettingsPage { key: "{identity}", scope, embedded: false } }
+            for identity in [key] {
+                TenantSettingsPage {
+                    key: "{identity}",
+                    scope,
+                    embedded: false,
+                    on_context_changed: None,
+                }
+            }
         }
     }
 }
 
 #[component]
-pub(crate) fn PlatformTenantSettings(scope: WorkspaceScope) -> Element {
-    rsx! { TenantSettingsPage { scope, embedded: true } }
+pub(crate) fn PlatformTenantSettings(
+    scope: WorkspaceScope,
+    on_context_changed: EventHandler<()>,
+) -> Element {
+    rsx! { TenantSettingsPage { scope, embedded: true, on_context_changed: Some(on_context_changed) } }
 }
 
 #[component]
-fn TenantSettingsPage(scope: WorkspaceScope, embedded: bool) -> Element {
+fn TenantSettingsPage(
+    scope: WorkspaceScope,
+    embedded: bool,
+    on_context_changed: Option<EventHandler<()>>,
+) -> Element {
     let i18n = use_i18n();
     let auth = use_context::<AuthStore>();
     let mut users = use_context::<UserStore>();
@@ -99,6 +113,7 @@ fn TenantSettingsPage(scope: WorkspaceScope, embedded: bool) -> Element {
     let mut draft = use_signal(ConfigDraft::default);
     let mut dirty = use_signal(|| false);
     let mut pending = use_signal(|| None::<TenantPatch>);
+    let mut reload_pending = use_signal(|| false);
     use_drop(move || shared_dirty.set(draft_owner, false));
 
     let mut context = use_resource(move || async move {
@@ -162,6 +177,9 @@ fn TenantSettingsPage(scope: WorkspaceScope, embedded: bool) -> Element {
                     dirty.set(false);
                     shared_dirty.set(draft_owner, false);
                     context.restart();
+                    if let Some(handler) = on_context_changed {
+                        handler.call(());
+                    }
                     ui.show_success(i18n.t("tenant.saved"));
                 }
                 Err(value) => error.set(user_error_message(i18n, &value)),
@@ -169,12 +187,29 @@ fn TenantSettingsPage(scope: WorkspaceScope, embedded: bool) -> Element {
         });
     };
     let reload = move |_| {
+        if dirty() {
+            reload_pending.set(true);
+            return;
+        }
+        pending.set(None);
+        error.set(String::new());
+        draft.set(ConfigDraft::default());
+        context.restart();
+        if let Some(handler) = on_context_changed {
+            handler.call(());
+        }
+    };
+    let confirm_reload = move |_| {
+        reload_pending.set(false);
         pending.set(None);
         error.set(String::new());
         dirty.set(false);
         shared_dirty.set(draft_owner, false);
         draft.set(ConfigDraft::default());
         context.restart();
+        if let Some(handler) = on_context_changed {
+            handler.call(());
+        }
     };
 
     rsx! {
@@ -184,7 +219,7 @@ fn TenantSettingsPage(scope: WorkspaceScope, embedded: bool) -> Element {
                 WorkspaceLinks {}
                 WorkspaceContext {}
             } else {
-                h2 { class: "section-title", {i18n.t("tenant.settings")} }
+                h2 { class: "section-title", {i18n.t("tenants.settings_title")} }
                 p { class: "text-secondary", {i18n.t("tenant.settings_hint")} }
             }
             if !error().is_empty() { div { class: "alert alert-error", role: "alert", "{error}" } }
@@ -193,7 +228,7 @@ fn TenantSettingsPage(scope: WorkspaceScope, embedded: bool) -> Element {
                     h2 { class: "section-title", {i18n.t("tenant.general_settings")} }
                     div { class: "section-body tenant-settings-form",
                         div { class: "tenant-settings-owner",
-                            span { class: "tenant-settings-owner-label", {i18n.t("tenant.owner_id")} }
+                            span { class: "tenant-settings-owner-label", {i18n.t("tenant.owner")} }
                             if let Some(owner_user_id) = value.owner_user_id {
                                 TechnicalId { value: owner_user_id.to_string() }
                             } else {
@@ -230,12 +265,18 @@ fn TenantSettingsPage(scope: WorkspaceScope, embedded: bool) -> Element {
                     }
                 }
             } else if let Some(Err(value)) = loaded {
-                div { class: "alert alert-error", role: "alert", {user_error_message(i18n, &value)} }
+                div { class: "alert alert-error", role: "alert",
+                    p { {user_error_message(i18n, &value)} }
+                    button { class: "btn btn-secondary", onclick: move |_| { context.restart(); if let Some(handler) = on_context_changed { handler.call(()); } }, {i18n.t("tenant.reload")} }
+                }
             } else {
                 p { role: "status", {i18n.t("common.loading")} }
             }
             if pending().is_some() {
                 CommandDialog { title: i18n.t("tenant.save").to_string(), target: i18n.t("tenant.config_relogin").to_string(), busy: saving(), on_cancel: move |_| pending.set(None), on_confirm: confirm }
+            }
+            if reload_pending() {
+                CommandDialog { title: i18n.t("tenant.reload").to_string(), target: i18n.t("tenant.reload_discard_confirm").to_string(), busy: false, on_cancel: move |_| reload_pending.set(false), on_confirm: confirm_reload }
             }
         }
     }

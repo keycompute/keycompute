@@ -26,7 +26,10 @@ pub use monitoring::{Monitoring, MonitoringDiagnostics};
 pub use node_gateway::NodeGateway;
 pub use payment_orders::PaymentOrders;
 pub use platform_audit::PlatformAudit;
-pub use platform_tenant_access::PlatformTenantAccess;
+pub use platform_tenant_access::{
+    PlatformTenantAccess, PlatformTenantAudit, PlatformTenantFinance,
+    PlatformTenantFinancialControls, PlatformTenantKeys, PlatformTenantSettings,
+};
 pub use pricing::Pricing;
 pub use settings::Settings;
 pub use system::System;

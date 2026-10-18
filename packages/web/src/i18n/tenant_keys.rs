@@ -55,8 +55,8 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ("tenant_keys.expiration", "Key expiration", "Key 到期时间"),
         (
             "tenant_keys.version",
-            "Observed metadata version:",
-            "已观察的元数据版本：",
+            "Metadata last updated:",
+            "元数据最后更新时间：",
         ),
         ("tenant_keys.revoked", "Revoked", "已撤销"),
         ("tenant_keys.expired", "Expired", "已过期"),
@@ -144,6 +144,16 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
             "tenant_keys.selected_member",
             "Selected key owner",
             "已选择的 Key 拥有者",
+        ),
+        (
+            "tenant_keys.no_eligible_members",
+            "No selectable active member is available in the current results. Try another page, or invite and activate a member.",
+            "当前结果中没有可选择的有效成员。请尝试其它分页，或先邀请并启用成员。",
+        ),
+        (
+            "tenant_keys.no_matching_members",
+            "No eligible active member matches this search.",
+            "没有符合当前搜索条件的可用有效成员。",
         ),
         (
             "tenant_keys.select_workspace",

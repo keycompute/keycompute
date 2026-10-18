@@ -184,7 +184,7 @@ pub(crate) fn PlatformTenantFinancialControls(scope: WorkspaceScope) -> Element 
 #[component]
 fn Workspace(scope: WorkspaceScope, embedded: bool) -> Element {
     let i18n = use_i18n();
-    let mut tab = use_signal(|| Tab::Reservations);
+    let mut tab = use_signal(|| Tab::Earnings);
 
     rsx! {
         div { class: "page-container tenant-financial-controls",
@@ -289,6 +289,13 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
     let confirm = move |_| {
         let Some((owner, row)) = action() else { return };
         let why = reason();
+        if why.trim().is_empty() {
+            error.set(
+                i18n.t("tenant_financial_controls.reason_required")
+                    .to_owned(),
+            );
+            return;
+        }
         if busy() {
             return;
         }
@@ -371,7 +378,7 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
             }
             if let Some((_, row)) = action() {
                 div { class: "modal-backdrop",
-                    div { class: "modal", role: "dialog", aria_modal: "true", aria_label: i18n.t("tenant_financial_controls.release"),
+                    div { class: "modal", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !busy() { event.stop_propagation(); action.set(None); }, role: "dialog", aria_modal: "true", aria_label: i18n.t("tenant_financial_controls.release"),
                         div { class: "modal-header", h2 { {i18n.t("tenant_financial_controls.release")} } }
                         div { class: "modal-body",
                             p { TechnicalId { value: row.request_id.to_string() } }
@@ -381,13 +388,14 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
                                 id: "financial-recovery-reason",
                                 class: "input-field",
                                 maxlength: "500",
+                                required: true,
                                 value: "{reason}",
                                 oninput: move |event| reason.set(event.value()),
                             }
                         }
                         div { class: "modal-footer",
-                            button { class: "btn btn-secondary", disabled: busy(), onclick: move |_| action.set(None), {i18n.t("form.cancel")} }
-                            button { class: "btn btn-primary", disabled: busy(), onclick: confirm, {i18n.t("tenant.confirm")} }
+                            button { class: "btn btn-secondary", onmounted: move |event| async move { let _ = event.set_focus(true).await; }, disabled: busy(), onclick: move |_| action.set(None), {i18n.t("form.cancel")} }
+                            button { class: "btn btn-danger", disabled: busy() || reason().trim().is_empty(), onclick: confirm, {i18n.t("tenant_financial_controls.release")} }
                         }
                     }
                 }
@@ -508,6 +516,13 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
             return;
         };
         let why = reason();
+        if why.trim().is_empty() {
+            error.set(
+                i18n.t("tenant_financial_controls.reason_required")
+                    .to_owned(),
+            );
+            return;
+        }
         if busy() {
             return;
         }
@@ -584,7 +599,7 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
             }
             if let Some((decision, row)) = action() {
                 div { class: "modal-backdrop",
-                    div { class: "modal", role: "dialog", aria_modal: "true", aria_label: i18n.t("tenant_financial_controls.review"),
+                    div { class: "modal", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !busy() { event.stop_propagation(); action.set(None); }, role: "dialog", aria_modal: "true", aria_label: i18n.t("tenant_financial_controls.review"),
                         div { class: "modal-header", h2 { {i18n.t("tenant_financial_controls.review")} } }
                         div { class: "modal-body",
                             p { "{row.currency} {row.total_amount}" }
@@ -601,13 +616,14 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
                                 id: "financial-review-reason",
                                 class: "input-field",
                                 maxlength: "500",
+                                required: true,
                                 value: "{reason}",
                                 oninput: move |event| reason.set(event.value()),
                             }
                         }
                         div { class: "modal-footer",
-                            button { class: "btn btn-secondary", disabled: busy(), onclick: move |_| action.set(None), {i18n.t("form.cancel")} }
-                            button { class: "btn btn-primary", disabled: busy(), onclick: confirm, {i18n.t("tenant.confirm")} }
+                            button { class: "btn btn-secondary", onmounted: move |event| async move { let _ = event.set_focus(true).await; }, disabled: busy(), onclick: move |_| action.set(None), {i18n.t("form.cancel")} }
+                            button { class: if decision == WithdrawalDecision::Reject { "btn btn-danger" } else { "btn btn-primary" }, disabled: busy() || reason().trim().is_empty(), onclick: confirm, {i18n.t(if decision == WithdrawalDecision::Approve { "tenant_financial_controls.approve" } else { "tenant_financial_controls.reject" })} }
                         }
                     }
                 }

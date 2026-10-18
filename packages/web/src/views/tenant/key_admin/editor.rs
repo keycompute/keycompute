@@ -6,7 +6,10 @@ use crate::{
     stores::{auth_store::AuthStore, ui_store::UiStore, user_store::UserStore},
     utils::resource::{KeyedResourceValue, current_keyed_value},
 };
-use client_api::{ClientError, MembershipStatus, UserStatus, api::key_control::IssuanceOutcome};
+use client_api::{
+    ClientError, MembershipStatus, UserStatus,
+    api::{key_control::IssuanceOutcome, tenant_control::TenantMember},
+};
 use dioxus::prelude::*;
 use uuid::Uuid;
 
@@ -29,6 +32,10 @@ pub(super) fn Editor(
     let label = op.label();
     let requesting = matches!(op, Operation::Request);
     let editing = matches!(op, Operation::Edit(_));
+    let dangerous = matches!(
+        op,
+        Operation::Revoke(_) | Operation::Delete(_) | Operation::Cancel(_)
+    );
     let input_fields = requesting || editing || matches!(op, Operation::Rotate(_));
     let original = op.clone();
     let submit = move |_| {
@@ -176,7 +183,7 @@ pub(super) fn Editor(
         }
         div{class:"modal-footer",
             button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}
-            button{class:"btn btn-primary",disabled:busy(),onclick:submit,{i18n.t("tenant.confirm")}}
+            button{class:if dangerous{"btn btn-danger"}else{"btn btn-primary"},disabled:busy(),onclick:submit,{i18n.t(label)}}
         }
     }}}
 }
@@ -201,7 +208,18 @@ fn OwnerPicker(
         async move {
             let result = common::read(auth, users, scope, move |token| {
                 let q = q.clone();
-                async move { scope.api()?.members(q.1, 20, Some(&q.0), &token).await }
+                async move {
+                    scope
+                        .api()?
+                        .members_filtered(
+                            q.1,
+                            20,
+                            Some(&q.0),
+                            Some(MembershipStatus::Active),
+                            &token,
+                        )
+                        .await
+                }
             })
             .await;
             KeyedResourceValue::new(key, result)
@@ -225,7 +243,7 @@ fn OwnerPicker(
                     select{id:"key-owner-option",class:"input-field",aria_label:i18n.t("tenant_keys.owner"),disabled,value:"{selected}",onchange:move|e|if let Ok(id)=e.value().parse::<Uuid>() && !id.is_nil(){if let Some(member)=selectable_members.iter().find(|member|member.user_id==id){selected_member.set(Some((id.to_string(),member.email.clone())));}on_select.call(id);},
                         option{value:"",{i18n.t("tenant_keys.choose_member")}}
                         if !selected.trim().is_empty() && !selected_is_listed{option{value:"{selected}","{selected}"}}
-                        for member in &members.items{option{key:"{member.user_id}",value:"{member.user_id}",title:"{member.user_id}",disabled:member.user_id.is_nil()||member.membership_status!=MembershipStatus::Active||member.user_status!=UserStatus::Active,"{member.email}"}}
+                        for member in &members.items{option{key:"{member.user_id}",value:"{member.user_id}",title:"{member.user_id}",disabled:!owner_candidate_is_eligible(member),"{member.email}"}}
                     }
                     if !selected.trim().is_empty(){
                         div{class:"tenant-owner-selected",role:"status",
@@ -235,9 +253,31 @@ fn OwnerPicker(
                             }
                         }
                     }
+                    if let Some(message)=owner_picker_notice_key(&members.items,&filter()){
+                        p{class:"alert alert-info",{i18n.t(message)}}
+                    }
                     Pager{page:page(),total_pages:members.total_pages,total:members.total,on_page:move|value|if !disabled{page.set(value);}}
                 }
             }
         }
     }}
+}
+
+pub(super) fn owner_candidate_is_eligible(member: &TenantMember) -> bool {
+    !member.user_id.is_nil()
+        && member.membership_status == MembershipStatus::Active
+        && member.user_status == UserStatus::Active
+}
+
+pub(super) fn owner_picker_notice_key(
+    members: &[TenantMember],
+    filter: &str,
+) -> Option<&'static str> {
+    if members.iter().any(owner_candidate_is_eligible) {
+        None
+    } else if filter.trim().is_empty() {
+        Some("tenant_keys.no_eligible_members")
+    } else {
+        Some("tenant_keys.no_matching_members")
+    }
 }

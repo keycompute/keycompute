@@ -1,4 +1,6 @@
-use client_api::api::tenant_control::{self as client, InvitationToken, MemberPatch, TenantPatch};
+use client_api::api::tenant_control::{
+    self as client, InvitationToken, MemberPatch, TenantAuditQuery, TenantPatch,
+};
 use client_api::{ClientError, TenantControlApi};
 use keycompute_types::{MembershipStatus, TenantRole};
 use serde_json::json;
@@ -180,5 +182,92 @@ async fn member_status_filter_is_typed_and_keeps_the_platform_target() {
         .unwrap();
 
     assert_eq!(page.total, 7);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn audit_filters_are_exact_encoded_and_keep_the_platform_target() {
+    use wiremock::matchers::query_param;
+
+    let (client, server) = common::create_test_client().await;
+    let tenant = Uuid::new_v4();
+    let actor = Uuid::new_v4();
+    let request = Uuid::new_v4();
+    let event_id = Uuid::new_v4();
+    let control = TenantControlApi::platform_tenant(&client, tenant).unwrap();
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/api/v1/platform/tenants/{tenant}/control/audit-events"
+        )))
+        .and(query_param("page", "2"))
+        .and(query_param("page_size", "20"))
+        .and(query_param("actor_user_id", actor.to_string()))
+        .and(query_param("request_id", request.to_string()))
+        .and(query_param("action", "membership.update"))
+        .and(query_param("result", "success"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{
+                "id": event_id,
+                "scope_type": "platform",
+                "tenant_id": tenant,
+                "actor_user_id": actor,
+                "actor_email": "operator@example.com",
+                "actor_name": "Operator",
+                "action": "membership.update",
+                "resource_type": "tenant_membership",
+                "resource_id": null,
+                "request_id": request,
+                "credential_kind": "jwt",
+                "platform_role": "operator",
+                "tenant_role": null,
+                "metadata": {},
+                "result": "success",
+                "created_at": "2026-10-18T00:00:00Z"
+            }],
+            "total": 21,
+            "page": 2,
+            "page_size": 20,
+            "total_pages": 2
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let page = control
+        .audit_filtered(
+            &TenantAuditQuery {
+                page: 2,
+                page_size: 20,
+                actor_user_id: Some(actor),
+                request_id: Some(request),
+                action: Some(" membership.update ".into()),
+                result: Some("success".into()),
+            },
+            "console",
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.items[0].scope_type, "platform");
+    assert_eq!(
+        page.items[0].actor_email.as_deref(),
+        Some("operator@example.com")
+    );
+
+    for query in [
+        TenantAuditQuery {
+            page: 1,
+            page_size: 20,
+            actor_user_id: Some(Uuid::nil()),
+            ..Default::default()
+        },
+        TenantAuditQuery {
+            page: 1,
+            page_size: 20,
+            result: Some("unknown".into()),
+            ..Default::default()
+        },
+    ] {
+        assert!(control.audit_filtered(&query, "console").await.is_err());
+    }
     server.verify().await;
 }

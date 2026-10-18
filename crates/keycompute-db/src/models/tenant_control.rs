@@ -79,6 +79,8 @@ pub struct TenantAuditView {
     pub scope_type: String,
     pub tenant_id: Option<Uuid>,
     pub actor_user_id: Uuid,
+    pub actor_email: Option<String>,
+    pub actor_name: Option<String>,
     pub action: String,
     pub resource_type: String,
     pub resource_id: Option<String>,
@@ -89,6 +91,14 @@ pub struct TenantAuditView {
     pub metadata: serde_json::Value,
     pub result: String,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TenantAuditFilter {
+    pub actor_user_id: Option<Uuid>,
+    pub request_id: Option<Uuid>,
+    pub action: Option<String>,
+    pub result: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -945,17 +955,23 @@ pub async fn list_audit_events(
     db: &impl ConnectionTrait,
     scope: TenantScope,
     page: Page,
+    filter: &TenantAuditFilter,
 ) -> Result<Vec<TenantAuditView>, DbError> {
     let page = Page::bounded(page.page, page.page_size);
 
     let sql = format!(
-        "SELECT id,scope_type,tenant_id,actor_user_id,action,resource_type,resource_id,request_id,credential_kind,platform_role,tenant_role,metadata,result,created_at
+        "SELECT tenant_audit_events.id,tenant_audit_events.scope_type,tenant_audit_events.tenant_id,tenant_audit_events.actor_user_id,audit_actor.email AS actor_email,audit_actor.name AS actor_name,tenant_audit_events.action,tenant_audit_events.resource_type,tenant_audit_events.resource_id,tenant_audit_events.request_id,tenant_audit_events.credential_kind,tenant_audit_events.platform_role,tenant_audit_events.tenant_role,tenant_audit_events.metadata,tenant_audit_events.result,tenant_audit_events.created_at
          FROM tenant_audit_events
-         WHERE tenant_id=$1
+         LEFT JOIN users audit_actor ON audit_actor.id=tenant_audit_events.actor_user_id
+         WHERE tenant_audit_events.tenant_id=$1
            AND {AUDIT_VISIBILITY_PREDICATE}
            AND {ADMIN_ACTOR_PREDICATE}
-         ORDER BY created_at DESC,id DESC
-         LIMIT $3 OFFSET $4"
+           AND ($3::uuid IS NULL OR tenant_audit_events.actor_user_id=$3)
+           AND ($4::uuid IS NULL OR tenant_audit_events.request_id=$4)
+           AND ($5::text IS NULL OR tenant_audit_events.action=$5)
+           AND ($6::text IS NULL OR tenant_audit_events.result=$6)
+         ORDER BY tenant_audit_events.created_at DESC,tenant_audit_events.id DESC
+         LIMIT $7 OFFSET $8"
     );
     Ok(
         TenantAuditView::find_by_statement(Statement::from_sql_and_values(
@@ -964,6 +980,10 @@ pub async fn list_audit_events(
             [
                 scope.tenant_id().into(),
                 scope.user_id().into(),
+                filter.actor_user_id.into(),
+                filter.request_id.into(),
+                filter.action.clone().into(),
+                filter.result.clone().into(),
                 page.page_size.into(),
                 page.offset.into(),
             ],
@@ -976,6 +996,7 @@ pub async fn list_audit_events(
 pub async fn count_audit_events(
     db: &impl ConnectionTrait,
     scope: TenantScope,
+    filter: &TenantAuditFilter,
 ) -> Result<i64, DbError> {
     #[derive(Debug, FromQueryResult)]
     struct Count {
@@ -986,12 +1007,23 @@ pub async fn count_audit_events(
          FROM tenant_audit_events
          WHERE tenant_id=$1
            AND {AUDIT_VISIBILITY_PREDICATE}
-           AND {ADMIN_ACTOR_PREDICATE}"
+           AND {ADMIN_ACTOR_PREDICATE}
+           AND ($3::uuid IS NULL OR tenant_audit_events.actor_user_id=$3)
+           AND ($4::uuid IS NULL OR tenant_audit_events.request_id=$4)
+           AND ($5::text IS NULL OR tenant_audit_events.action=$5)
+           AND ($6::text IS NULL OR tenant_audit_events.result=$6)"
     );
     Ok(Count::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
         &sql,
-        [scope.tenant_id().into(), scope.user_id().into()],
+        [
+            scope.tenant_id().into(),
+            scope.user_id().into(),
+            filter.actor_user_id.into(),
+            filter.request_id.into(),
+            filter.action.clone().into(),
+            filter.result.clone().into(),
+        ],
     ))
     .one(db)
     .await?

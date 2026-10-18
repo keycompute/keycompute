@@ -7,7 +7,7 @@ use crate::{
         ui_store::UiStore,
         user_store::{UserInfo, UserStore},
     },
-    utils::display::short_id,
+    utils::{display::short_id, on_copy},
 };
 use client_api::{
     ApiClient, ClientError, Result, TenantControlApi,
@@ -357,6 +357,36 @@ pub fn TechnicalId(value: String) -> Element {
             title: "{value}",
             aria_label: "{value}",
             "{value}"
+        }
+    }
+}
+
+/// Render a one-time recovery value with consistent copy behavior and route/
+/// unload protection. The parent remains responsible for clearing the value.
+#[component]
+pub fn OneTimeRecoveryLink(link: String, input_id: String) -> Element {
+    super::workspace_switcher::use_workspace_blocker();
+    let i18n = use_i18n();
+    let ui = use_context::<UiStore>();
+    let copied = use_signal(|| false);
+    rsx! {
+        div { class: "one-time-recovery-link",
+            label { class: "form-label", r#for: "{input_id}", {i18n.t("tenant.recovery_link")} }
+            div { class: "one-time-recovery-row",
+                input { id: "{input_id}", class: "input-field", readonly: true, value: "{link}", autocomplete: "off" }
+                button {
+                    class: "btn btn-secondary",
+                    r#type: "button",
+                    onclick: on_copy(
+                        link.clone(),
+                        i18n.t("common.copy_manual_hint").to_string(),
+                        ui,
+                        copied,
+                    ),
+                    {i18n.t(if copied() { "common.copied" } else { "common.copy" })}
+                }
+            }
+            p { class: "form-hint", {i18n.t("tenant.recovery_hint")} }
         }
     }
 }

@@ -1,9 +1,9 @@
 use dioxus::prelude::*;
 
 use crate::icons::{
-    IconActivity, IconBarChart, IconBuilding, IconChevronLeft, IconChevronRight, IconHome, IconKey,
-    IconReceipt, IconServer, IconSettings, IconShare, IconTag, IconUser, IconUsers, IconWallet,
-    IconX,
+    IconActivity, IconBarChart, IconBuilding, IconChevronLeft, IconChevronRight, IconClipboardList,
+    IconGauge, IconHome, IconKey, IconReceipt, IconServer, IconSettings, IconShare, IconTag,
+    IconUser, IconUsers, IconWallet, IconX,
 };
 
 /// 单条导航项
@@ -15,8 +15,6 @@ pub struct NavItem {
     pub path: String,
     /// 图标名称，对应 IconXxx 组件
     pub icon: NavIcon,
-    /// 是否需要 Admin 权限（仅影响视觉提示，不拦截路由）
-    pub admin_only: bool,
 }
 
 impl NavItem {
@@ -25,13 +23,7 @@ impl NavItem {
             label: label.into(),
             path: path.into(),
             icon,
-            admin_only: false,
         }
-    }
-
-    pub fn admin(mut self) -> Self {
-        self.admin_only = true;
-        self
     }
 }
 
@@ -59,6 +51,8 @@ pub enum NavIcon {
     Tag,
     Building,
     Activity,
+    Gauge,
+    ClipboardList,
 }
 
 /// 侧边导航栏
@@ -152,7 +146,6 @@ pub fn Sidebar(
                         for item in section.items.iter() {
                             SidebarNavItem {
                                 item: item.clone(),
-                                collapsed: is_collapsed,
                                 mobile_open,
                                 active: active_path.as_deref() == Some(item.path.as_str()),
                             }
@@ -182,12 +175,7 @@ pub fn Sidebar(
 
 /// 单条导航项组件（内部组件）
 #[component]
-fn SidebarNavItem(
-    item: NavItem,
-    collapsed: bool,
-    mut mobile_open: Signal<bool>,
-    active: bool,
-) -> Element {
+fn SidebarNavItem(item: NavItem, mut mobile_open: Signal<bool>, active: bool) -> Element {
     let item_class = if active {
         "sidebar-item active"
     } else {
@@ -208,6 +196,8 @@ fn SidebarNavItem(
         NavIcon::Tag => rsx! { IconTag { size: 20 } },
         NavIcon::Building => rsx! { IconBuilding { size: 20 } },
         NavIcon::Activity => rsx! { IconActivity { size: 20 } },
+        NavIcon::Gauge => rsx! { IconGauge { size: 20 } },
+        NavIcon::ClipboardList => rsx! { IconClipboardList { size: 20 } },
     };
 
     let title_attr = item.label.clone();
@@ -226,14 +216,6 @@ fn SidebarNavItem(
             span { class: "sidebar-item-icon", {icon_el} }
             span { class: "sidebar-item-label",
                 "{label}"
-                // Admin 专属标记
-                if item.admin_only && !collapsed {
-                    span {
-                        class: "sidebar-admin-badge",
-                        style: "margin-left: 4px; font-size: 10px; padding: 1px 4px; border-radius: 3px; background: var(--warning-light, #fef3c7); color: var(--warning, #d97706); font-weight: 600;",
-                        "A"
-                    }
-                }
             }
         }
     }

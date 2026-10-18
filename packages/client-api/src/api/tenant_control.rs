@@ -60,8 +60,13 @@ pub struct TenantInvitation {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TenantAuditEvent {
     pub id: Uuid,
+    pub scope_type: String,
     pub tenant_id: Option<Uuid>,
     pub actor_user_id: Uuid,
+    #[serde(default)]
+    pub actor_email: Option<String>,
+    #[serde(default)]
+    pub actor_name: Option<String>,
     pub action: String,
     pub resource_type: String,
     pub resource_id: Option<String>,
@@ -72,6 +77,16 @@ pub struct TenantAuditEvent {
     pub metadata: serde_json::Value,
     pub result: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TenantAuditQuery {
+    pub page: u32,
+    pub page_size: u32,
+    pub actor_user_id: Option<Uuid>,
+    pub request_id: Option<Uuid>,
+    pub action: Option<String>,
+    pub result: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct TenantPatch {
@@ -364,11 +379,55 @@ impl TenantControlApi {
             .await
     }
     pub async fn audit(&self, page: u32, size: u32, token: &str) -> Result<Page<TenantAuditEvent>> {
+        self.audit_filtered(
+            &TenantAuditQuery {
+                page,
+                page_size: size,
+                ..Default::default()
+            },
+            token,
+        )
+        .await
+    }
+    pub async fn audit_filtered(
+        &self,
+        query: &TenantAuditQuery,
+        token: &str,
+    ) -> Result<Page<TenantAuditEvent>> {
+        if query.actor_user_id.is_some_and(|id| id.is_nil())
+            || query.request_id.is_some_and(|id| id.is_nil())
+        {
+            return Err(ClientError::Config(
+                "Audit UUID filters must be nonzero".into(),
+            ));
+        }
+        let mut params = page_query(query.page, query.page_size)?;
+        if let Some(id) = query.actor_user_id {
+            params.push_str("&actor_user_id=");
+            params.push_str(&id.to_string());
+        }
+        if let Some(id) = query.request_id {
+            params.push_str("&request_id=");
+            params.push_str(&id.to_string());
+        }
+        for (name, value) in [("action", &query.action), ("result", &query.result)] {
+            if let Some(value) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+                if value.len() > 128 || value.chars().any(char::is_control) {
+                    return Err(ClientError::Config("Invalid audit filter".into()));
+                }
+                params.push('&');
+                params.push_str(name);
+                params.push('=');
+                params.push_str(&super::common::encode_query_value(value));
+            }
+        }
+        if query.result.as_deref().map(str::trim).is_some_and(|value| {
+            !value.is_empty() && !matches!(value, "success" | "denied" | "failure")
+        }) {
+            return Err(ClientError::Config("Invalid audit result filter".into()));
+        }
         self.client
-            .get_json_fresh(
-                &format!("{}/audit-events?{}", self.base, page_query(page, size)?),
-                Some(token),
-            )
+            .get_json_fresh(&format!("{}/audit-events?{params}", self.base), Some(token))
             .await
     }
 }
@@ -403,5 +462,40 @@ fn safe_invitation_error(error: ClientError) -> ClientError {
         ClientError::ServerError(_) => ClientError::ServerError(message),
         ClientError::Network(_) => ClientError::Network(message),
         _ => ClientError::Other(message),
+    }
+}
+
+#[cfg(test)]
+mod audit_contract_tests {
+    use super::TenantAuditEvent;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn tenant_audit_event_preserves_authority_source() {
+        let id = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let event: TenantAuditEvent = serde_json::from_value(json!({
+            "id": id,
+            "scope_type": "platform",
+            "tenant_id": Uuid::new_v4(),
+            "actor_user_id": actor,
+            "actor_email": "operator@example.com",
+            "actor_name": "Operator",
+            "action": "tenant.update",
+            "resource_type": "tenant",
+            "resource_id": null,
+            "request_id": null,
+            "credential_kind": "session",
+            "platform_role": "operator",
+            "tenant_role": null,
+            "metadata": {},
+            "result": "success",
+            "created_at": "2026-10-18T00:00:00Z"
+        }))
+        .expect("server audit event should deserialize");
+
+        assert_eq!(event.scope_type, "platform");
+        assert_eq!(event.actor_user_id, actor);
     }
 }

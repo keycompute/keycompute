@@ -9,6 +9,26 @@ use crate::{
     },
 };
 use dioxus::prelude::*;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AuditFilter {
+    actor_user_id: Option<Uuid>,
+    request_id: Option<Uuid>,
+    action: Option<String>,
+    result: Option<String>,
+}
+
+fn optional_uuid(value: &str) -> Option<Option<Uuid>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Some(None);
+    }
+    Uuid::parse_str(value)
+        .ok()
+        .filter(|id| !id.is_nil())
+        .map(Some)
+}
 
 pub(crate) fn action_label(i18n: crate::i18n::I18n, action: &str) -> String {
     let exact = match action {
@@ -95,6 +115,16 @@ pub(crate) fn result_label(i18n: crate::i18n::I18n, result: &str) -> String {
         _ => result.to_owned(),
     }
 }
+
+fn scope_label(i18n: crate::i18n::I18n, scope: &str) -> String {
+    match scope {
+        "platform" => i18n.t("tenant.audit_scope_platform").to_owned(),
+        "tenant" => i18n.t("tenant.audit_scope_tenant").to_owned(),
+        "user" => i18n.t("tenant.audit_scope_user").to_owned(),
+        "system" => i18n.t("tenant.audit_scope_system").to_owned(),
+        value => value.to_owned(),
+    }
+}
 /// The router may reuse an Outlet VNode across AppShell remounts. A page-local
 /// key must discard drafts, confirmation dialogs and one-time secrets as well.
 #[component]
@@ -124,17 +154,59 @@ fn TenantAuditPage(scope: WorkspaceScope, embedded: bool) -> Element {
     let users = use_context::<UserStore>();
     let i18n = use_i18n();
     let mut page = use_signal(|| 1u32);
+    let mut actor_input = use_signal(String::new);
+    let mut request_input = use_signal(String::new);
+    let mut action_input = use_signal(String::new);
+    let mut result_input = use_signal(String::new);
+    let mut filter = use_signal(AuditFilter::default);
+    let mut filter_error = use_signal(String::new);
     let mut data = use_resource(move || {
         let page = page();
+        let filter_value = filter();
+        let resource_key = (scope, filter_value.clone(), page);
         async move {
-            let result = common::read(auth, users, scope, move |token| async move {
-                scope.api()?.audit(page, 20, &token).await
+            let query = client_api::api::tenant_control::TenantAuditQuery {
+                page,
+                page_size: 20,
+                actor_user_id: filter_value.actor_user_id,
+                request_id: filter_value.request_id,
+                action: filter_value.action,
+                result: filter_value.result,
+            };
+            let result = common::read(auth, users, scope, move |token| {
+                let query = query.clone();
+                async move { scope.api()?.audit_filtered(&query, &token).await }
             })
             .await;
-            KeyedResourceValue::new((scope, page), result)
+            KeyedResourceValue::new(resource_key, result)
         }
     });
-    let loaded = current_keyed_value(&(scope, page()), data.state().cloned(), data());
+    let loaded = current_keyed_value(&(scope, filter(), page()), data.state().cloned(), data());
+    let apply_filter = move |_| {
+        let Some(actor_user_id) = optional_uuid(&actor_input()) else {
+            filter_error.set(i18n.t("tenant.audit_invalid_filter").to_owned());
+            return;
+        };
+        let Some(request_id) = optional_uuid(&request_input()) else {
+            filter_error.set(i18n.t("tenant.audit_invalid_filter").to_owned());
+            return;
+        };
+        let action = (!action_input().trim().is_empty()).then(|| action_input().trim().to_owned());
+        let result_value = result_input();
+        let result = (!result_value.is_empty()).then_some(result_value);
+        if action.as_ref().is_some_and(|value| value.len() > 128) {
+            filter_error.set(i18n.t("tenant.audit_invalid_filter").to_owned());
+            return;
+        }
+        filter_error.set(String::new());
+        filter.set(AuditFilter {
+            actor_user_id,
+            request_id,
+            action,
+            result,
+        });
+        page.set(1);
+    };
     rsx! {div {class:"page-container tenant-audit",
         if !embedded {
             ui::PageHeader {title:i18n.t("tenant.audit").to_string(),description:i18n.t("tenant.audit_hint").to_string()}
@@ -144,26 +216,51 @@ fn TenantAuditPage(scope: WorkspaceScope, embedded: bool) -> Element {
             h2 { class: "section-title", {i18n.t("tenant.audit")} }
             p { class: "text-secondary", {i18n.t("tenant.audit_hint")} }
         }
-        button {class:"btn btn-secondary",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
+        form { class:"filter-panel", onsubmit:apply_filter,
+            div { class:"filter-grid tenant-audit-filter-grid",
+                div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-actor", {i18n.t("tenant.audit_actor_filter")} } input { id:"tenant-audit-actor", class:"input-field", maxlength:"36", value:"{actor_input}", oninput:move|event|actor_input.set(event.value()) } }
+                div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-request", {i18n.t("tenant.audit_request_filter")} } input { id:"tenant-audit-request", class:"input-field", maxlength:"36", value:"{request_input}", oninput:move|event|request_input.set(event.value()) } }
+                div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-action", {i18n.t("tenant.audit_action_filter")} } input { id:"tenant-audit-action", class:"input-field", maxlength:"128", value:"{action_input}", placeholder:"membership.update", oninput:move|event|action_input.set(event.value()) } }
+                div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-result", {i18n.t("tenant.result")} } select { id:"tenant-audit-result", class:"input-field", value:"{result_input}", onchange:move|event|result_input.set(event.value()), option { value:"", {i18n.t("tenant.audit_all_results")} } option { value:"success", {i18n.t("tenant.audit_result_success")} } option { value:"denied", {i18n.t("tenant.audit_result_denied")} } option { value:"failure", {i18n.t("tenant.audit_result_failure")} } } }
+                div { class:"filter-actions",
+                    button { class:"btn btn-primary", r#type:"submit", {i18n.t("tenant.audit_apply_filter")} }
+                    button { class:"btn btn-secondary", r#type:"button", onclick:move |_|{actor_input.set(String::new());request_input.set(String::new());action_input.set(String::new());result_input.set(String::new());filter_error.set(String::new());filter.set(AuditFilter::default());page.set(1);},{i18n.t("tenant.audit_clear_filter")} }
+                    button { class:"btn btn-secondary", r#type:"button", onclick:move |_|data.restart(), {i18n.t("tenant.reload")} }
+                }
+            }
+        }
+        if !filter_error().is_empty(){p{class:"alert alert-error",role:"alert","{filter_error}"}}
         match loaded {
             None=>rsx!{div {class:"content-loading",role:"status",span {class:"spinner",aria_hidden:"true"} span {{i18n.t("common.loading")}}}},
             Some(Err(e))=>rsx!{div {class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(value))=>rsx!{
                 div {class:"table-pagination-panel table-pagination-frame",
-                    div {class:"table-container",tabindex:"0",table {class:"table",thead {tr {th {{i18n.t("tenant.time")}} th {{i18n.t("tenant.actor")}} th {{i18n.t("tenant.action")}} th {{i18n.t("tenant.resource")}} th {{i18n.t("tenant.result")}}}}
+                    div {class:"table-container",tabindex:"0",table {class:"table",thead {tr {th {{i18n.t("tenant.time")}} th {{i18n.t("tenant.audit_scope")}} th {{i18n.t("tenant.actor")}} th {{i18n.t("tenant.action")}} th {{i18n.t("tenant.resource")}} th {{i18n.t("tenant.result")}}}}
                         tbody {for event in value.items.iter(){
-                            {let request_id=event.request_id.map(|id|id.to_string()).unwrap_or_else(||"—".into());rsx!{
+                            {let request_id=event.request_id.map(|id|id.to_string()).unwrap_or_else(||"—".into());let metadata=serde_json::to_string_pretty(&event.metadata).unwrap_or_else(|_|event.metadata.to_string());let tenant_role=event.tenant_role.map(|role|role.as_str()).unwrap_or("—");let actor_label=event.actor_name.as_deref().or(event.actor_email.as_deref()).unwrap_or("—");rsx!{
                                 tr {key:"{event.id}",
                                     td {{format_time(&event.created_at)}}
-                                    td {TechnicalId {value:event.actor_user_id.to_string()}}
+                                    td {span {class:"badge",{scope_label(i18n,&event.scope_type)}}}
+                                    td {
+                                        strong { class:"table-primary", "{actor_label}" }
+                                        if event.actor_name.is_some() { if let Some(email)=event.actor_email.as_deref() { span { class:"table-secondary", "{email}" } } }
+                                        TechnicalId {value:event.actor_user_id.to_string()}
+                                    }
                                     td {{action_label(i18n,&event.action)}}
                                     td {{resource_label(i18n,&event.resource_type)} if let Some(id)=event.resource_id.as_deref(){p{TechnicalId{value:id.to_string()}}}else{p{"—"}}}
-                                    td {{result_label(i18n,&event.result)} details {summary {{i18n.t("tenant.audit_technical_details")}} p{{i18n.t("tenant.audit_request_id")}} code {"{request_id}"} p{{i18n.t("tenant.audit_metadata")}} pre {"{event.metadata}"}}}
+                                    td {{result_label(i18n,&event.result)} details {summary {{i18n.t("tenant.audit_technical_details")}}
+                                        p{{i18n.t("tenant.audit_event_code")}} code {"{event.action}"}
+                                        p{{i18n.t("tenant.audit_credential")}} code {"{event.credential_kind}"}
+                                        p{{i18n.t("tenant.audit_platform_role")}} code {"{event.platform_role}"}
+                                        p{{i18n.t("tenant.audit_tenant_role")}} code {"{tenant_role}"}
+                                        p{{i18n.t("tenant.audit_request_id")}} code {"{request_id}"}
+                                        p{{i18n.t("tenant.audit_metadata")}} pre {"{metadata}"}
+                                    }}
                                 }
                             }}
                         }}
                     }}
-                    if value.items.is_empty(){div {class:"empty-state",h3 {class:"empty-title",{i18n.t("tenant.empty")}}}}
+                    if value.items.is_empty(){div {class:"empty-state compact-empty-state",h3 {class:"empty-title",{i18n.t("tenant.empty")}}}}
                 }
                 Pager {page:page(),total_pages:value.total_pages,total:value.total,on_page:move |p|page.set(p)}
             }
@@ -173,7 +270,7 @@ fn TenantAuditPage(scope: WorkspaceScope, embedded: bool) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{action_label, resource_label, result_label};
+    use super::{action_label, optional_uuid, resource_label, result_label, scope_label};
     use crate::i18n::{I18n, Lang};
 
     #[test]
@@ -185,5 +282,18 @@ mod tests {
         assert_eq!(result_label(zh, "denied"), "已拒绝");
         assert_eq!(action_label(en, "future.operation"), "future.operation");
         assert_eq!(resource_label(zh, "future_resource"), "future_resource");
+        assert_eq!(scope_label(zh, "platform"), "平台权限");
+        assert_eq!(scope_label(en, "tenant"), "Tenant authority");
+        assert_eq!(scope_label(zh, "user"), "用户权限");
+        assert_eq!(scope_label(en, "system"), "System authority");
+        assert_eq!(scope_label(en, "future"), "future");
+    }
+
+    #[test]
+    fn audit_uuid_filter_accepts_empty_or_real_ids_only() {
+        assert_eq!(optional_uuid("  "), Some(None));
+        assert!(optional_uuid("00000000-0000-0000-0000-000000000001").is_some());
+        assert_eq!(optional_uuid("00000000-0000-0000-0000-000000000000"), None);
+        assert_eq!(optional_uuid("not-a-uuid"), None);
     }
 }

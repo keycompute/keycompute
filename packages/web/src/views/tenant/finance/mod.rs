@@ -167,7 +167,7 @@ fn FinanceWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
             button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Orders,onclick:move |_|select_tab(Tab::Orders),{i18n.t("tenant_finance.orders")}}
             button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Wallet,onclick:move |_|select_tab(Tab::Wallet),{i18n.t("tenant_finance.wallet")}}
         }
-        section{class:"filter-panel",aria_label:i18n.t("tenant_finance.apply"),
+        form{class:"filter-panel",aria_label:i18n.t("tenant_finance.apply"),onsubmit:apply,
             div{class:"filter-grid tenant-finance-filter-grid",
                 MemberIdField{scope,input_id:"finance-owner".to_string(),label:i18n.t("tenant_finance.owner").to_string(),value:owner(),on_input:move|value|owner.set(value)}
                 if query().tab==Tab::Usage{
@@ -175,7 +175,7 @@ fn FinanceWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
                     div{class:"form-field",label{r#for:"finance-to",{i18n.t("tenant_finance.to")}}input{id:"finance-to",class:"input-field",r#type:"datetime-local",step:"any",value:"{to}",oninput:move|e|to.set(e.value())}}
                 }
                 if query().tab==Tab::Orders{div{class:"form-field",label{r#for:"finance-payment-state",{i18n.t("tenant_finance.state")}}select{id:"finance-payment-state",class:"input-field",value:"{status}",onchange:move|e|status.set(e.value()),option{value:"",{i18n.t("tenant_finance.all_states")}}option{value:"pending",{i18n.t("tenant_finance.state_pending")}}option{value:"paid",{i18n.t("tenant_finance.state_paid")}}option{value:"failed",{i18n.t("tenant_finance.state_failed")}}option{value:"closed",{i18n.t("tenant_finance.state_closed")}}}}}
-                div{class:"filter-actions",button{class:"btn btn-primary",onclick:apply,{i18n.t("tenant_finance.apply")}} button{class:"btn btn-ghost",onclick:move |_|{detail.set(None);generation+=1;},{i18n.t("tenant.reload")}}}
+                div{class:"filter-actions",button{class:"btn btn-primary",r#type:"submit",{i18n.t("tenant_finance.apply")}} button{class:"btn btn-ghost",r#type:"button",onclick:move |_|{detail.set(None);generation+=1;},{i18n.t("tenant.reload")}}}
             }
         }
         div{class:"data-meta-row",

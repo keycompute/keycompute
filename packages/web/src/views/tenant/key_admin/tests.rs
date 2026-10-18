@@ -1,6 +1,9 @@
 use super::types::*;
 use chrono::{Duration, Utc};
-use client_api::api::key_control::KeyMetadata;
+use client_api::{
+    MembershipStatus, TenantRole, UserStatus,
+    api::{key_control::KeyMetadata, tenant_control::TenantMember},
+};
 use serde_json::json;
 use uuid::Uuid;
 fn key() -> KeyMetadata {
@@ -156,4 +159,47 @@ fn owner_picker_keeps_and_confirms_the_selected_member() {
     assert!(editor.contains("class:\"tenant-owner-selected\""));
     assert!(editor.contains("common::TechnicalId{value:selected.clone()}"));
     assert!(!editor.contains("key-owner-option\",class:\"input-field\",disabled,value:\"\""));
+}
+
+fn member(membership_status: MembershipStatus, user_status: UserStatus) -> TenantMember {
+    TenantMember {
+        user_id: Uuid::new_v4(),
+        email: "member@example.com".into(),
+        name: None,
+        user_status,
+        tenant_role: TenantRole::Member,
+        membership_status,
+        authz_version: 1,
+        invited_by: None,
+        joined_at: "2026-01-01T00:00:00Z".into(),
+        removed_at: None,
+    }
+}
+
+#[test]
+fn owner_picker_notices_distinguish_empty_searches_from_ineligible_results() {
+    use super::editor::{owner_candidate_is_eligible, owner_picker_notice_key};
+
+    let active = member(MembershipStatus::Active, UserStatus::Active);
+    assert!(owner_candidate_is_eligible(&active));
+    assert_eq!(owner_picker_notice_key(&[active], ""), None);
+
+    assert_eq!(
+        owner_picker_notice_key(&[], "missing"),
+        Some("tenant_keys.no_matching_members")
+    );
+
+    let suspended_user = member(MembershipStatus::Active, UserStatus::Suspended);
+    assert!(!owner_candidate_is_eligible(&suspended_user));
+    assert_eq!(
+        owner_picker_notice_key(&[suspended_user], ""),
+        Some("tenant_keys.no_eligible_members")
+    );
+
+    let suspended_membership = member(MembershipStatus::Suspended, UserStatus::Active);
+    assert!(!owner_candidate_is_eligible(&suspended_membership));
+    assert_eq!(
+        owner_picker_notice_key(&[suspended_membership], "member"),
+        Some("tenant_keys.no_matching_members")
+    );
 }

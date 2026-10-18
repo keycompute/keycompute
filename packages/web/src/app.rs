@@ -356,6 +356,11 @@ pub fn AppLayout() -> Element {
     }
 
     let can_manage_platform = user_store.can_manage_platform();
+    let can_view_operations = user_store
+        .info
+        .read()
+        .as_ref()
+        .is_some_and(UserInfo::can_view_operations);
     let can_view_platform_audit = user_store
         .info
         .read()
@@ -385,6 +390,7 @@ pub fn AppLayout() -> Element {
     let r_admin_payment_orders = Route::PaymentOrders {}.to_string();
     let r_admin_distribution = Route::DistributionRecords {}.to_string();
     let r_admin_tenants = Route::Tenants {}.to_string();
+    let r_platform_operations = Route::PlatformOperations {}.to_string();
     let r_admin_monitoring = Route::Monitoring {}.to_string();
     let r_platform_audit = Route::PlatformAudit {}.to_string();
     let r_admin_system_settings = Route::Settings {}.to_string();
@@ -581,67 +587,54 @@ pub fn AppLayout() -> Element {
         nav_sections.insert(1 + offset, section);
     }
 
-    if user_store
-        .info
-        .read()
-        .as_ref()
-        .is_some_and(UserInfo::can_view_operations)
-    {
-        nav_sections.push(NavSection {
-            title: Some(i18n.t("operations.group").into()),
-            items: vec![NavItem::new(
-                i18n.t("operations.title"),
-                Route::PlatformOperations {}.to_string(),
-                NavIcon::Activity,
-            )],
-        });
-    }
-
     // Root and operator share platform business pages. Individual protected
     // identity actions are still constrained by the server-side role hierarchy.
     let mut platform_management_items = Vec::new();
     if can_manage_platform {
         platform_management_items.extend([
-            NavItem::new(i18n.t("nav.users"), r_admin_users, NavIcon::User).admin(),
-            NavItem::new(i18n.t("nav.upstreams"), r_admin_upstreams, NavIcon::Key).admin(),
-            NavItem::new(i18n.t("nav.pricing"), r_admin_pricing, NavIcon::Wallet).admin(),
+            NavItem::new(i18n.t("nav.users"), r_admin_users, NavIcon::Users),
+            NavItem::new(i18n.t("nav.tenants"), r_admin_tenants, NavIcon::Building),
+            NavItem::new(i18n.t("nav.upstreams"), r_admin_upstreams, NavIcon::Server),
+            NavItem::new(i18n.t("nav.pricing"), r_admin_pricing, NavIcon::Tag),
             NavItem::new(
                 i18n.t("nav.payment_orders"),
                 r_admin_payment_orders,
-                NavIcon::Wallet,
-            )
-            .admin(),
+                NavIcon::Receipt,
+            ),
             NavItem::new(
                 i18n.t("nav.distribution_records"),
                 r_admin_distribution,
                 NavIcon::Share,
-            )
-            .admin(),
-            NavItem::new(i18n.t("nav.tenants"), r_admin_tenants, NavIcon::Home).admin(),
+            ),
         ]);
+    }
+    if can_view_operations {
+        platform_management_items.push(NavItem::new(
+            i18n.t("operations.nav_title"),
+            r_platform_operations,
+            NavIcon::Gauge,
+        ));
+    }
+    if can_manage_platform {
+        platform_management_items.push(NavItem::new(
+            i18n.t("nav.monitoring"),
+            r_admin_monitoring,
+            NavIcon::Activity,
+        ));
     }
     if can_view_platform_audit {
         platform_management_items.push(NavItem::new(
             i18n.t("nav.platform_audit"),
             r_platform_audit,
-            NavIcon::Activity,
+            NavIcon::ClipboardList,
         ));
     }
     if can_manage_platform {
-        platform_management_items.extend([
-            NavItem::new(
-                i18n.t("nav.monitoring"),
-                r_admin_monitoring,
-                NavIcon::Activity,
-            )
-            .admin(),
-            NavItem::new(
-                i18n.t("nav.settings"),
-                r_admin_system_settings,
-                NavIcon::Settings,
-            )
-            .admin(),
-        ]);
+        platform_management_items.push(NavItem::new(
+            i18n.t("nav.settings"),
+            r_admin_system_settings,
+            NavIcon::Settings,
+        ));
     }
     if !platform_management_items.is_empty() {
         nav_sections.push(NavSection {
@@ -807,7 +800,13 @@ fn route_page_title(route: &Route, i18n: &I18n) -> String {
         Route::Pricing {} => "page.pricing",
         Route::PaymentOrders {} => "page.payment_orders",
         Route::DistributionRecords {} => "page.distribution_records",
-        Route::Tenants {} | Route::PlatformTenantAccess { .. } => "page.tenants",
+        Route::Tenants {}
+        | Route::PlatformTenantAccess { .. }
+        | Route::PlatformTenantSettings { .. }
+        | Route::PlatformTenantKeys { .. }
+        | Route::PlatformTenantFinance { .. }
+        | Route::PlatformTenantFinancialControls { .. }
+        | Route::PlatformTenantAudit { .. } => "page.tenants",
         Route::System {} => "page.monitoring",
         Route::NodeGateway {} => "page.node_gateway",
         Route::Monitoring {} => "page.monitoring",
@@ -863,6 +862,21 @@ mod tests {
             Route::DistributionRecords {},
             Route::Tenants {},
             Route::PlatformTenantAccess {
+                tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            },
+            Route::PlatformTenantSettings {
+                tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            },
+            Route::PlatformTenantKeys {
+                tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            },
+            Route::PlatformTenantFinance {
+                tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            },
+            Route::PlatformTenantFinancialControls {
+                tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            },
+            Route::PlatformTenantAudit {
                 tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
             },
             Route::System {},

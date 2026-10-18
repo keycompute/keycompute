@@ -113,6 +113,49 @@ pub struct AuditListQuery {
     pub page: i64,
     #[serde(default = "default_page_size")]
     pub page_size: i64,
+    pub actor_user_id: Option<Uuid>,
+    pub request_id: Option<Uuid>,
+    pub action: Option<String>,
+    pub result: Option<String>,
+}
+
+fn audit_filter(query: &AuditListQuery) -> Result<tenant_control::TenantAuditFilter> {
+    if query.actor_user_id.is_some_and(|id| id.is_nil())
+        || query.request_id.is_some_and(|id| id.is_nil())
+    {
+        return Err(ApiError::BadRequest(
+            "audit UUID filters must be nonzero".into(),
+        ));
+    }
+    let code = |value: &Option<String>, field: &str| -> Result<Option<String>> {
+        let Some(value) = value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+        if value.len() > 128 || value.chars().any(char::is_control) {
+            return Err(ApiError::BadRequest(format!(
+                "invalid audit {field} filter"
+            )));
+        }
+        Ok(Some(value.to_owned()))
+    };
+    let action = code(&query.action, "action")?;
+    let result = code(&query.result, "result")?;
+    if result
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "success" | "denied" | "failure"))
+    {
+        return Err(ApiError::BadRequest("invalid audit result filter".into()));
+    }
+    Ok(tenant_control::TenantAuditFilter {
+        actor_user_id: query.actor_user_id,
+        request_id: query.request_id,
+        action,
+        result,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -708,12 +751,19 @@ pub async fn list_audit_events(
     let (page_number, page_size, _) =
         normalize_list_pagination(Some(query.page), Some(query.page_size), None, None);
     let page = page(page_number, page_size);
-    let items = tenant_control::list_audit_events(pool(&state)?.write_conn(), access.scope(), page)
-        .await
-        .map_err(db_error)?;
-    let total = tenant_control::count_audit_events(pool(&state)?.write_conn(), access.scope())
-        .await
-        .map_err(db_error)?;
+    let filter = audit_filter(&query)?;
+    let items = tenant_control::list_audit_events(
+        pool(&state)?.write_conn(),
+        access.scope(),
+        page,
+        &filter,
+    )
+    .await
+    .map_err(db_error)?;
+    let total =
+        tenant_control::count_audit_events(pool(&state)?.write_conn(), access.scope(), &filter)
+            .await
+            .map_err(db_error)?;
     Ok(Json(TenantPage {
         total,
         total_pages: total_pages(total, page.page_size),
@@ -893,5 +943,45 @@ mod tests {
             }))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn audit_filters_are_normalized_and_reject_invalid_values() {
+        let actor = Uuid::new_v4();
+        let request = Uuid::new_v4();
+        let filter = audit_filter(&AuditListQuery {
+            page: 1,
+            page_size: 20,
+            actor_user_id: Some(actor),
+            request_id: Some(request),
+            action: Some("  membership.update  ".into()),
+            result: Some(" success ".into()),
+        })
+        .expect("valid filters");
+        assert_eq!(filter.actor_user_id, Some(actor));
+        assert_eq!(filter.request_id, Some(request));
+        assert_eq!(filter.action.as_deref(), Some("membership.update"));
+        assert_eq!(filter.result.as_deref(), Some("success"));
+
+        for query in [
+            AuditListQuery {
+                page: 1,
+                page_size: 20,
+                actor_user_id: Some(Uuid::nil()),
+                request_id: None,
+                action: None,
+                result: None,
+            },
+            AuditListQuery {
+                page: 1,
+                page_size: 20,
+                actor_user_id: None,
+                request_id: None,
+                action: None,
+                result: Some("unknown".into()),
+            },
+        ] {
+            assert!(audit_filter(&query).is_err());
+        }
     }
 }

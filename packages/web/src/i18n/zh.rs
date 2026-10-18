@@ -1688,6 +1688,20 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "无需切换工作区即可授权；平台管理员不会显示在租户成员列表中。",
     );
     m.insert("tenants.access_summary", "授权概览");
+    m.insert("tenants.settings_title", "租户设置");
+    m.insert("tenants.active_members", "有效成员数");
+    m.insert(
+        "tenants.platform_managed_mode",
+        "平台代管租户 · 操作使用平台权限",
+    );
+    m.insert(
+        "tenants.first_admin_owner_hint",
+        "该租户尚无所有者。首位接受管理员邀请的普通用户将自动成为所有者。",
+    );
+    m.insert(
+        "tenants.owner_clear_warning",
+        "此操作同时会清空当前所有者，请随后授权另一位管理员。",
+    );
     m.insert("tenants.no_members_yet", "该租户尚未授权任何普通成员。");
     m.insert("tenants.disable", "停用");
     m.insert("tenants.enable", "启用");

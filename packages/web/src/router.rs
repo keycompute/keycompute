@@ -13,8 +13,9 @@ use crate::views::{
     shared::{
         Accounts, DistributionRecords, ModelBindings, ModelManagement, ModelManagementBase,
         Monitoring, MonitoringDiagnostics, NodeGateway, PaymentOrders, PlatformAudit,
-        PlatformTenantAccess, Pricing, Settings, System, Tenants, UpstreamAccounts, UpstreamNodes,
-        UpstreamPassthrough, Users,
+        PlatformTenantAccess, PlatformTenantAudit, PlatformTenantFinance,
+        PlatformTenantFinancialControls, PlatformTenantKeys, PlatformTenantSettings, Pricing,
+        Settings, System, Tenants, UpstreamAccounts, UpstreamNodes, UpstreamPassthrough, Users,
     },
     tenant::{
         OwnerKeyIssuance, TenantAdminLayout, TenantAudit, TenantDistribution, TenantFinance,
@@ -137,6 +138,16 @@ pub enum Route {
             Tenants {},
             #[route("/admin/tenants/:tenant_id/access")]
             PlatformTenantAccess { tenant_id: String },
+            #[route("/admin/tenants/:tenant_id/settings")]
+            PlatformTenantSettings { tenant_id: String },
+            #[route("/admin/tenants/:tenant_id/keys")]
+            PlatformTenantKeys { tenant_id: String },
+            #[route("/admin/tenants/:tenant_id/finance")]
+            PlatformTenantFinance { tenant_id: String },
+            #[route("/admin/tenants/:tenant_id/financial-controls")]
+            PlatformTenantFinancialControls { tenant_id: String },
+            #[route("/admin/tenants/:tenant_id/audit")]
+            PlatformTenantAudit { tenant_id: String },
             #[route("/admin/system")]
             System {},
             #[route("/admin/node-gateway")]

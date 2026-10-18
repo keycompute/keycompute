@@ -7247,6 +7247,11 @@ select.form-input:focus {
 .tenant-overview-heading h2 { margin: 2px 0 8px; font-size: 24px; }
 .tenant-overview-eyebrow { margin: 0; color: var(--text-tertiary); font-size: 12px; font-weight: 700; text-transform: uppercase; }
 .tenant-overview-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 22px; }
+.tenant-overview-facts-three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+.filter-grid.tenant-audit-filter-grid {
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+}
 .tenant-overview-facts > div { padding: 12px 14px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: var(--radius-md); }
 .tenant-overview-facts dt { color: var(--text-secondary); font-size: 12px; }
 .tenant-overview-facts dd { margin-top: 5px; overflow-wrap: anywhere; font-weight: 650; }
@@ -7947,6 +7952,17 @@ select.form-input:focus {
   flex-wrap: wrap;
 }
 
+.platform-tenant-access-panel {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.platform-tenant-scope {
+  justify-content: flex-start;
+}
+
 .segmented-control .btn,
 .node-resource-console > .toolbar .btn {
   min-height: 34px;
@@ -7957,6 +7973,7 @@ select.form-input:focus {
 }
 
 .segmented-control .btn[aria-pressed="true"],
+.segmented-control .btn.active,
 .node-resource-console > .toolbar .btn[aria-pressed="true"] {
   color: var(--text-primary);
   background: var(--bg-card);
@@ -8427,11 +8444,23 @@ select.form-input:focus {
   min-height: 40px;
 }
 
+.one-time-recovery-link {
+  display: grid;
+  gap: 8px;
+}
+
+.one-time-recovery-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
 .tenant-member-filter .filter-grid {
   grid-template-columns: minmax(260px, 1fr) auto;
 }
 
 @media (max-width: 1180px) {
+  .filter-grid.tenant-audit-filter-grid,
   .filter-grid,
   .filter-grid-health,
   .filter-grid-usage,
@@ -8441,6 +8470,14 @@ select.form-input:focus {
 
   .filter-actions {
     justify-content: flex-start;
+  }
+
+  .tenant-invite-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tenant-invite-form > .btn {
+    width: 100%;
   }
 }
 
@@ -8457,6 +8494,7 @@ select.form-input:focus {
     padding: 16px;
   }
 
+  .filter-grid.tenant-audit-filter-grid,
   .filter-grid,
   .filter-grid-health,
   .filter-grid-usage,
@@ -8540,5 +8578,9 @@ select.form-input:focus {
 
   .tenant-invite-form > .btn {
     width: 100%;
+  }
+
+  .one-time-recovery-row {
+    grid-template-columns: 1fr;
   }
 }

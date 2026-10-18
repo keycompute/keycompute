@@ -1,7 +1,7 @@
 //! Explicit platform read-only operations labels.
 pub const TEXT: &[(&str, &str, &str)] = &[
     ("operations.title", "平台运维", "Platform operations"),
-    ("operations.group", "平台运维", "Platform operations"),
+    ("operations.nav_title", "运行态概览", "Runtime overview"),
     (
         "operations.hint",
         "按白名单查看租户健康、用量汇总和当前服务进程容量。",
