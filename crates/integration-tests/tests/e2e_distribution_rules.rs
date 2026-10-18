@@ -751,10 +751,15 @@ mod db_tests {
             .await
             .unwrap()
             .unwrap();
-        let user = keycompute_db::User::find_by_id(db, tenant.owner_user_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let user = keycompute_db::User::find_by_id(
+            db,
+            tenant
+                .owner_user_id
+                .expect("distribution fixture tenant must have an owner"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let member = keycompute_db::TenantMembership::find(db, tenant_id, user.id)
             .await
             .unwrap()
@@ -809,7 +814,8 @@ mod db_tests {
             .unwrap();
         let scope = keycompute_types::TenantScope::checked(
             tenant,
-            t.owner_user_id,
+            t.owner_user_id
+                .expect("distribution fixture tenant must have an owner"),
             keycompute_types::TenantRole::Admin,
         )
         .unwrap();

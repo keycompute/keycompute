@@ -7,6 +7,7 @@ enum ReadScope {
     Personal(TenantScope),
     Tenant(TenantScope),
     Platform(PlatformScope),
+    PlatformTenant(PlatformScope, Uuid),
 }
 
 fn current_tenant_actor(require_admin: bool) -> String {
@@ -52,6 +53,21 @@ fn predicate(
                 return Err(DbError::Other("platform billing scope required".into()));
             }
             values.push(scope.user_id().into());
+            predicates.push("EXISTS (SELECT 1 FROM users actor WHERE actor.id=$1 AND actor.status='active' AND actor.platform_role IN ('root','operator'))".into());
+        }
+        ReadScope::PlatformTenant(scope, tenant) => {
+            if tenant.is_nil()
+                || !matches!(
+                    scope.platform_role(),
+                    PlatformRole::Root | PlatformRole::Operator
+                )
+            {
+                return Err(DbError::Other(
+                    "platform tenant billing scope required".into(),
+                ));
+            }
+            values.extend([scope.user_id().into(), tenant.into()]);
+            predicates.push("tenant_id=$2".into());
             predicates.push("EXISTS (SELECT 1 FROM users actor WHERE actor.id=$1 AND actor.status='active' AND actor.platform_role IN ('root','operator'))".into());
         }
     }
@@ -226,6 +242,48 @@ impl PaymentOrder {
     ) -> Result<i64, DbError> {
         count(db, ReadScope::Platform(scope), status, user).await
     }
+    pub async fn find_platform_tenant(
+        db: &impl ConnectionTrait,
+        scope: PlatformScope,
+        tenant: Uuid,
+        id: Uuid,
+    ) -> Result<Option<Self>, DbError> {
+        find(
+            db,
+            ReadScope::PlatformTenant(scope, tenant),
+            "id",
+            id.into(),
+        )
+        .await
+    }
+    pub async fn list_platform_tenant(
+        db: &impl ConnectionTrait,
+        scope: PlatformScope,
+        tenant: Uuid,
+        status: Option<&str>,
+        user: Option<Uuid>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Self>, DbError> {
+        list(
+            db,
+            ReadScope::PlatformTenant(scope, tenant),
+            status,
+            user,
+            limit,
+            offset,
+        )
+        .await
+    }
+    pub async fn count_platform_tenant(
+        db: &impl ConnectionTrait,
+        scope: PlatformScope,
+        tenant: Uuid,
+        status: Option<&str>,
+        user: Option<Uuid>,
+    ) -> Result<i64, DbError> {
+        count(db, ReadScope::PlatformTenant(scope, tenant), status, user).await
+    }
     pub async fn stats_owned(
         db: &impl ConnectionTrait,
         scope: TenantScope,
@@ -325,6 +383,47 @@ impl PaymentOrder {
         Ok(PaymentOrderReportRow::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!("SELECT {REPORT_COLUMNS} FROM payment_orders WHERE {predicate} ORDER BY created_at DESC,id DESC LIMIT ${index} OFFSET ${}",index+1),values,
+        )).all(db).await?)
+    }
+    pub async fn find_report_platform_tenant(
+        db: &impl ConnectionTrait,
+        scope: PlatformScope,
+        tenant: Uuid,
+        id: Uuid,
+    ) -> Result<Option<PaymentOrderReportRow>, DbError> {
+        let (predicate, mut values) =
+            predicate(ReadScope::PlatformTenant(scope, tenant), None, None)?;
+        values.push(id.into());
+        Ok(
+            PaymentOrderReportRow::find_by_statement(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                format!(
+                    "SELECT {REPORT_COLUMNS} FROM payment_orders WHERE {predicate} AND id=${}",
+                    values.len()
+                ),
+                values,
+            ))
+            .one(db)
+            .await?,
+        )
+    }
+    pub async fn list_report_platform_tenant(
+        db: &impl ConnectionTrait,
+        scope: PlatformScope,
+        tenant: Uuid,
+        status: Option<&str>,
+        owner: Option<Uuid>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<PaymentOrderReportRow>, DbError> {
+        let (predicate, mut values) =
+            predicate(ReadScope::PlatformTenant(scope, tenant), status, owner)?;
+        let index = values.len() + 1;
+        values.extend([limit.clamp(1, 100).into(), offset.max(0).into()]);
+        Ok(PaymentOrderReportRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!("SELECT {REPORT_COLUMNS} FROM payment_orders WHERE {predicate} ORDER BY created_at DESC,id DESC LIMIT ${index} OFFSET ${}",index+1),
+            values,
         )).all(db).await?)
     }
 }

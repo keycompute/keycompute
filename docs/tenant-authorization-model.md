@@ -10,8 +10,8 @@ and no fallback from a missing tenant scope to a global query.
 
 ### PlatformRole
 
-- `root`: platform security, tenant lifecycle, platform identities, global resources, and audited break-glass access.
-- `operator`: an explicit allowlist of operational actions; no default access to tenant secrets, private Responses, or billing writes.
+- `root`: platform security, tenant lifecycle, platform identities, global resources, and audited tenant-target access.
+- `operator`: the same platform and explicit tenant-target authority as root, except that operators cannot modify root or peer operator identities.
 - `none`: no platform administration.
 
 ### TenantRole
@@ -19,7 +19,9 @@ and no fallback from a missing tenant scope to a global query.
 - `admin`: all tenant-owned resource management, member management, and invitations in one active tenant.
 - `member`: tenant resource use and personal resource management only.
 
-A tenant role never grants a platform role. A platform role never silently grants access to private tenant data.
+A tenant role never grants a platform role. Root/operator tenant administration
+uses explicit platform-target routes and never synthesizes membership or relaxes
+ordinary membership-bound tenant routes.
 
 ## Registration and membership lifecycle
 

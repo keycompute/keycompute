@@ -2,16 +2,16 @@
 
 ## Trust boundary
 
-Raw diagnostic endpoints are root-only platform resources. Global root sessions
-need no default or target tenant membership. A selected session, when present,
-must still match its active user, membership, tenant and signed versions.
-Operator diagnostics remain on the separately allowlisted platform operations
-API; this implementation does not grant raw traces or business detail to operators.
+Raw diagnostic endpoints are root/operator platform resources. Global platform
+sessions need no default or target tenant membership. A selected session, when
+present, must still match its active user, membership, tenant and signed versions.
+Both roles use the same current platform capability checks; neither gains tenant
+membership or authority from a query selector.
 
 The canonical prefix is `/api/v1/platform/monitoring`. Retained
 `/api/v1/admin/monitoring` paths invoke the same guarded handlers, not legacy roles.
 Both prefixes expose overview, requests, requests/{request_id}, summary,
-targets/health and targets/probe. Tenant selectors are root query filters, not
+targets/health and targets/probe. Tenant selectors are platform query filters, not
 membership grants. Request pages and financial summaries use the original
 consumer tenant; target-health selection uses the resource owner's tenant.
 
@@ -57,7 +57,7 @@ this is not an inference-key permission or a client-selectable authority mode.
 The SDK uses canonical fresh read paths and validates detail request UUIDs.
 Probe POSTs retain the existing single-dispatch retry policy. The regression
 suite includes bare handler mounts with only canonical request-ID injection,
-real root/tenant/operator/key credentials, consistent tenant/currency queries,
+real root/operator/tenant/key credentials, consistent tenant/currency queries,
 audit failure withholding, exact-backend queued role/expiry races and real local
 mock-upstream multi-capability revocation. A failed lock-timeout is not accepted
 as proof that the post-audit expiry check ran.

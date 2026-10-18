@@ -7,10 +7,15 @@ async fn tenant_owner_console_token(f: &Fixture) -> String {
         .await
         .unwrap()
         .unwrap();
-    let owner = keycompute_db::User::find_by_id(&f.db, tenant.owner_user_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let owner = keycompute_db::User::find_by_id(
+        &f.db,
+        tenant
+            .owner_user_id
+            .expect("response fixture tenant must have an owner"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let raw = f
         .state
         .auth
@@ -979,7 +984,12 @@ async fn post_audit_expiry_case(platform: bool) {
             Some(json!({"metadata":{"private":"post-audit-expiry-marker"},"items":[{"role":"user","content":"private conversation"}]}))).await, StatusCode::OK);
         let cid = conversation["id"].as_str().unwrap().to_owned();
         let tenant = keycompute_db::Tenant::find_by_id(&f.db, f.user.tenant_id).await.unwrap().unwrap();
-        let actor = keycompute_db::User::find_by_id(&f.db, tenant.owner_user_id).await.unwrap().unwrap();
+        let actor = keycompute_db::User::find_by_id(
+            &f.db,
+            tenant
+                .owner_user_id
+                .expect("response fixture tenant must have an owner"),
+        ).await.unwrap().unwrap();
         let member = keycompute_db::TenantMembership::find(&f.db,tenant.id,actor.id).await.unwrap().unwrap();
         // nextval is intentionally nontransactional: it proves the audit trigger
         // was actually reached even when the audit INSERT is later rolled back.
@@ -1773,7 +1783,16 @@ async fn native_response_never_dispatches_after_console_expiry_while_waiting_for
         .unwrap();
 
     let ttl = 3;
-    let admin = token_for(&f, &f.state, tenant.owner_user_id, Some(tenant_id), ttl).await;
+    let admin = token_for(
+        &f,
+        &f.state,
+        tenant
+            .owner_user_id
+            .expect("response fixture tenant must have an owner"),
+        Some(tenant_id),
+        ttl,
+    )
+    .await;
     let signed_deadline = Utc::now().timestamp() + ttl;
     let path = format!("/api/v1/tenants/{tenant_id}/responses/account_pool/{owner_id}/{id}");
     let before = f
@@ -1923,7 +1942,16 @@ async fn native_response_private_result_is_withheld_after_console_expiry() {
         .unwrap()
         .unwrap();
     let ttl = 3;
-    let admin = token_for(&f, &f.state, tenant.owner_user_id, Some(tenant_id), ttl).await;
+    let admin = token_for(
+        &f,
+        &f.state,
+        tenant
+            .owner_user_id
+            .expect("response fixture tenant must have an owner"),
+        Some(tenant_id),
+        ttl,
+    )
+    .await;
     let signed_deadline = Utc::now().timestamp() + ttl;
 
     let mut payload = f.body(Op::Responses);

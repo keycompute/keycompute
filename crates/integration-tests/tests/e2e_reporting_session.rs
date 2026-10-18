@@ -6,7 +6,7 @@ use axum::{
 use chrono::{Duration as ChronoDuration, Utc};
 use integration_tests::{
     common::generate_test_id,
-    db::{create_test_pool, create_test_tenant, create_test_user},
+    db::{OwnedTenant, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_db::{
     CreatePaymentOrderRequest, CreateUsageLogRequest, DbRouter, PaymentMethod, PaymentOrder,
@@ -25,7 +25,7 @@ use uuid::Uuid;
 struct Fixture {
     db: DatabaseConnection,
     state: AppState,
-    tenant: Tenant,
+    tenant: OwnedTenant,
     actor: Uuid,
     member: Uuid,
     usage: Uuid,

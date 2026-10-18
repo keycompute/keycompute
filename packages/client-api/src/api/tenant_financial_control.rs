@@ -78,6 +78,48 @@ pub struct TenantWithdrawal {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantEarnings {
+    pub tenant_id: Uuid,
+    pub currency: String,
+    pub summary: TenantEarningsSummary,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantEarningsSummary {
+    pub pending_amount: String,
+    pub reserved_amount: String,
+    pub withdrawn_amount: String,
+    pub total_amount: String,
+    pub pending_count: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantTipPage {
+    pub items: Vec<TenantTip>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TenantTip {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub usage_log_id: Uuid,
+    pub node_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub consumer_user_id: Uuid,
+    pub tip_amount: String,
+    pub currency: String,
+    pub tip_ratio: String,
+    pub bill_amount: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewCommand<'a> {
@@ -89,6 +131,7 @@ struct ReviewCommand<'a> {
 pub struct TenantFinancialControlApi {
     client: ApiClient,
     tenant: Uuid,
+    tips: String,
     withdrawals: String,
     wallet: WalletControlApi,
 }
@@ -135,6 +178,13 @@ fn nonnegative_decimal(value: &str) -> bool {
 }
 fn positive_decimal(value: &str) -> bool {
     nonnegative_decimal(value) && value.bytes().any(|b| matches!(b, b'1'..=b'9'))
+}
+fn currency(value: &str) -> Result<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    if normalized.len() != 3 || !normalized.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        return Err(ClientError::Config("Invalid earnings currency".into()));
+    }
+    Ok(normalized)
 }
 fn current_status(value: &str) -> bool {
     matches!(value, "pending" | "approved" | "completed" | "rejected")
@@ -287,9 +337,104 @@ impl TenantFinancialControlApi {
         Ok(Self {
             client: client.clone(),
             tenant,
+            tips: format!("/api/v1/tenants/{tenant}/tips"),
             withdrawals: format!("/api/v1/tenants/{tenant}/tips/withdrawals"),
             wallet: WalletControlApi::tenant(client, tenant)?,
         })
+    }
+    pub fn platform_tenant(client: &ApiClient, tenant: Uuid) -> Result<Self> {
+        real(tenant, "tenant")?;
+        Ok(Self {
+            client: client.clone(),
+            tenant,
+            tips: format!("/api/v1/platform/tenants/{tenant}/tips"),
+            withdrawals: format!("/api/v1/platform/tenants/{tenant}/tips/withdrawals"),
+            wallet: WalletControlApi::platform_tenant(client, tenant)?,
+        })
+    }
+    pub async fn earnings(&self, money: &str, token: &str) -> Result<TenantEarnings> {
+        let money = currency(money)?;
+        let out: TenantEarnings = self
+            .client
+            .get_json_fresh(
+                &format!(
+                    "{}?currency={}",
+                    self.tips,
+                    super::common::encode_query_value(&money)
+                ),
+                Some(token),
+            )
+            .await?;
+        let summary = &out.summary;
+        if out.tenant_id != self.tenant
+            || out.currency != money
+            || summary.pending_count < 0
+            || ![
+                &summary.pending_amount,
+                &summary.reserved_amount,
+                &summary.withdrawn_amount,
+                &summary.total_amount,
+            ]
+            .into_iter()
+            .all(|value| nonnegative_decimal(value))
+        {
+            return Err(ClientError::InvalidResponse(
+                "Earnings summary does not match the requested tenant resource".into(),
+            ));
+        }
+        Ok(out)
+    }
+    pub async fn earnings_history(
+        &self,
+        money: &str,
+        limit: u32,
+        offset: u32,
+        token: &str,
+    ) -> Result<TenantTipPage> {
+        let money = currency(money)?;
+        if !(1..=100).contains(&limit) || offset > 1_000_000 {
+            return Err(ClientError::Config(
+                "Invalid earnings history pagination".into(),
+            ));
+        }
+        let out: TenantTipPage = self
+            .client
+            .get_json_fresh(
+                &format!(
+                    "{}/history?currency={}&limit={limit}&offset={offset}",
+                    self.tips,
+                    super::common::encode_query_value(&money)
+                ),
+                Some(token),
+            )
+            .await?;
+        if out.total < 0 || out.items.len() > limit as usize || out.items.len() as i64 > out.total {
+            return Err(ClientError::InvalidResponse(
+                "Invalid earnings history page metadata".into(),
+            ));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for row in &out.items {
+            if row.tenant_id != self.tenant
+                || row.id.is_nil()
+                || row.usage_log_id.is_nil()
+                || row.node_id.is_nil()
+                || row.owner_user_id.is_nil()
+                || row.consumer_user_id.is_nil()
+                || row.currency != money
+                || !positive_decimal(&row.tip_amount)
+                || !nonnegative_decimal(&row.tip_ratio)
+                || !nonnegative_decimal(&row.bill_amount)
+                || row.created_at.is_empty()
+                || row.updated_at.is_empty()
+                || !ids.insert(row.id)
+            {
+                return Err(ClientError::InvalidResponse(
+                    "Earnings history does not match the requested tenant resource".into(),
+                ));
+            }
+        }
+        Ok(out)
     }
     pub async fn reservations(
         &self,

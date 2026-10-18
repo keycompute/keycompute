@@ -3,7 +3,7 @@
 //! 处理租户列表查询、创建、更新、删除（Admin）
 
 use crate::client::ApiClient;
-use crate::error::{ClientError, Result};
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 
 const COMPAT_LIST_PAGE_SIZE: u32 = 100;
@@ -83,11 +83,6 @@ impl TenantApi {
         req: &CreateTenantRequest,
         token: &str,
     ) -> Result<TenantInfo> {
-        if req.owner_user_id.is_nil() {
-            return Err(ClientError::Config(
-                "A real tenant owner is required".into(),
-            ));
-        }
         self.client
             .post_json("/api/v1/platform/tenants", req, Some(token))
             .await
@@ -118,16 +113,14 @@ impl TenantApi {
 /// 创建租户请求
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateTenantRequest {
-    pub owner_user_id: uuid::Uuid,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
 }
 
 impl CreateTenantRequest {
-    pub fn new(name: impl Into<String>, owner_user_id: uuid::Uuid) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
-            owner_user_id,
             name: name.into(),
             slug: None,
         }

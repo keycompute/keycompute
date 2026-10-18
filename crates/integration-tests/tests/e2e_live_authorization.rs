@@ -119,7 +119,9 @@ async fn call(
 }
 fn audit(tenant: &Tenant) -> AuditContext {
     AuditContext {
-        actor_user_id: tenant.owner_user_id,
+        actor_user_id: tenant
+            .owner_user_id
+            .expect("authorization fixture tenant must have an owner"),
         credential_kind: CredentialKind::Jwt,
         actor_platform_role: PlatformRole::None,
         actor_tenant_role: Some(TenantRole::Admin),
@@ -129,8 +131,8 @@ fn audit(tenant: &Tenant) -> AuditContext {
 struct Fixture {
     db: DatabaseConnection,
     state: AppState,
-    a: Tenant,
-    b: Tenant,
+    a: integration_tests::db::OwnedTenant,
+    b: integration_tests::db::OwnedTenant,
     run: String,
     guard: TestDataGuard,
 }

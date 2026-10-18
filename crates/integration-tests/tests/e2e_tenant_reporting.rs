@@ -11,7 +11,7 @@ use integration_tests::{
 };
 use keycompute_db::{
     CreatePaymentOrderRequest, CreateUsageLogRequest, DbRouter, PaymentMethod, PaymentOrder,
-    Tenant, UsageLog, User, UserBalance,
+    UsageLog, User, UserBalance,
 };
 use keycompute_server::{AppState, create_router};
 
@@ -25,8 +25,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: Tenant,
-    b: Tenant,
+    a: integration_tests::db::OwnedTenant,
+    b: integration_tests::db::OwnedTenant,
     member: User,
     admin_token: String,
     member_token: String,

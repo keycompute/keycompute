@@ -4,11 +4,11 @@ use super::{
 };
 use crate::{
     hooks::use_i18n::use_i18n,
-    services::api_client::{get_client, user_error_message},
+    services::api_client::user_error_message,
     stores::{auth_store::AuthStore, user_store::UserStore},
     utils::resource::{KeyedResourceValue, current_keyed_value},
 };
-use client_api::{ClientError, api::tenant_reporting::TenantReportingApi};
+use client_api::ClientError;
 use dioxus::prelude::*;
 #[component]
 pub(super) fn Inspector(
@@ -27,7 +27,7 @@ pub(super) fn Inspector(
             let result = common::read(auth, users, scope, move |token| {
                 let detail = detail.clone();
                 async move {
-                    let api = TenantReportingApi::new(&get_client(), scope.tenant_id)?;
+                    let api = scope.reporting_api()?;
                     let value = match detail {
                         Detail::Usage(row) => serde_json::to_value(
                             api.usage_detail(row.id, row.user_id, &token).await?,

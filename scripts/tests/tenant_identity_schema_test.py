@@ -100,11 +100,21 @@ def uid() -> str:
 def run(db: Database) -> None:
     assert db.sql("SELECT COUNT(*) FROM users;") == "0", "schema must not create a fictitious root"
     root, owner, peer = uid(), uid(), uid()
-    tenant, other = uid(), uid()
+    tenant, other, ownerless = uid(), uid(), uid()
     db.sql(f"INSERT INTO users(id,email,platform_role) VALUES('{root}','root@fixture.invalid','root');")
+    root2 = uid()
+    db.reject(
+        f"INSERT INTO users(id,email,platform_role) VALUES('{root2}','root2@fixture.invalid','root');",
+        "uq_users_single_root",
+    )
     db.reject(f"DELETE FROM users WHERE id='{root}';", "root")
+    db.reject("TRUNCATE users CASCADE;", "root")
     assert db.sql(f"SELECT COUNT(*) FROM users WHERE id='{root}' AND platform_role='root';") == "1"
-    print("PASS: sole global root cannot be deleted before any tenant exists")
+    print("PASS: bootstrap root is unique and cannot be deleted or truncated")
+    db.sql(f"INSERT INTO tenants(id,name,slug) VALUES('{ownerless}','Ownerless','ownerless-fixture');")
+    assert db.sql(f"SELECT owner_user_id IS NULL FROM tenants WHERE id='{ownerless}';") == "t"
+    assert db.sql(f"SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id='{ownerless}';") == "0"
+    print("PASS: a platform-provisioned tenant may begin without an owner or membership")
     db.sql(f"""BEGIN;
         INSERT INTO users(id,email,platform_role) VALUES
           ('{owner}','owner@fixture.invalid','none'),
@@ -182,21 +192,14 @@ def run(db: Database) -> None:
             raise AssertionError("request/admin lock order regressed:\n" + err + out)
     print("PASS: request counter and membership administration have no lock inversion")
 
-    # A repeatable-read loser cannot use a stale invariant snapshot when two
-    # root-security writers race. At least one active root must remain.
-    root2 = uid()
-    db.sql(f"INSERT INTO users(id,email,platform_role) VALUES('{root2}','root2@fixture.invalid','root');")
-    a = db.start(f"BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT COUNT(*) FROM users WHERE platform_role='root'; SELECT pg_sleep(0.4); UPDATE users SET platform_role='none' WHERE id='{root}'; COMMIT;")
-    b = db.start(f"BEGIN ISOLATION LEVEL REPEATABLE READ; SELECT COUNT(*) FROM users WHERE platform_role='root'; SELECT pg_sleep(0.4); UPDATE users SET platform_role='none' WHERE id='{root2}'; COMMIT;")
-    outcomes = []
-    for p in (a, b):
-        _, err = p.communicate(timeout=10)
-        outcomes.append(p.returncode)
-        if p.returncode and not any(word in err.lower() for word in ["root", "serialize", "serialization"]):
-            raise AssertionError("unexpected concurrent root mutation error: " + err)
-    assert sum(code == 0 for code in outcomes) == 1, outcomes
+    # Root is created only once during bootstrap. Neither a second insert nor
+    # any later role transition may create another root identity.
+    db.reject(
+        f"BEGIN; UPDATE users SET platform_role='root' WHERE id='{peer}'; COMMIT;",
+        "uq_users_single_root",
+    )
     assert db.sql("SELECT COUNT(*) FROM users WHERE platform_role='root' AND status='active';") == "1"
-    print("PASS: concurrent repeatable-read root demotion cannot erase all roots")
+    print("PASS: an existing user cannot be promoted to a second root")
 
     actor, empty_tenant, historical_event = uid(), uid(), uid()
     db.sql(f"""BEGIN;

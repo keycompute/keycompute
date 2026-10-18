@@ -3,18 +3,22 @@
 This client implements the tenant-control HTTP contract. It does not replace
 server authorization; the Web console consumes it through separately guarded
 workspace, settings, member, invitation and audit pages.
-`TenantControlApi::new(&client, tenant_id)` requires an explicit nonzero UUID.
-A tenant selector never grants membership. Global platform administration uses
-separate clients and endpoints; no platform role is sent in a tenant command.
+`TenantControlApi::new(&client, tenant_id)` requires an explicit nonzero UUID
+and uses membership-bound tenant routes. `TenantControlApi::platform_tenant`
+uses the separate explicit platform-target route for root/operator sessions.
+A tenant selector never grants membership, and no role is sent in a command.
 
 ## Reads and mutations
 
 Context, member list/detail, invitation list and audit pages use fresh network
 reads rather than the client's display cache. `/api/v1/me` is also fresh.
-Pages are bounded to 1–100 items, and member search is encoded as one query value.
+Pages are bounded to 1–100 items, member search is encoded as one query value, and
+the typed membership-status filter is used for unambiguous active-member totals.
 
-`TenantContext.owner_user_id` comes from the authorized tenant query. Do not
-infer ownership from the admin role: a tenant can have multiple administrators.
+`TenantContext.owner_user_id` comes from the authorized tenant query and may be
+absent until an ordinary administrator is assigned. Do not infer ownership from
+the admin role: a tenant can have multiple administrators, while root/operator
+authority is implicit and never represented as membership or ownership.
 The selected-session contract is `selected_tenant.tenant_role`, not `role`.
 It is a required typed enum; there is no legacy-role alias or default admin.
 Member records distinguish `membership_status` from global `user_status`.
@@ -24,7 +28,10 @@ DELETE with the version JSON body. Tenant configuration carries a separate
 positive `expected_revision`, so concurrent name, description and default-limit
 edits are detected without treating display configuration as authorization.
 Ownership transfer sends only the explicit new owner UUID. The server enforces
-current membership, active-owner and last-admin invariants under its transaction.
+current authority and the assigned-owner invariant under its transaction.
+Ordinary tenant administration must retain its owner/administrator boundary;
+explicit platform administration may deliberately return a tenant to an
+ownerless state before granting access again.
 
 All tenant mutations use the SDK's single-dispatch path. Network/503 failures
 are not automatically retried. Ordinary configuration changes advance
@@ -65,6 +72,9 @@ session, restored membership does not revive old JWTs and a removed membership
 requires a new invitation. These are not mock-only wire fixtures.
 
 The role-aware workspace, global switcher, settings, member, invitation and audit
-flows are implemented in the Web package. Resource consoles have their own scope
-documents and tests; their presence does not turn this SDK into an authorization
-boundary or constitute production cutover evidence.
+flows are implemented in the Web package. The platform tenant page reuses the
+settings, key, reporting, earnings/financial-control and audit consoles through an
+explicit platform-target scope; it never selects the tenant or creates membership.
+Resource consoles have their own scope documents and tests; their presence does
+not turn this SDK into an authorization boundary or constitute production cutover
+evidence.

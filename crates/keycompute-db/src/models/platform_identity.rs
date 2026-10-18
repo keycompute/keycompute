@@ -367,16 +367,12 @@ impl PlatformIdentity {
         scope: FinancialScope,
         audit: &AuditContext,
         request: &CreateTenantRequest,
-        owner: Uuid,
     ) -> Result<PlatformTenantInfo, DbError> {
         scope.require_platform_global()?;
-        if owner.is_nil() {
-            return Err(invalid());
-        }
         let tx = begin(db).await?;
         let result = async {
-            let actor = scope.lock_related(&tx, audit, &[], &[owner]).await?;
-            let tenant = Tenant::create_owned(&tx, request, owner, &actor).await?;
+            let actor = scope.lock_related(&tx, audit, &[], &[]).await?;
+            let tenant = Tenant::create_unowned(&tx, request, &actor).await?;
             let result = Self::tenant(&tx, scope, tenant.id).await?;
             scope.check_expiry()?;
             Ok(result)
@@ -424,7 +420,7 @@ impl PlatformIdentity {
             let tenant = Tenant::find_by_id_for_update(&tx, id)
                 .await?
                 .ok_or_else(|| DbError::not_found("Tenant", id))?;
-            if Tenant::count_users(&tx, id).await? > 1 || Tenant::count_accounts(&tx, id).await? > 0
+            if Tenant::count_users(&tx, id).await? > 0 || Tenant::count_accounts(&tx, id).await? > 0
             {
                 return Err(DbError::Other("tenant_retained_members_or_accounts".into()));
             }

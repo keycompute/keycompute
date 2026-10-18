@@ -12,8 +12,9 @@ use crate::views::{
     payments::{PaymentsOverview, Recharge},
     shared::{
         Accounts, DistributionRecords, ModelBindings, ModelManagement, ModelManagementBase,
-        Monitoring, MonitoringDiagnostics, NodeGateway, PaymentOrders, PlatformAudit, Pricing,
-        Settings, System, Tenants, UpstreamAccounts, UpstreamNodes, UpstreamPassthrough, Users,
+        Monitoring, MonitoringDiagnostics, NodeGateway, PaymentOrders, PlatformAudit,
+        PlatformTenantAccess, Pricing, Settings, System, Tenants, UpstreamAccounts, UpstreamNodes,
+        UpstreamPassthrough, Users,
     },
     tenant::{
         OwnerKeyIssuance, TenantAdminLayout, TenantAudit, TenantDistribution, TenantFinance,
@@ -134,6 +135,8 @@ pub enum Route {
             DistributionRecords {},
             #[route("/admin/tenants")]
             Tenants {},
+            #[route("/admin/tenants/:tenant_id/access")]
+            PlatformTenantAccess { tenant_id: String },
             #[route("/admin/system")]
             System {},
             #[route("/admin/node-gateway")]

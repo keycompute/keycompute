@@ -77,7 +77,8 @@ pub struct UserUsageStats {
 #[path = "usage_log_scope.rs"]
 mod scope;
 pub use scope::{
-    CurrencyUsageStats, PlatformUsageScope, TenantUsageScope, UsageLogReportRow, UserUsageScope,
+    CurrencyUsageStats, PlatformTenantUsageScope, PlatformUsageScope, TenantUsageScope,
+    UsageLogReportRow, UserUsageScope,
 };
 
 impl UsageLog {

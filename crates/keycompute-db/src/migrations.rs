@@ -252,7 +252,8 @@ mod tests {
             .unwrap();
         for expected in [
             "FOREIGN KEY (tenant_id, owner_user_id)",
-            "FOREIGN KEY (tenant_id, requested_by_user_id)",
+            "requested_by_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT",
+            "requested_by_authz_version >= 0",
             "created_key_id UUID",
             "tenant_authz_version BIGINT",
         ] {
@@ -394,6 +395,15 @@ mod tests {
     #[test]
     fn identity_schema_has_global_users_scoped_memberships_and_immutable_audit() {
         let sql = include_str!("../migrations/001_init.sql");
+        let tenants = sql
+            .split("CREATE TABLE IF NOT EXISTS tenants (")
+            .nth(1)
+            .unwrap()
+            .split("\n);")
+            .next()
+            .unwrap();
+        assert!(tenants.contains("owner_user_id UUID REFERENCES users(id) ON DELETE RESTRICT"));
+        assert!(!tenants.contains("owner_user_id UUID NOT NULL"));
         for expected in [
             "status VARCHAR(20) NOT NULL DEFAULT 'active'",
             "tenant_role VARCHAR(20) NOT NULL DEFAULT 'member'",
@@ -414,6 +424,7 @@ mod tests {
             "scope_type VARCHAR(20)",
             "resource_id TEXT",
             "CREATE TABLE IF NOT EXISTS identity_admin_fence",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_single_root",
             "CREATE TRIGGER membership_authority_version",
             "CREATE TRIGGER tenant_audit_immutable",
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_balances_tenant_user",
@@ -501,6 +512,7 @@ mod tests {
             "CONSTRAINT ck_accounts_probe_status",
             "CONSTRAINT ck_accounts_priority",
             "CREATE TRIGGER protected_root_identity",
+            "CREATE TRIGGER protected_root_truncate",
             "root identity cannot be deleted",
             "root authority is immutable",
             "platform identities cannot belong to a tenant",

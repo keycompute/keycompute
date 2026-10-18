@@ -1953,10 +1953,15 @@ async fn tenant_cancels_unleased_managed_node_task_without_charging_or_reexecuti
         .await
         .unwrap()
         .unwrap();
-    let owner = keycompute_db::User::find_by_id(&f.db, tenant.owner_user_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let owner = keycompute_db::User::find_by_id(
+        &f.db,
+        tenant
+            .owner_user_id
+            .expect("response fixture tenant must have an owner"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let raw = f
         .state
         .auth
@@ -2054,10 +2059,15 @@ async fn accepted_node_result_after_cancel_request_keeps_one_original_owner_char
         .await
         .unwrap()
         .unwrap();
-    let owner = keycompute_db::User::find_by_id(&f.db, tenant.owner_user_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let owner = keycompute_db::User::find_by_id(
+        &f.db,
+        tenant
+            .owner_user_id
+            .expect("response fixture tenant must have an owner"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let raw = f
         .state
         .auth

@@ -24,12 +24,13 @@ switching remains available from the global header.
 Tenant administration consumes the server's tenant capability vector and selected
 membership. Navigation and route guards distinguish settings, members,
 invitations, providers, keys, billing and pricing instead of using one broad UI
-flag. The persisted roles remain deliberately small: Owner is the immutable
+flag. The persisted roles remain deliberately small: optional Owner is a tenant
 ownership identity, while Admin and Member are inviteable membership roles.
 Platform role labels and platform capabilities never synthesize a tenant grant.
-Root/operator global identities cannot enter tenant-scoped management or resource
-pages without an actual qualifying selected membership. They can still open the
-role-aware workspace overview and their separately authorized platform consoles.
+Root/operator global identities cannot enter ordinary tenant-scoped management or
+resource pages without an actual qualifying selected membership. Their separately
+authorized platform consoles carry an explicit target tenant and provide equivalent
+administration without inserting a membership row.
 Backend checks remain authoritative.
 
 The workspace reads the already verified profile after opaque-token restoration;
@@ -45,11 +46,11 @@ explicit refresh action that loads the latest revision before a corrected save.
 Successful name changes synchronize the header and membership labels in the
 current session. Other members' changes refresh the current page.
 
-Platform tenant creation searches only active global users for the initial
-owner, with the lifecycle filter enforced by the server query and checked again
-by the client. On narrow mobile headers, secondary repository/theme shortcuts
-yield space to the workspace selector while Home and account actions remain
-available.
+Platform tenant creation starts with no owner or members. Root/operator may grant
+access later through the explicit platform tenant administration page; the first
+ordinary active administrator who accepts an invitation becomes owner atomically.
+On narrow mobile headers, secondary repository/theme shortcuts yield space to the
+workspace selector while Home and account actions remain available.
 
 ## Component and request isolation
 

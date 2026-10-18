@@ -355,6 +355,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("common.refresh", "Refresh");
     m.insert("common.back", "Back");
+    m.insert("common.invalid_request", "Invalid request");
     m.insert("common.clear", "Clear");
     m.insert("common.default", "Default");
     m.insert(
@@ -1940,23 +1941,14 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.name", "Tenant name");
     m.insert("tenants.name_placeholder", "e.g. Research Center");
     m.insert("tenants.name_required", "Tenant name is required");
-    m.insert("tenants.owner", "Initial administrator");
-    m.insert(
-        "tenants.owner_hint",
-        "Choose an existing user by name or email. They receive tenant administration access after creation.",
-    );
-    m.insert("tenants.owner_placeholder", "Search by name or email…");
-    m.insert("tenants.owner_results", "User search results");
-    m.insert("tenants.owner_selected", "Initial administrator selected");
     m.insert(
         "tenants.create_intro",
         "Create an isolated tenant workspace",
     );
     m.insert(
         "tenants.create_intro_hint",
-        "Tenant name and initial administrator are required. Leave the slug blank to generate it automatically.",
+        "The tenant starts without members. Grant access later from Manage tenant; root/operators keep implicit administration access without becoming members.",
     );
-    m.insert("tenants.owner_required", "Select a valid workspace owner.");
     m.insert("tenants.slug", "Slug (optional)");
     m.insert("tenants.slug_placeholder", "e.g. research-center");
     m.insert(
@@ -1965,6 +1957,21 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("tenants.users", "Users");
     m.insert("tenants.accounts", "Channel accounts");
+    m.insert("tenants.manage", "Manage tenant");
+    m.insert(
+        "tenants.enable_to_manage",
+        "Enable the tenant before managing tenant access",
+    );
+    m.insert("tenants.access_title", "Tenant access");
+    m.insert(
+        "tenants.access_hint",
+        "Grant access without switching workspace. Platform administrators remain outside the tenant member list.",
+    );
+    m.insert("tenants.access_summary", "Access summary");
+    m.insert(
+        "tenants.no_members_yet",
+        "No tenant members have been authorized yet.",
+    );
     m.insert("tenants.disable", "Disable");
     m.insert("tenants.enable", "Enable");
     m.insert("tenants.disable_title", "Disable tenant");

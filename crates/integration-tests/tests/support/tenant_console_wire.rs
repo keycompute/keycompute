@@ -59,7 +59,7 @@ async fn sdk_accepts_actual_session_membership_invitation_and_audit_contracts() 
         TenantRole::Admin
     );
     let context = control.context(&token).await.unwrap();
-    assert_eq!(context.owner_user_id, f.inviter.id);
+    assert_eq!(context.owner_user_id, Some(f.inviter.id));
     let members = control.members(1, 20, None, &token).await.unwrap();
     assert!(
         members
@@ -92,7 +92,7 @@ async fn sdk_accepts_actual_session_membership_invitation_and_audit_contracts() 
         .await
         .unwrap();
     assert_eq!(accepted.tenant.id, f.tenant.id);
-    assert_eq!(accepted.tenant.owner_user_id, f.inviter.id);
+    assert_eq!(accepted.tenant.owner_user_id, Some(f.inviter.id));
     assert_eq!(
         accepted.membership.membership_status,
         MembershipStatus::Active
@@ -166,7 +166,7 @@ async fn sdk_member_versions_owner_transfer_and_tenant_selection_are_real_server
             .is_err()
     );
     let next = control.transfer_ownership(peer.id, &token).await.unwrap();
-    assert_eq!(next.owner_user_id, peer.id);
+    assert_eq!(next.owner_user_id, Some(peer.id));
     assert!(
         control.context(&token).await.is_err(),
         "ownership change invalidates old selected JWT"

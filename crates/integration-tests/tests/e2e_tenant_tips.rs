@@ -90,8 +90,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: Tenant,
-    b: Tenant,
+    a: integration_tests::db::OwnedTenant,
+    b: integration_tests::db::OwnedTenant,
     user: TenantActor,
     admin: TenantActor,
     root: User,
@@ -233,7 +233,9 @@ impl Fixture {
         }
     }
     async fn seed(&self, tenant: &Tenant, money: &str, bill: i64) -> NodeTip {
-        let consumer = tenant.owner_user_id;
+        let consumer = tenant
+            .owner_user_id
+            .expect("tip fixture tenant must have an owner");
         let node = Node::create(
             &self.db,
             &CreateNodeRequest {

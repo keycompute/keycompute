@@ -245,6 +245,14 @@ impl TenantReportingApi {
             base: format!("/api/v1/tenants/{tenant}"),
         })
     }
+    pub fn platform_tenant(client: &ApiClient, tenant: Uuid) -> Result<Self> {
+        real(tenant)?;
+        Ok(Self {
+            client: client.clone(),
+            tenant,
+            base: format!("/api/v1/platform/tenants/{tenant}"),
+        })
+    }
     fn usage_check(&self, row: &TenantUsageRecord, owner: Option<Uuid>) -> Result<()> {
         identity(self.tenant, owner, row.tenant_id, row.user_id, row.id)?;
         if ![

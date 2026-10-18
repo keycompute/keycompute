@@ -24,11 +24,19 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 fn admin(t: &Tenant) -> TenantScope {
-    TenantScope::checked(t.id, t.owner_user_id, TenantRole::Admin).unwrap()
+    TenantScope::checked(
+        t.id,
+        t.owner_user_id
+            .expect("usage fixture tenant must have an owner"),
+        TenantRole::Admin,
+    )
+    .unwrap()
 }
 fn audit(t: &Tenant) -> AuditContext {
     AuditContext {
-        actor_user_id: t.owner_user_id,
+        actor_user_id: t
+            .owner_user_id
+            .expect("usage fixture tenant must have an owner"),
         credential_kind: CredentialKind::Jwt,
         actor_platform_role: PlatformRole::None,
         actor_tenant_role: Some(TenantRole::Admin),
@@ -70,8 +78,8 @@ async fn usage(
 }
 struct Fixture {
     db: DatabaseConnection,
-    a: Tenant,
-    b: Tenant,
+    a: integration_tests::db::OwnedTenant,
+    b: integration_tests::db::OwnedTenant,
     user: TenantActor,
     operator: User,
     own: UsageLog,

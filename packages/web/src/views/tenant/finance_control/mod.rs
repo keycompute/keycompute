@@ -7,7 +7,7 @@ use super::common::{
 };
 use crate::{
     hooks::use_i18n::use_i18n,
-    services::api_client::{get_client, user_error_message},
+    services::api_client::user_error_message,
     stores::{auth_store::AuthStore, user_store::UserStore},
     utils::time::format_time,
 };
@@ -15,8 +15,7 @@ use chrono::{DateTime, Utc};
 use client_api::api::{
     admin::{BalanceReservationInfo, UserBalanceReservationsResponse},
     tenant_financial_control::{
-        TenantFinancialControlApi, TenantWithdrawal, TenantWithdrawalPage, WithdrawalDecision,
-        WithdrawalQuery,
+        TenantWithdrawal, TenantWithdrawalPage, WithdrawalDecision, WithdrawalQuery,
     },
 };
 use dioxus::prelude::*;
@@ -26,6 +25,7 @@ const PAGE: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Earnings,
     Reservations,
     Withdrawals,
 }
@@ -51,6 +51,84 @@ fn pages(total: i64) -> i64 {
         // in untrusted totals and never offer a page beyond that bound.
         (total / i64::from(PAGE) + i64::from(total % i64::from(PAGE) != 0))
             .min(1_000_000 / i64::from(PAGE) + 1)
+    }
+}
+
+#[component]
+fn EarningsPanel(scope: WorkspaceScope) -> Element {
+    let auth = use_context::<AuthStore>();
+    let users = use_context::<UserStore>();
+    let i18n = use_i18n();
+    let mut page = use_signal(|| 1u32);
+    let mut generation = use_signal(|| 0u64);
+    let key = (scope, page(), generation());
+    let resource = use_resource(move || {
+        let key = (scope, page(), generation());
+        async move {
+            let result = common::read(auth, users, scope, move |token| async move {
+                let api = scope.financial_api()?;
+                let summary = api.earnings("CNY", &token).await?;
+                let history = api
+                    .earnings_history("CNY", PAGE, (key.1 - 1) * PAGE, &token)
+                    .await?;
+                Ok((summary, history))
+            })
+            .await;
+            (key, result)
+        }
+    });
+    let loaded = resource()
+        .filter(|value| value.0 == key)
+        .map(|value| value.1);
+
+    rsx! {
+        section { class: "tenant-earnings-control",
+            div { class: "toolbar",
+                button { class: "btn btn-secondary", onclick: move |_| generation += 1, {i18n.t("tenant.reload")} }
+            }
+            match loaded {
+                None => rsx! { p { role: "status", {i18n.t("common.loading")} } },
+                Some(Err(value)) => rsx! { p { role: "alert", class: "alert alert-error", {user_error_message(i18n, &value)} } },
+                Some(Ok((summary, history))) => rsx! {
+                    div { class: "finance-currency-totals",
+                        article { class: "card",
+                            h3 { "{summary.currency}" }
+                            p { {i18n.t("tenant_financial_controls.earnings_pending")} ": {summary.summary.pending_amount}" }
+                            p { {i18n.t("tenant_financial_controls.earnings_reserved")} ": {summary.summary.reserved_amount}" }
+                            p { {i18n.t("tenant_financial_controls.earnings_withdrawn")} ": {summary.summary.withdrawn_amount}" }
+                            p { {i18n.t("tenant_financial_controls.earnings_total")} ": {summary.summary.total_amount}" }
+                            p { {i18n.t("tenant_financial_controls.earnings_count")} ": {summary.summary.pending_count}" }
+                        }
+                    }
+                    div { class: "table-pagination-panel table-pagination-frame",
+                        div { class: "table-container",
+                            table { class: "table",
+                                thead { tr {
+                                    th { {i18n.t("tenant_financial_controls.owner")} }
+                                    th { {i18n.t("tenant_financial_controls.node")} }
+                                    th { {i18n.t("tenant_financial_controls.tip_amount")} }
+                                    th { {i18n.t("tenant_financial_controls.bill_amount")} }
+                                    th { {i18n.t("tenant.time")} }
+                                } }
+                                tbody { for row in history.items.iter() {
+                                    tr { key: "{row.id}",
+                                        td { TechnicalId { value: row.owner_user_id.to_string() } }
+                                        td { TechnicalId { value: row.node_id.to_string() } }
+                                        td { "{row.currency} {row.tip_amount}" }
+                                        td { "{row.currency} {row.bill_amount}" }
+                                        td { {format_time(&row.created_at)} }
+                                    }
+                                } }
+                            }
+                        }
+                        if history.items.is_empty() {
+                            div { class: "empty-state compact-empty-state", h3 { class: "empty-title", {i18n.t("tenant.empty")} } }
+                        }
+                    }
+                    Pager { page: page(), total_pages: pages(history.total), total: history.total, on_page: move |value| page.set(value) }
+                },
+            }
+        }
     }
 }
 
@@ -90,7 +168,7 @@ pub fn TenantFinancialControls() -> Element {
     rsx! {
         if let Some(scope) = WorkspaceScope::from_stores(auth, users).filter(|_| allowed) {
             for key in [format!("{scope:?}")] {
-                Workspace { key: "{key}", scope }
+                Workspace { key: "{key}", scope, embedded: false }
             }
         } else {
             p { role: "alert", {i18n.t("tenant.admin_required")} }
@@ -99,19 +177,35 @@ pub fn TenantFinancialControls() -> Element {
 }
 
 #[component]
-fn Workspace(scope: WorkspaceScope) -> Element {
+pub(crate) fn PlatformTenantFinancialControls(scope: WorkspaceScope) -> Element {
+    rsx! { Workspace { scope, embedded: true } }
+}
+
+#[component]
+fn Workspace(scope: WorkspaceScope, embedded: bool) -> Element {
     let i18n = use_i18n();
     let mut tab = use_signal(|| Tab::Reservations);
 
     rsx! {
         div { class: "page-container tenant-financial-controls",
-            ui::PageHeader {
-                title: i18n.t("tenant_financial_controls.title").to_string(),
-                description: i18n.t("tenant_financial_controls.hint").to_string(),
+            if !embedded {
+                ui::PageHeader {
+                    title: i18n.t("tenant_financial_controls.title").to_string(),
+                    description: i18n.t("tenant_financial_controls.hint").to_string(),
+                }
+                WorkspaceLinks {}
+                WorkspaceContext { note: i18n.t("tenant_financial_controls.boundary").to_string() }
+            } else {
+                h2 { class: "section-title", {i18n.t("tenant_financial_controls.title")} }
+                p { class: "text-secondary", {i18n.t("tenant_financial_controls.boundary")} }
             }
-            WorkspaceLinks {}
-            WorkspaceContext { note: i18n.t("tenant_financial_controls.boundary").to_string() }
             nav { class: "segmented-control",
+                button {
+                    class: "btn btn-secondary",
+                    aria_pressed: tab() == Tab::Earnings,
+                    onclick: move |_| tab.set(Tab::Earnings),
+                    {i18n.t("tenant_financial_controls.earnings")}
+                }
                 button {
                     class: "btn btn-secondary",
                     aria_pressed: tab() == Tab::Reservations,
@@ -125,10 +219,10 @@ fn Workspace(scope: WorkspaceScope) -> Element {
                     {i18n.t("tenant_financial_controls.withdrawals")}
                 }
             }
-            if tab() == Tab::Reservations {
-                ReservationPanel { scope }
-            } else {
-                WithdrawalPanel { scope }
+            match tab() {
+                Tab::Earnings => rsx! { EarningsPanel { scope } },
+                Tab::Reservations => rsx! { ReservationPanel { scope } },
+                Tab::Withdrawals => rsx! { WithdrawalPanel { scope } },
             }
         }
     }
@@ -160,7 +254,8 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
                 common::read(auth, users, scope, move |token| {
                     let current_cursor = current_cursor.clone();
                     async move {
-                        TenantFinancialControlApi::new(&get_client(), scope.tenant_id)?
+                        scope
+                            .financial_api()?
                             .reservations(owner, current_cursor.as_deref(), PAGE as u64, &token)
                             .await
                             .map(Some)
@@ -202,7 +297,8 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
         notice.set(String::new());
         spawn(async move {
             let result = common::command(auth, users, scope, move |token| async move {
-                TenantFinancialControlApi::new(&get_client(), scope.tenant_id)?
+                scope
+                    .financial_api()?
                     .release_expired(owner, &row, &why, &token)
                     .await
             })
@@ -386,7 +482,8 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
             let result = common::read(auth, users, scope, move |token| {
                 let selected_status = selected_status.clone();
                 async move {
-                    TenantFinancialControlApi::new(&get_client(), scope.tenant_id)?
+                    scope
+                        .financial_api()?
                         .withdrawals(
                             &WithdrawalQuery {
                                 status: selected_status,
@@ -419,7 +516,8 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
         notice.set(String::new());
         spawn(async move {
             let result = common::command(auth, users, scope, move |token| async move {
-                TenantFinancialControlApi::new(&get_client(), scope.tenant_id)?
+                scope
+                    .financial_api()?
                     .review(&row, decision, &why, &token)
                     .await
             })

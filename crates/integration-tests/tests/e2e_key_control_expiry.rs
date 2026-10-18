@@ -5,7 +5,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use integration_tests::db::{
-    create_test_api_key, create_test_pool, create_test_tenant, create_test_user,
+    OwnedTenant, create_test_api_key, create_test_pool, create_test_tenant, create_test_user,
 };
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::{CreateProduceAiKeyRequest, DbRouter, Tenant, TenantMembership, User};
@@ -20,7 +20,7 @@ use uuid::Uuid;
 struct Fixture {
     db: DatabaseConnection,
     state: AppState,
-    tenant: Tenant,
+    tenant: OwnedTenant,
     owner: Uuid,
     database_url: String,
 }

@@ -78,6 +78,34 @@ fn neither_global_roles_nor_platform_capabilities_create_a_tenant_membership() {
         "an admin role label alone is not a capability"
     );
 }
+
+#[test]
+fn platform_target_scope_requires_a_current_global_platform_session() {
+    harness(|mut auth, mut users| {
+        let user_id = Uuid::new_v4();
+        users.info.set(Some(UserInfo {
+            id: user_id.to_string(),
+            platform_role: Some(PlatformRole::Operator),
+            capabilities: SessionCapabilities {
+                platform: vec!["users:manage".into()],
+                tenant: vec![],
+            },
+            ..Default::default()
+        }));
+        let tenant_id = Uuid::new_v4();
+        let scope = WorkspaceScope::platform(auth, users, tenant_id).unwrap();
+        assert!(scope.is_platform_target());
+        assert_eq!(scope.tenant_id, tenant_id);
+        assert_eq!(scope.user_id, user_id);
+        assert!(scope.is_current(auth, users));
+
+        auth.state.write().selected_tenant_id = Some(Uuid::new_v4().to_string());
+        assert!(!scope.is_current(auth, users));
+        auth.state.write().selected_tenant_id = None;
+        users.info.write().as_mut().unwrap().selected_tenant = profile().selected_tenant;
+        assert!(!scope.is_current(auth, users));
+    });
+}
 #[test]
 fn valid_scope_requires_real_user_tenant_and_positive_versions() {
     let state = AuthState::logged_in("fixture".into());
@@ -213,7 +241,8 @@ fn technical_ids_keep_the_full_value_in_the_accessible_dom() {
     assert!(!component.contains("short_id"));
 
     let settings = include_str!("settings.rs");
-    assert!(settings.contains("TechnicalId { value: value.owner_user_id.to_string() }"));
+    assert!(settings.contains("if let Some(owner_user_id) = value.owner_user_id"));
+    assert!(settings.contains("TechnicalId { value: owner_user_id.to_string() }"));
     assert!(!settings.contains("short_id"));
 }
 

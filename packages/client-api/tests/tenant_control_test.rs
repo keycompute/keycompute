@@ -1,6 +1,6 @@
 use client_api::api::tenant_control::{self as client, InvitationToken, MemberPatch, TenantPatch};
 use client_api::{ClientError, TenantControlApi};
-use keycompute_types::TenantRole;
+use keycompute_types::{MembershipStatus, TenantRole};
 use serde_json::json;
 use uuid::Uuid;
 use wiremock::matchers::{body_json, header, method, path};
@@ -150,4 +150,35 @@ async fn search_text_cannot_inject_a_different_tenant_selector() {
             .query_pairs()
             .any(|(key, _)| key == "tenant_id")
     );
+}
+
+#[tokio::test]
+async fn member_status_filter_is_typed_and_keeps_the_platform_target() {
+    use wiremock::matchers::query_param;
+    let (client, server) = common::create_test_client().await;
+    let tenant = Uuid::new_v4();
+    let control = TenantControlApi::platform_tenant(&client, tenant).unwrap();
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/api/v1/platform/tenants/{tenant}/control/members"
+        )))
+        .and(query_param("page", "1"))
+        .and(query_param("page_size", "1"))
+        .and(query_param("status", "active"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"items":[],"total":7,"page":1,"page_size":1,"total_pages":7}),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let page = control
+        .members_filtered(1, 1, None, Some(MembershipStatus::Active), "console")
+        .await
+        .unwrap();
+
+    assert_eq!(page.total, 7);
+    server.verify().await;
 }

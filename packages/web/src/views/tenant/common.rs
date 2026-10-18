@@ -9,7 +9,13 @@ use crate::{
     },
     utils::display::short_id,
 };
-use client_api::{ApiClient, ClientError, Result, TenantControlApi};
+use client_api::{
+    ApiClient, ClientError, Result, TenantControlApi,
+    api::{
+        key_control::TenantKeyApi, tenant_financial_control::TenantFinancialControlApi,
+        tenant_reporting::TenantReportingApi,
+    },
+};
 use dioxus::prelude::*;
 use std::future::Future;
 use uuid::Uuid;
@@ -23,6 +29,7 @@ pub struct WorkspaceScope {
     pub user_id: Uuid,
     pub tenant_version: i64,
     pub member_version: i64,
+    platform_target: bool,
 }
 impl WorkspaceScope {
     fn from_profile(
@@ -53,6 +60,7 @@ impl WorkspaceScope {
             user_id: real(&info.id)?,
             tenant_version,
             member_version,
+            platform_target: false,
         })
     }
     pub fn from_stores(auth: AuthStore, users: UserStore) -> Option<Self> {
@@ -63,17 +71,74 @@ impl WorkspaceScope {
         )
     }
     pub fn is_current(self, auth: AuthStore, users: UserStore) -> bool {
+        if self.platform_target {
+            return Self::platform(auth, users, self.tenant_id) == Some(self);
+        }
         Self::from_profile(
             &auth.state.peek(),
             *users.loaded_session_id.peek(),
             users.info.peek().as_ref(),
         ) == Some(self)
     }
+    /// Build an explicit platform-target scope without selecting the tenant or
+    /// synthesizing a membership. The current session must remain global for
+    /// the lifetime of every read and command.
+    pub fn platform(auth: AuthStore, users: UserStore, tenant_id: Uuid) -> Option<Self> {
+        let state = auth.state.peek();
+        let info = users.info.peek();
+        let info = info.as_ref()?;
+        let user_id = Uuid::parse_str(&info.id).ok().filter(|id| !id.is_nil())?;
+        if !state.is_authenticated
+            || state.selected_tenant_id.is_some()
+            || info.selected_tenant.is_some()
+            || *users.loaded_session_id.peek() != state.session_id
+            || tenant_id.is_nil()
+            || !info.can_manage_platform()
+        {
+            return None;
+        }
+        Some(Self {
+            session_id: state.session_id,
+            tenant_id,
+            user_id,
+            tenant_version: 0,
+            member_version: 0,
+            platform_target: true,
+        })
+    }
+    pub const fn is_platform_target(self) -> bool {
+        self.platform_target
+    }
     pub fn api(self) -> Result<TenantControlApi> {
         self.api_with(&get_client())
     }
     fn api_with(self, client: &ApiClient) -> Result<TenantControlApi> {
-        TenantControlApi::new(client, self.tenant_id)
+        if self.platform_target {
+            TenantControlApi::platform_tenant(client, self.tenant_id)
+        } else {
+            TenantControlApi::new(client, self.tenant_id)
+        }
+    }
+    pub fn key_api(self) -> Result<TenantKeyApi> {
+        if self.platform_target {
+            TenantKeyApi::platform_tenant(&get_client(), self.tenant_id)
+        } else {
+            TenantKeyApi::new(&get_client(), self.tenant_id)
+        }
+    }
+    pub fn reporting_api(self) -> Result<TenantReportingApi> {
+        if self.platform_target {
+            TenantReportingApi::platform_tenant(&get_client(), self.tenant_id)
+        } else {
+            TenantReportingApi::new(&get_client(), self.tenant_id)
+        }
+    }
+    pub fn financial_api(self) -> Result<TenantFinancialControlApi> {
+        if self.platform_target {
+            TenantFinancialControlApi::platform_tenant(&get_client(), self.tenant_id)
+        } else {
+            TenantFinancialControlApi::new(&get_client(), self.tenant_id)
+        }
     }
 }
 fn changed() -> ClientError {
@@ -312,11 +377,13 @@ pub fn MemberIdField(
     let users = use_context::<UserStore>();
     let i18n = use_i18n();
     let suggestions = use_resource(move || {
-        let can_list_members = users
-            .info
-            .read()
-            .as_ref()
-            .is_some_and(UserInfo::can_manage_members);
+        let can_list_members = users.info.read().as_ref().is_some_and(|user| {
+            if scope.is_platform_target() {
+                user.can_manage_platform()
+            } else {
+                user.can_manage_members()
+            }
+        });
         async move {
             if !can_list_members {
                 return Ok(None);

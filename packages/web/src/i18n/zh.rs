@@ -331,6 +331,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("common.refresh", "刷新");
     m.insert("common.back", "返回");
+    m.insert("common.invalid_request", "请求参数无效");
     m.insert("common.clear", "清空");
     m.insert("common.default", "默认");
     m.insert("common.model_search_placeholder", "搜索模型名称或 Provider");
@@ -1666,25 +1667,28 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.name", "租户名称");
     m.insert("tenants.name_placeholder", "例如：研发中心");
     m.insert("tenants.name_required", "请输入租户名称");
-    m.insert("tenants.owner", "初始管理员");
-    m.insert(
-        "tenants.owner_hint",
-        "按姓名或邮箱选择已有用户。创建成功后，该用户将拥有此租户的管理权限。",
-    );
-    m.insert("tenants.owner_placeholder", "输入姓名或邮箱搜索…");
-    m.insert("tenants.owner_results", "用户搜索结果");
-    m.insert("tenants.owner_selected", "已选择初始管理员");
     m.insert("tenants.create_intro", "创建一个独立的租户工作区");
     m.insert(
         "tenants.create_intro_hint",
-        "租户名称和初始管理员为必填项；英文标识可留空由系统生成。",
+        "新租户默认没有成员，可在“管理租户”中后续授权；root/operator 保留隐式管理权限且不会成为租户成员。",
     );
-    m.insert("tenants.owner_required", "请选择有效的工作区拥有者。");
     m.insert("tenants.slug", "Slug（可选）");
     m.insert("tenants.slug_placeholder", "例如：research-center");
     m.insert("tenants.slug_hint", "仅支持小写字母、数字和连字符");
     m.insert("tenants.users", "用户数");
     m.insert("tenants.accounts", "渠道账号数");
+    m.insert("tenants.manage", "管理租户");
+    m.insert(
+        "tenants.enable_to_manage",
+        "请先启用租户，再管理租户访问权限",
+    );
+    m.insert("tenants.access_title", "租户访问管理");
+    m.insert(
+        "tenants.access_hint",
+        "无需切换工作区即可授权；平台管理员不会显示在租户成员列表中。",
+    );
+    m.insert("tenants.access_summary", "授权概览");
+    m.insert("tenants.no_members_yet", "该租户尚未授权任何普通成员。");
     m.insert("tenants.disable", "停用");
     m.insert("tenants.enable", "启用");
     m.insert("tenants.disable_title", "停用租户");

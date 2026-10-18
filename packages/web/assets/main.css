@@ -7559,6 +7559,7 @@ select.form-input:focus {
   margin-bottom: -6px;
 }
 
+.tenant-earnings-control,
 .tenant-reservation-control,
 .tenant-withdrawal-control {
   padding: 20px;
@@ -7939,6 +7940,11 @@ select.form-input:focus {
   background: color-mix(in srgb, var(--bg-card) 92%, var(--bg-primary));
   border: 1px solid var(--border-color);
   border-radius: 10px;
+}
+
+.platform-tenant-tabs {
+  max-width: 100%;
+  flex-wrap: wrap;
 }
 
 .segmented-control .btn,

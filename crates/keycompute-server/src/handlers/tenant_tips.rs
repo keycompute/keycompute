@@ -499,6 +499,44 @@ pub async fn tenant_earnings_history(
     Ok(Json(Page { items, total }))
 }
 
+pub async fn platform_earnings(
+    auth: GlobalConsoleAuth,
+    Path(path): Path<TenantPath>,
+    State(state): State<AppState>,
+    Query(q): Query<ReportQuery>,
+) -> Result<Json<Value>> {
+    let scope = root(&auth, path.tenant_id)?;
+    let row = NodeTip::summary(pool(&state)?.write_conn(), scope, q.money())
+        .await
+        .map_err(map_db)?;
+    Ok(Json(
+        json!({"tenant_id":path.tenant_id,"currency":q.money().trim().to_ascii_uppercase(),"summary":row}),
+    ))
+}
+
+pub async fn platform_earnings_history(
+    auth: GlobalConsoleAuth,
+    Path(path): Path<TenantPath>,
+    State(state): State<AppState>,
+    Query(q): Query<ReportQuery>,
+) -> Result<Json<Page<NodeTip>>> {
+    let scope = root(&auth, path.tenant_id)?;
+    let db = pool(&state)?.write_conn();
+    let items = NodeTip::list_in_scope(
+        db,
+        scope,
+        q.money(),
+        q.limit.unwrap_or(20),
+        q.offset.unwrap_or(0),
+    )
+    .await
+    .map_err(map_db)?;
+    let total = NodeTip::count_in_scope(db, scope, q.money())
+        .await
+        .map_err(map_db)?;
+    Ok(Json(Page { items, total }))
+}
+
 async fn private_response(mut response: Response) -> Response {
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
@@ -531,6 +569,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/platform/tenants/{tenant_id}/tips/withdrawals",
             get(platform_withdrawals),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/tips",
+            get(platform_earnings),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/tips/history",
+            get(platform_earnings_history),
         )
         .route(
             "/api/v1/platform/tenants/{tenant_id}/tips/withdrawals/{id}/approve",

@@ -151,7 +151,8 @@ impl Fixture {
             .await
             .unwrap()
             .unwrap()
-            .owner_user_id;
+            .owner_user_id
+            .expect("usage fixture tenant must have an owner");
         let key = create_test_api_key(
             &self.db,
             &CreateProduceAiKeyRequest {

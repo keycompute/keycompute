@@ -458,16 +458,29 @@ async fn run(db: DatabaseConnection) {
         .await
         .is_err()
     );
+    let platform_invitee = user(&db, "platform-invitee", true).await;
+    let platform_invitation = issue(
+        &db,
+        &request(&organization, &root, &platform_invitee, TenantRole::Member),
+        &actor(&root, None),
+    )
+    .await
+    .expect("platform root has implicit tenant administration");
     assert!(
-        issue(
-            &db,
-            &request(&organization, &root, &outsider, TenantRole::Admin),
-            &actor(&root, Some(TenantRole::Admin))
-        )
-        .await
-        .is_err(),
-        "platform root does not supply tenant membership"
+        TenantMembership::list_active_for_user(&db, root.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "implicit platform administration must not create a membership"
     );
+    accept(
+        &db,
+        organization.id,
+        platform_invitation.token.as_deref().unwrap(),
+        &platform_invitee,
+    )
+    .await
+    .unwrap();
 
     let expires = request(&organization, &owner, &outsider, TenantRole::Member);
     let old = issue(&db, &expires, &admin).await.unwrap();

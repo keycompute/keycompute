@@ -26,6 +26,47 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
             "Withdrawal review",
             "提现审核",
         ),
+        (
+            "tenant_financial_controls.earnings",
+            "Earnings ledger",
+            "收益账本",
+        ),
+        (
+            "tenant_financial_controls.earnings_pending",
+            "Available",
+            "可提现",
+        ),
+        (
+            "tenant_financial_controls.earnings_reserved",
+            "Reserved",
+            "提现预留",
+        ),
+        (
+            "tenant_financial_controls.earnings_withdrawn",
+            "Withdrawn",
+            "已提现",
+        ),
+        (
+            "tenant_financial_controls.earnings_total",
+            "Total earned",
+            "累计收益",
+        ),
+        (
+            "tenant_financial_controls.earnings_count",
+            "Accepted credits",
+            "收益笔数",
+        ),
+        ("tenant_financial_controls.node", "Node", "节点"),
+        (
+            "tenant_financial_controls.tip_amount",
+            "Earnings amount",
+            "收益金额",
+        ),
+        (
+            "tenant_financial_controls.bill_amount",
+            "Billed amount",
+            "计费金额",
+        ),
         ("tenant_financial_controls.owner", "Member ID", "成员 ID"),
         ("tenant_financial_controls.load", "Load", "加载"),
         (

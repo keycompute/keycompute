@@ -8,7 +8,6 @@ use crate::{
         time::format_time,
     },
 };
-use client_api::ClientError;
 use dioxus::prelude::*;
 
 pub(crate) fn action_label(i18n: crate::i18n::I18n, action: &str) -> String {
@@ -107,38 +106,44 @@ pub fn TenantAudit() -> Element {
     let key = format!("{epoch}:{scope:?}");
     // A keyed fragment is required: a key on one static component alone
     // does not engage Dioxus's keyed child reconciliation.
-    rsx! { for identity in [key] { TenantAuditPage { key: "{identity}" } } }
+    rsx! {
+        if let Some(scope) = scope {
+            for identity in [key] { TenantAuditPage { key: "{identity}", scope, embedded: false } }
+        }
+    }
 }
 
 #[component]
-fn TenantAuditPage() -> Element {
+pub(crate) fn PlatformTenantAudit(scope: WorkspaceScope) -> Element {
+    rsx! { TenantAuditPage { scope, embedded: true } }
+}
+
+#[component]
+fn TenantAuditPage(scope: WorkspaceScope, embedded: bool) -> Element {
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let i18n = use_i18n();
     let mut page = use_signal(|| 1u32);
-    let scope = WorkspaceScope::from_stores(auth, users);
     let mut data = use_resource(move || {
-        let scope = WorkspaceScope::from_stores(auth, users);
         let page = page();
         async move {
-            let result = if let Some(scope) = scope {
-                common::read(auth, users, scope, move |token| async move {
-                    scope.api()?.audit(page, 20, &token).await
-                })
-                .await
-            } else {
-                Err(ClientError::Forbidden(
-                    "selected membership required".into(),
-                ))
-            };
+            let result = common::read(auth, users, scope, move |token| async move {
+                scope.api()?.audit(page, 20, &token).await
+            })
+            .await;
             KeyedResourceValue::new((scope, page), result)
         }
     });
     let loaded = current_keyed_value(&(scope, page()), data.state().cloned(), data());
     rsx! {div {class:"page-container tenant-audit",
-        ui::PageHeader {title:i18n.t("tenant.audit").to_string(),description:i18n.t("tenant.audit_hint").to_string()}
-        WorkspaceLinks {}
-        WorkspaceContext {}
+        if !embedded {
+            ui::PageHeader {title:i18n.t("tenant.audit").to_string(),description:i18n.t("tenant.audit_hint").to_string()}
+            WorkspaceLinks {}
+            WorkspaceContext {}
+        } else {
+            h2 { class: "section-title", {i18n.t("tenant.audit")} }
+            p { class: "text-secondary", {i18n.t("tenant.audit_hint")} }
+        }
         button {class:"btn btn-secondary",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
         match loaded {
             None=>rsx!{div {class:"content-loading",role:"status",span {class:"spinner",aria_hidden:"true"} span {{i18n.t("common.loading")}}}},

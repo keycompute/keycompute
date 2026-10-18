@@ -222,12 +222,13 @@ def schema_issues(schema: str, inventory: str) -> tuple[list[str], int]:
     ]:
         if domain(tables.get(table, []), field) != allowed:
             failures.append(f'{table}: {field} domain differs from the final contract')
-    for table, field in [('tenants', 'owner_user_id'), ('tenants', 'revision'),
-                         ('tenants', 'authz_version'),
+    for table, field in [('tenants', 'revision'), ('tenants', 'authz_version'),
                          ('tenant_memberships', 'tenant_id'), ('tenant_memberships', 'user_id'),
                          ('tenant_invitations', 'token_hash')]:
         if not contains(columns(tables.get(table, [])).get(field, []), ['not', 'null']):
             failures.append(f'{table}.{field}: NOT NULL required')
+    if contains(columns(tables.get('tenants', [])).get('owner_user_id', []), ['not', 'null']):
+        failures.append('tenants.owner_user_id: must allow an unassigned ordinary owner')
     if not contains(words(tables.get('tenant_memberships', [])), ['primary', 'key', '(', 'tenant_id', ',', 'user_id', ')']):
         failures.append('tenant_memberships: composite primary key required')
     pending_index = ['on', 'tenant_invitations', '(', 'tenant_id', ',', 'lower', '(', 'email', ')', ')', 'where', 'status', '=', 'pending']

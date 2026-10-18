@@ -626,11 +626,12 @@ mod tests {
         // wait either on the parent delete lock or (for an already-started
         // transaction) on the child-row lock held by find_deletion_blockers.
         let updater_pool = pool.clone();
+        let tenant_id = tenant.id;
         let response_id_for_task = response_id.clone();
         let mut updater = tokio::spawn(async move {
             ResponseAffinity::upsert_route_with_settlement(
                 &updater_pool,
-                tenant.id,
+                tenant_id,
                 &response_id_for_task,
                 "openai",
                 Some("gpt-test"),

@@ -2,8 +2,9 @@
 
 `/tenant/finance/controls` is the selected tenant administrator's narrow control
 surface. It is intentionally separate from the read-only `/tenant/finance` report
-page and from root/platform money administration. A platform root/operator label
-without a current tenant-admin membership does not mount these controls.
+page and from platform-wide money administration. The platform tenant page embeds
+the same controls through an explicit root/operator target; this never creates or
+requires a tenant membership.
 
 ## Expired request reservation recovery
 
@@ -43,7 +44,7 @@ result must preserve immutable withdrawal ID, owner, request, type, amount and
 currency, advance the revision, contain the current reviewer metadata, and remain
 non-completed with no payout reference or balance transaction. Approval is a review
 state transition only: it does not send money and cannot attest an external payout.
-Root-only recipient access and completion remain separate audited platform flows.
+Root/operator recipient access and completion remain separate audited platform flows.
 Balance-conversion withdrawals are not review buttons because their accepted flow
 completes transactionally at creation.
 
@@ -66,7 +67,7 @@ Code-level Web tests verify expired-only UI behavior, exact version/revision
 payloads, no platform payout calls, uncertain-write single dispatch,
 workspace-race isolation, foreign-row fail-closed behavior and tenant-admin route
 gates. Real PostgreSQL/Axum wallet/tip suites verify financial locks, audit
-rollback, current roles, credential expiry, payout-secret separation and root-only
+rollback, current roles, credential expiry, payout-secret separation and root/operator
 completion.
 
 No production database, balance, payout, payment provider, credential, SMTP, service

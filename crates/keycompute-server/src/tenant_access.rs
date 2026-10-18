@@ -3,11 +3,12 @@
 //! `ConsoleAuth` contains the already-selected, database-validated tenant in
 //! `AuthExtractor::tenant_id`. It is not a global context with an optional
 //! selector. These extractors add the route binding and operation-specific
-//! permission check so a platform role can never widen a tenant URL.
+//! permission check. Platform identities use separate `/platform/.../control`
+//! routes and never acquire a synthetic membership row.
 
 use crate::{
     error::{ApiError, Result},
-    extractors::{ConsoleAuth, RequestId},
+    extractors::{ConsoleAuth, GlobalConsoleAuth, RequestId},
     state::AppState,
 };
 use axum::{
@@ -15,7 +16,7 @@ use axum::{
     http::request::Parts,
 };
 use keycompute_auth::AuthorizationAction;
-use keycompute_db::AuditContext;
+use keycompute_db::{AuditContext, models::tenant_control::TenantAuthzSnapshot};
 use keycompute_types::{TenantRole, TenantScope};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -104,6 +105,14 @@ impl TenantAdmin {
     pub fn audit(&self, request_id: RequestId) -> AuditContext {
         audit_for(&self.auth, request_id)
     }
+
+    pub fn snapshot(&self) -> TenantAuthzSnapshot {
+        TenantAuthzSnapshot {
+            token_version: self.auth.token_version,
+            tenant_authz_version: self.auth.authz_version,
+            membership_authz_version: self.auth.membership_authz_version,
+        }
+    }
 }
 
 impl FromRequestParts<AppState> for TenantAdmin {
@@ -181,5 +190,201 @@ impl FromRequestParts<AppState> for TenantMember {
         }
         auth.require_tenant(AuthorizationAction::View)?;
         Ok(Self { auth, tenant_id })
+    }
+}
+
+/// Explicit root/operator authority over one target tenant. This scope exists
+/// only on platform-target routes and does not create or imply membership.
+#[derive(Debug, Clone)]
+pub struct PlatformTenantAdmin {
+    auth: GlobalConsoleAuth,
+    tenant_id: Uuid,
+}
+
+impl PlatformTenantAdmin {
+    pub fn auth(&self) -> &keycompute_auth::AuthContext {
+        &self.auth.0
+    }
+
+    pub const fn tenant_id(&self) -> Uuid {
+        self.tenant_id
+    }
+
+    pub fn require_path_tenant(&self, tenant_id: Uuid) -> Result<()> {
+        if tenant_id.is_nil() {
+            return Err(ApiError::BadRequest("tenant_id must be a real UUID".into()));
+        }
+        if tenant_id != self.tenant_id {
+            return Err(ApiError::Forbidden(
+                "the target tenant does not match the route".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn require(&self, _action: AuthorizationAction) -> Result<TenantScope> {
+        self.auth
+            .require_platform(AuthorizationAction::ManagePlatform)?;
+        Ok(self.scope())
+    }
+
+    pub fn platform_scope(&self) -> Result<keycompute_types::PlatformScope> {
+        self.auth
+            .require_platform(AuthorizationAction::ManagePlatform)
+            .map_err(ApiError::from)
+    }
+
+    pub fn scope(&self) -> TenantScope {
+        TenantScope::checked(self.tenant_id, self.auth.user_id, TenantRole::Admin)
+            .expect("platform tenant extraction validates non-nil identities")
+    }
+
+    pub fn audit(&self, request_id: RequestId) -> AuditContext {
+        AuditContext {
+            actor_user_id: self.auth.user_id,
+            credential_kind: self.auth.credential_kind,
+            actor_platform_role: self.auth.platform_role,
+            actor_tenant_role: None,
+            request_id: Some(request_id.0),
+        }
+    }
+
+    pub fn snapshot(&self) -> TenantAuthzSnapshot {
+        TenantAuthzSnapshot {
+            token_version: self.auth.token_version,
+            tenant_authz_version: 0,
+            membership_authz_version: 0,
+        }
+    }
+}
+
+impl FromRequestParts<AppState> for PlatformTenantAdmin {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self> {
+        let tenant_id = route_tenant_id(parts, state).await?;
+        let auth = GlobalConsoleAuth::from_request_parts(parts, state).await?;
+        if auth.selected_tenant_id.is_some() {
+            return Err(ApiError::Forbidden(
+                "global platform session required".into(),
+            ));
+        }
+        auth.require_platform(AuthorizationAction::ManagePlatform)?;
+        Ok(Self { auth, tenant_id })
+    }
+}
+
+/// Route-aware tenant administration. Ordinary tenant URLs remain strictly
+/// membership-bound; only explicit platform control URLs accept root/operator.
+#[derive(Debug, Clone)]
+pub enum TenantAdministration {
+    Tenant(TenantAdmin),
+    Platform(PlatformTenantAdmin),
+}
+
+impl TenantAdministration {
+    pub fn authorization_context(&self) -> keycompute_auth::AuthContext {
+        match self {
+            Self::Tenant(access) => access.auth().authorization_context(),
+            Self::Platform(access) => access.auth().clone(),
+        }
+    }
+
+    pub fn platform_scope(&self) -> Result<Option<keycompute_types::PlatformScope>> {
+        match self {
+            Self::Tenant(_) => Ok(None),
+            Self::Platform(access) => access.platform_scope().map(Some),
+        }
+    }
+
+    pub fn require_path_tenant(&self, tenant_id: Uuid) -> Result<()> {
+        match self {
+            Self::Tenant(access) => access.require_path_tenant(tenant_id),
+            Self::Platform(access) => access.require_path_tenant(tenant_id),
+        }
+    }
+
+    pub fn require(&self, action: AuthorizationAction) -> Result<TenantScope> {
+        match self {
+            Self::Tenant(access) => access.require(action),
+            Self::Platform(access) => access.require(action),
+        }
+    }
+
+    pub fn scope(&self) -> TenantScope {
+        match self {
+            Self::Tenant(access) => access.scope(),
+            Self::Platform(access) => access.scope(),
+        }
+    }
+
+    pub fn audit(&self, request_id: RequestId) -> AuditContext {
+        match self {
+            Self::Tenant(access) => access.audit(request_id),
+            Self::Platform(access) => access.audit(request_id),
+        }
+    }
+
+    pub fn snapshot(&self) -> TenantAuthzSnapshot {
+        match self {
+            Self::Tenant(access) => access.snapshot(),
+            Self::Platform(access) => access.snapshot(),
+        }
+    }
+}
+
+impl FromRequestParts<AppState> for TenantAdministration {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self> {
+        if parts.uri.path().starts_with("/api/v1/platform/") {
+            PlatformTenantAdmin::from_request_parts(parts, state)
+                .await
+                .map(Self::Platform)
+        } else {
+            TenantAdmin::from_request_parts(parts, state)
+                .await
+                .map(Self::Tenant)
+        }
+    }
+}
+
+/// Route-aware tenant context read. Members may read their selected workspace;
+/// platform administrators may read an explicit target through control URLs.
+#[derive(Debug, Clone)]
+pub enum TenantContextAccess {
+    Tenant(TenantMember),
+    Platform(PlatformTenantAdmin),
+}
+
+impl TenantContextAccess {
+    pub fn require_path_tenant(&self, tenant_id: Uuid) -> Result<()> {
+        match self {
+            Self::Tenant(access) => access.require_path_tenant(tenant_id),
+            Self::Platform(access) => access.require_path_tenant(tenant_id),
+        }
+    }
+
+    pub fn scope(&self) -> TenantScope {
+        match self {
+            Self::Tenant(access) => access.scope(),
+            Self::Platform(access) => access.scope(),
+        }
+    }
+}
+
+impl FromRequestParts<AppState> for TenantContextAccess {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self> {
+        if parts.uri.path().starts_with("/api/v1/platform/") {
+            PlatformTenantAdmin::from_request_parts(parts, state)
+                .await
+                .map(Self::Platform)
+        } else {
+            TenantMember::from_request_parts(parts, state)
+                .await
+                .map(Self::Tenant)
+        }
     }
 }

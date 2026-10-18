@@ -298,3 +298,93 @@ async fn reservation_pages_reject_alias_duplicates_and_excess_rows() {
         s.reset().await;
     }
 }
+
+#[tokio::test]
+async fn platform_earnings_use_the_explicit_tenant_route_and_validate_scope() {
+    let s = MockServer::start().await;
+    let tenant = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    let tip_id = Uuid::new_v4();
+    let api = TenantFinancialControlApi::platform_tenant(&client(&s), tenant).unwrap();
+    let base = format!("/api/v1/platform/tenants/{tenant}/tips");
+    Mock::given(method("GET"))
+        .and(path(&base))
+        .and(query_param("currency", "CNY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tenant_id": tenant,
+            "currency": "CNY",
+            "summary": {
+                "pending_amount": "8.5",
+                "reserved_amount": "1",
+                "withdrawn_amount": "2",
+                "total_amount": "11.5",
+                "pending_count": 3
+            }
+        })))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let summary = api.earnings("cny", "fixture").await.unwrap();
+    assert_eq!(summary.summary.pending_amount, "8.5");
+
+    Mock::given(method("GET"))
+        .and(path(format!("{base}/history")))
+        .and(query_param("currency", "CNY"))
+        .and(query_param("limit", "20"))
+        .and(query_param("offset", "0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{
+                "id": tip_id,
+                "tenant_id": tenant,
+                "usage_log_id": Uuid::new_v4(),
+                "node_id": Uuid::new_v4(),
+                "owner_user_id": owner,
+                "consumer_user_id": Uuid::new_v4(),
+                "tip_amount": "0.5",
+                "currency": "CNY",
+                "tip_ratio": "0.1",
+                "bill_amount": "5",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }],
+            "total": 1
+        })))
+        .expect(1)
+        .mount(&s)
+        .await;
+    assert_eq!(
+        api.earnings_history("CNY", 20, 0, "fixture")
+            .await
+            .unwrap()
+            .items[0]
+            .id,
+        tip_id
+    );
+    s.verify().await;
+}
+
+#[tokio::test]
+async fn earnings_reject_foreign_tenants_and_invalid_pagination() {
+    let s = MockServer::start().await;
+    let tenant = Uuid::new_v4();
+    let api = TenantFinancialControlApi::platform_tenant(&client(&s), tenant).unwrap();
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tenant_id": Uuid::new_v4(),
+            "currency": "CNY",
+            "summary": {
+                "pending_amount": "0",
+                "reserved_amount": "0",
+                "withdrawn_amount": "0",
+                "total_amount": "0",
+                "pending_count": 0
+            }
+        })))
+        .expect(1)
+        .mount(&s)
+        .await;
+    assert!(api.earnings("CNY", "fixture").await.is_err());
+    assert!(api.earnings_history("CNY", 0, 0, "fixture").await.is_err());
+    assert!(api.earnings("invalid", "fixture").await.is_err());
+    s.verify().await;
+}

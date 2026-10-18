@@ -6,7 +6,7 @@ mod invitations;
 mod members;
 pub(crate) mod node_admin;
 pub use node_admin::TenantNodes;
-mod settings;
+pub(crate) mod settings;
 mod workspace;
 pub(crate) mod workspace_switcher;
 use crate::{
@@ -14,11 +14,13 @@ use crate::{
     router::Route,
     stores::{auth_store::AuthStore, user_store::UserStore},
 };
+pub(crate) use audit::PlatformTenantAudit;
 pub use audit::TenantAudit;
 use dioxus::prelude::*;
 pub use invitation_entry::TenantInvitationAccept;
 pub use invitations::TenantInvitations;
 pub use members::TenantMembers;
+pub(crate) use settings::PlatformTenantSettings;
 pub use settings::TenantSettings;
 pub use workspace::TenantWorkspace;
 pub use workspace_switcher::{
@@ -76,9 +78,11 @@ mod response_admin;
 pub use response_admin::TenantResponses;
 
 mod key_admin;
+pub(crate) use key_admin::PlatformTenantKeys;
 pub use key_admin::{OwnerKeyIssuance, TenantKeys};
 
-mod finance;
+pub(crate) mod finance;
+pub(crate) use finance::PlatformTenantFinance;
 pub use finance::TenantFinance;
 
 mod provider_admin;
@@ -87,7 +91,8 @@ pub use provider_admin::TenantProviders;
 mod distribution_admin;
 pub use distribution_admin::TenantDistribution;
 
-mod finance_control;
+pub(crate) mod finance_control;
+pub(crate) use finance_control::PlatformTenantFinancialControls;
 pub use finance_control::TenantFinancialControls;
 
 #[cfg(test)]

@@ -28,6 +28,35 @@ fn page(field: &str, item: Value) -> Value {
     v
 }
 #[tokio::test]
+async fn platform_key_administration_keeps_an_explicit_tenant_route() {
+    let server = MockServer::start().await;
+    let tenant = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    let id = Uuid::new_v4();
+    let api = TenantKeyApi::platform_tenant(&client(&server), tenant).unwrap();
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/platform/tenants/{tenant}/keys")))
+        .and(query_param("owner_user_id", owner.to_string()))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(page("keys", key(tenant, owner, id))),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = api
+        .list(
+            &KeyQuery {
+                owner_user_id: Some(owner),
+                ..Default::default()
+            },
+            "global-console",
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.keys[0].id, id);
+    assert!(TenantKeyApi::platform_tenant(&client(&server), Uuid::nil()).is_err());
+}
+#[tokio::test]
 async fn fresh_metadata_and_personal_lists_keep_fixed_tenant_owner_boundaries() {
     let server = MockServer::start().await;
     let client = client(&server);

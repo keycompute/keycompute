@@ -5,5 +5,6 @@ mod owner;
 #[cfg(test)]
 mod tests;
 mod types;
+pub(crate) use admin::PlatformTenantKeys;
 pub use admin::TenantKeys;
 pub use owner::OwnerKeyIssuance;

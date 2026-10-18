@@ -6,14 +6,27 @@ use crate::{
     extractors::ConsoleAuth,
     state::AppState,
 };
+use keycompute_auth::AuthContext;
 use sea_orm::{ConnectionTrait, DatabaseTransaction};
 pub(crate) async fn finish_read(db: &impl ConnectionTrait, auth: &ConsoleAuth) -> Result<()> {
-    ConsoleSessionProof::from_console(auth)?
+    finish_read_context(db, &auth.authorization_context()).await
+}
+pub(crate) async fn finish_read_context(
+    db: &impl ConnectionTrait,
+    auth: &AuthContext,
+) -> Result<()> {
+    ConsoleSessionProof::from_context(auth)?
         .verify_current(db)
         .await
 }
 pub(crate) async fn begin(state: &AppState, auth: &ConsoleAuth) -> Result<DatabaseTransaction> {
-    ConsoleSessionProof::from_console(auth)?.begin(state).await
+    begin_context(state, &auth.authorization_context()).await
+}
+pub(crate) async fn begin_context(
+    state: &AppState,
+    auth: &AuthContext,
+) -> Result<DatabaseTransaction> {
+    ConsoleSessionProof::from_context(auth)?.begin(state).await
 }
 #[derive(Clone, Copy)]
 pub(crate) enum KeyChange {
@@ -26,7 +39,15 @@ pub(crate) async fn commit(
     auth: &ConsoleAuth,
     change: KeyChange,
 ) -> Result<()> {
-    let proof = match ConsoleSessionProof::from_console(auth) {
+    commit_context(state, tx, &auth.authorization_context(), change).await
+}
+pub(crate) async fn commit_context(
+    state: &AppState,
+    tx: DatabaseTransaction,
+    auth: &AuthContext,
+    change: KeyChange,
+) -> Result<()> {
+    let proof = match ConsoleSessionProof::from_context(auth) {
         Ok(proof) => proof,
         Err(error) => {
             tx.rollback()

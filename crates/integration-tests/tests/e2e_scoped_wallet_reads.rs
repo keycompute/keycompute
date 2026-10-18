@@ -17,7 +17,13 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, Transac
 use uuid::Uuid;
 
 fn admin(t: &Tenant) -> TenantScope {
-    TenantScope::checked(t.id, t.owner_user_id, TenantRole::Admin).unwrap()
+    TenantScope::checked(
+        t.id,
+        t.owner_user_id
+            .expect("wallet fixture tenant must have an owner"),
+        TenantRole::Admin,
+    )
+    .unwrap()
 }
 fn actor(user: Uuid) -> AuditContext {
     AuditContext {
@@ -39,8 +45,8 @@ fn platform_actor(user: Uuid) -> AuditContext {
 }
 struct Fixture {
     db: DatabaseConnection,
-    a: Tenant,
-    b: Tenant,
+    a: integration_tests::db::OwnedTenant,
+    b: integration_tests::db::OwnedTenant,
     user: TenantActor,
     other: TenantActor,
     operator: User,

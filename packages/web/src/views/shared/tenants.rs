@@ -1,10 +1,6 @@
 use client_api::api::tenant::{
     CreateTenantRequest, TenantInfo, TenantQueryParams, UpdateTenantRequest,
 };
-use client_api::{
-    AdminApi, UserStatus,
-    api::admin::{UserDetail, UserQueryParams},
-};
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use ui::{
@@ -44,8 +40,9 @@ impl TenantListQuery {
 
 use crate::app::UserBootstrap;
 use crate::hooks::use_i18n::use_i18n;
+use crate::router::Route;
 use crate::services::{
-    api_client::{get_client, user_error_message, with_auto_refresh},
+    api_client::{user_error_message, with_auto_refresh},
     tenant_service,
 };
 use crate::stores::auth_store::AuthStore;
@@ -66,10 +63,9 @@ fn is_selected_tenant(user_store: UserStore, tenant_id: &str) -> bool {
 }
 
 /// Keep the button state aligned with the server's membership/account guard.
-/// A newly-created tenant necessarily has its owner as one active member and
-/// remains deletable until a second member or an account is retained.
+/// An ownerless tenant remains deletable only while it has no active member or account.
 fn can_delete_tenant(tenant: &TenantInfo) -> bool {
-    tenant.user_count <= 1 && tenant.account_count == 0
+    tenant.user_count == 0 && tenant.account_count == 0
 }
 
 /// 租户管理页面（仅 Admin 可访问）
@@ -234,6 +230,23 @@ pub fn Tenants() -> Element {
                                         td { {format_time(&t.created_at)} }
                                         td {
                                             div { class: "table-actions",
+                                                if t.is_active {
+                                                    Link {
+                                                        class: "btn btn-secondary btn-sm",
+                                                        to: Route::PlatformTenantAccess { tenant_id: t.id.clone() },
+                                                        {i18n.t("tenants.manage")}
+                                                    }
+                                                } else {
+                                                    span {
+                                                        title: i18n.t("tenants.enable_to_manage"),
+                                                        button {
+                                                            class: "btn btn-secondary btn-sm",
+                                                            r#type: "button",
+                                                            disabled: true,
+                                                            {i18n.t("tenants.manage")}
+                                                        }
+                                                    }
+                                                }
                                                 Button {
                                                     variant: if t.is_active { ButtonVariant::Secondary } else { ButtonVariant::Primary },
                                                     size: ButtonSize::Small,
@@ -449,69 +462,12 @@ fn TenantCreateModal(
 ) -> Element {
     let i18n = use_i18n();
     crate::views::tenant::workspace_switcher::use_workspace_blocker();
-    let mut user_store = use_context::<UserStore>();
     let opened_session = use_hook(|| auth_store.state.peek().session_id);
-    let mut owner_user_id = use_signal(|| {
-        if *user_store.loaded_session_id.peek() != auth_store.state.peek().session_id {
-            return String::new();
-        }
-        user_store
-            .info
-            .peek()
-            .as_ref()
-            .map(|u| u.id.clone())
-            .unwrap_or_default()
-    });
 
     let mut name = use_signal(String::new);
     let mut slug = use_signal(String::new);
-    let mut owner_search = use_signal(|| {
-        user_store
-            .info
-            .peek()
-            .as_ref()
-            .map(|user| user.email.clone())
-            .unwrap_or_default()
-    });
     let mut saving = use_signal(|| false);
     let mut error = use_signal(String::new);
-    let owner_results = use_resource(move || {
-        let query = owner_search().trim().to_owned();
-        async move {
-            if query.chars().count() < 2 {
-                return KeyedResourceValue::new(query, Ok(Vec::<UserDetail>::new()));
-            }
-            TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
-            if owner_search().trim() != query {
-                return KeyedResourceValue::new(query, Ok(Vec::<UserDetail>::new()));
-            }
-            let params = UserQueryParams::new()
-                .with_status(UserStatus::Active)
-                .with_search(query.clone())
-                .with_page(1)
-                .with_page_size(8);
-            let result = with_auto_refresh(auth_store, move |token| {
-                let params = params.clone();
-                async move {
-                    Ok(AdminApi::new(&get_client())
-                        .list_all_users(Some(&params), &token)
-                        .await?
-                        .users
-                        .into_iter()
-                        .filter(|candidate| candidate.status == Some(UserStatus::Active))
-                        .collect())
-                }
-            })
-            .await;
-            KeyedResourceValue::new(query, result)
-        }
-    });
-    let owner_query = owner_search().trim().to_owned();
-    let visible_owner_results = current_keyed_value(
-        &owner_query,
-        owner_results.state().cloned(),
-        owner_results(),
-    );
 
     let on_submit = move |_| {
         if saving() {
@@ -527,19 +483,11 @@ fn TenantCreateModal(
             on_close.call(());
             return;
         }
-        let owner = match uuid::Uuid::parse_str(owner_user_id().trim()) {
-            Ok(value) if !value.is_nil() => value,
-            _ => {
-                error.set(i18n.t("tenants.owner_required").to_string());
-                return;
-            }
-        };
-        let mut request = CreateTenantRequest::new(name_value, owner);
+        let mut request = CreateTenantRequest::new(name_value);
         if !slug_value.is_empty() {
             request = request.with_slug(slug_value);
         }
         let request_auth = auth_store;
-        let owner_user_id = owner.to_string();
         saving.set(true);
         error.set(String::new());
         let on_created = on_created.clone();
@@ -553,18 +501,7 @@ fn TenantCreateModal(
                 return;
             }
             match result {
-                Ok(tenant) => {
-                    if user_store
-                        .info
-                        .peek()
-                        .as_ref()
-                        .is_some_and(|user| user.id == owner_user_id)
-                        && let Some(user) = user_store.info.write().as_mut()
-                    {
-                        user.add_created_owned_tenant(&tenant.id, &tenant.name);
-                    }
-                    on_created.call(())
-                }
+                Ok(_) => on_created.call(()),
                 Err(value) => error.set(user_error_message(i18n, &value)),
             }
             saving.set(false);
@@ -614,61 +551,6 @@ fn TenantCreateModal(
                         }
                     }
                     div { class: "form-group",
-                        label { class: "form-label", r#for: "tenant-create-owner",
-                            {i18n.t("tenants.owner")} span { class: "required-mark", " *" }
-                        }
-                        input {
-                            id: "tenant-create-owner",
-                            class: "input-field", r#type: "search", required: true, maxlength: "255",
-                            value: "{owner_search}",
-                            placeholder: i18n.t("tenants.owner_placeholder"),
-                            autocomplete: "off",
-                            oninput: move |event| {
-                                owner_search.set(event.value());
-                                owner_user_id.set(String::new());
-                            },
-                        }
-                        small { class: "text-secondary", {i18n.t("tenants.owner_hint")} }
-                        if let Some(Ok(users)) = visible_owner_results.as_ref() {
-                            if !users.is_empty() && owner_user_id().is_empty() {
-                                div { class: "tenant-owner-results", role: "listbox", aria_label: i18n.t("tenants.owner_results"),
-                                    for candidate in users.iter() {
-                                        button {
-                                            class: "tenant-owner-option",
-                                            r#type: "button",
-                                            role: "option",
-                                            onclick: {
-                                                let selected = candidate.clone();
-                                                move |_| {
-                                                    owner_user_id.set(selected.id.clone());
-                                                    owner_search.set(match selected.name.as_deref() {
-                                                        Some(name) if !name.is_empty() => format!("{name} · {}", selected.email),
-                                                        _ => selected.email.clone(),
-                                                    });
-                                                }
-                                            },
-                                            span { "{candidate.name.as_deref().unwrap_or(&candidate.email)}" }
-                                            small { "{candidate.email}" }
-                                        }
-                                    }
-                                }
-                            }
-                        } else if let Some(Err(value)) = visible_owner_results.as_ref() {
-                            small { class: "text-error", role: "alert", {user_error_message(i18n, value)} }
-                        } else if owner_results.state() == UseResourceState::Pending && owner_query.chars().count() >= 2 {
-                            small { class: "text-secondary", role: "status", {i18n.t("common.loading")} }
-                        }
-                        if !owner_user_id().is_empty() {
-                            div { class: "tenant-owner-selected",
-                                span { aria_hidden: "true", "✓" }
-                                div {
-                                    strong { {i18n.t("tenants.owner_selected")} }
-                                    small { "{owner_search}" }
-                                }
-                            }
-                        }
-                    }
-                    div { class: "form-group",
                         label { class: "form-label", r#for: "tenant-create-slug", {i18n.t("tenants.slug")} }
                         input {
                             id: "tenant-create-slug",
@@ -692,7 +574,7 @@ fn TenantCreateModal(
                     Button {
                         variant: ButtonVariant::Primary,
                         loading: saving(),
-                        disabled: saving() || name().trim().is_empty() || owner_user_id().is_empty(),
+                        disabled: saving() || name().trim().is_empty(),
                         onclick: on_submit,
                         {i18n.t("form.create")}
                     }
@@ -742,8 +624,8 @@ mod tests {
     #[test]
     fn newly_created_tenant_remains_deletable_until_retained_resources_exist() {
         assert!(can_delete_tenant(&tenant(0, 0)));
-        assert!(can_delete_tenant(&tenant(1, 0)));
+        assert!(!can_delete_tenant(&tenant(1, 0)));
         assert!(!can_delete_tenant(&tenant(2, 0)));
-        assert!(!can_delete_tenant(&tenant(1, 1)));
+        assert!(!can_delete_tenant(&tenant(0, 1)));
     }
 }

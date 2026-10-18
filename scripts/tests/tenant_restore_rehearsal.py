@@ -74,14 +74,14 @@ def fingerprints(db: Database) -> dict[str, str]:
 
 def check_invariants(db: Database) -> None:
     assert db.sql("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name IN ('tenant_id','role');") == '0'
-    assert db.sql("SELECT COUNT(*) FROM tenants t LEFT JOIN tenant_memberships m ON m.tenant_id=t.id AND m.user_id=t.owner_user_id LEFT JOIN users u ON u.id=t.owner_user_id WHERE m.user_id IS NULL OR m.tenant_role<>'admin' OR m.status<>'active' OR u.status<>'active';") == '0'
+    assert db.sql("SELECT COUNT(*) FROM tenants t LEFT JOIN tenant_memberships m ON m.tenant_id=t.id AND m.user_id=t.owner_user_id LEFT JOIN users u ON u.id=t.owner_user_id WHERE t.owner_user_id IS NOT NULL AND (m.user_id IS NULL OR m.tenant_role<>'admin' OR m.status<>'active' OR u.status<>'active');") == '0'
     assert db.sql("SELECT COUNT(*) FROM produce_ai_keys k JOIN tenant_memberships m ON m.tenant_id=k.tenant_id AND m.user_id=k.user_id WHERE m.status='removed' AND NOT k.revoked;") == '0'
     root = db.sql("SELECT id FROM users WHERE platform_role='root' AND status='active';")
     if not re.fullmatch(r'[0-9a-f-]{36}', root):
         raise RuntimeError('fixture must have exactly one active root after schema exercises')
     db.reject(f"DELETE FROM users WHERE id='{root}';", 'root')
     db.reject("UPDATE tenant_audit_events SET action='restore-mutated';", 'immutable')
-    owner = db.sql("SELECT owner_user_id FROM tenants ORDER BY id LIMIT 1;")
+    owner = db.sql("SELECT owner_user_id FROM tenants WHERE owner_user_id IS NOT NULL ORDER BY id LIMIT 1;")
     db.reject(f"UPDATE users SET status='suspended' WHERE id='{owner}';", 'owner')
 
 
@@ -97,7 +97,7 @@ def run(container: str) -> dict:
         source.sql('BEGIN;\n'+(ROOT/'crates/keycompute-db/migrations/001_init.sql').read_text()+'\nCOMMIT;')
         exercise_schema(source)
         # A pending, one-time hashed invitation is also retained by the snapshot.
-        source.sql("INSERT INTO tenant_invitations(tenant_id,invited_by,email,tenant_role,token_hash,expires_at) SELECT id,owner_user_id,'restore-invite@fixture.invalid','member',repeat('a',64),clock_timestamp()+interval '1 hour' FROM tenants ORDER BY id LIMIT 1;")
+        source.sql("INSERT INTO tenant_invitations(tenant_id,invited_by,email,tenant_role,token_hash,expires_at) SELECT id,owner_user_id,'restore-invite@fixture.invalid','member',repeat('a',64),clock_timestamp()+interval '1 hour' FROM tenants WHERE owner_user_id IS NOT NULL ORDER BY id LIMIT 1;")
         before = fingerprints(source)
         with tempfile.TemporaryDirectory(prefix='kc-tenant-restore-') as temp:
             archive = Path(temp)/'synthetic.dump'

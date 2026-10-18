@@ -8,14 +8,14 @@ use super::{
 use crate::{
     hooks::use_i18n::use_i18n,
     router::Route,
-    services::api_client::{get_client, user_error_message},
+    services::api_client::user_error_message,
     stores::{auth_store::AuthStore, user_store::UserStore},
     utils::{
         resource::{KeyedResourceValue, current_keyed_value},
         time::format_time,
     },
 };
-use client_api::api::key_control::{IssuancePage, KeyPage, KeyQuery, TenantKeyApi};
+use client_api::api::key_control::{IssuancePage, KeyPage, KeyQuery};
 use dioxus::prelude::*;
 #[derive(Clone)]
 enum Rows {
@@ -46,10 +46,14 @@ pub fn TenantKeys() -> Element {
         .read()
         .as_ref()
         .is_some_and(|u| u.can_manage_api_keys());
-    rsx! {if let Some(scope)=WorkspaceScope::from_stores(auth,users).filter(|_|allowed){for key in [format!("{scope:?}")]{KeyWorkspace{key:"{key}",scope}}}else{p{role:"alert",{i18n.t("tenant.admin_required")}}}}
+    rsx! {if let Some(scope)=WorkspaceScope::from_stores(auth,users).filter(|_|allowed){for key in [format!("{scope:?}")]{KeyWorkspace{key:"{key}",scope,embedded:false}}}else{p{role:"alert",{i18n.t("tenant.admin_required")}}}}
 }
 #[component]
-fn KeyWorkspace(scope: WorkspaceScope) -> Element {
+pub(crate) fn PlatformTenantKeys(scope: WorkspaceScope) -> Element {
+    rsx! { KeyWorkspace { scope, embedded: true } }
+}
+#[component]
+fn KeyWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let i18n = use_i18n();
@@ -65,7 +69,7 @@ fn KeyWorkspace(scope: WorkspaceScope) -> Element {
             let result = common::read(auth, users, scope, move |token| {
                 let q = q.clone();
                 async move {
-                    let api = TenantKeyApi::new(&get_client(), scope.tenant_id)?;
+                    let api = scope.key_api()?;
                     match q.tab {
                         Tab::Keys => api
                             .list(
@@ -96,15 +100,20 @@ fn KeyWorkspace(scope: WorkspaceScope) -> Element {
         data(),
     );
     rsx! {div{class:"page-container tenant-key-admin",
-        ui::PageHeader{title:i18n.t("tenant_keys.title").to_string(),description:i18n.t("tenant_keys.hint").to_string()}
-        WorkspaceLinks{}
-        WorkspaceContext{note:i18n.t("tenant_keys.metadata_only").to_string()}
+        if !embedded {
+            ui::PageHeader{title:i18n.t("tenant_keys.title").to_string(),description:i18n.t("tenant_keys.hint").to_string()}
+            WorkspaceLinks{}
+            WorkspaceContext{note:i18n.t("tenant_keys.metadata_only").to_string()}
+        } else {
+            h2 { class: "section-title", {i18n.t("tenant_keys.title")} }
+            p { class: "text-secondary", {i18n.t("tenant_keys.metadata_only")} }
+        }
         div{class:"tenant-key-actions",
             nav{class:"segmented-control",aria_label:i18n.t("tenant_keys.title"),
                 button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Keys,onclick:move |_|{query.write().tab=Tab::Keys;query.write().page=1;operation.set(None);},{i18n.t("tenant_keys.keys")}}
                 button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Pending,onclick:move |_|{query.write().tab=Tab::Pending;query.write().page=1;operation.set(None);},{i18n.t("tenant_keys.pending")}}
             }
-            Link{class:"btn btn-ghost",to:Route::OwnerKeyIssuance{},{i18n.t("tenant_keys.my_requests")}}
+            if !embedded { Link{class:"btn btn-ghost",to:Route::OwnerKeyIssuance{},{i18n.t("tenant_keys.my_requests")}} }
             button{class:"btn btn-primary",onclick:move |_|operation.set(Some(Operation::Request)),{i18n.t("tenant_keys.request")}}
         }
         section{class:"filter-panel",aria_label:i18n.t("tenant_keys.filter"),

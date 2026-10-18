@@ -17,7 +17,7 @@ pub struct Page<T> {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TenantContext {
     pub id: Uuid,
-    pub owner_user_id: Uuid,
+    pub owner_user_id: Option<Uuid>,
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
@@ -193,6 +193,16 @@ impl TenantControlApi {
             base: format!("/api/v1/tenants/{tenant_id}"),
         })
     }
+
+    /// Explicit platform-target administration. This does not select the
+    /// tenant or create a membership for the root/operator session.
+    pub fn platform_tenant(client: &ApiClient, tenant_id: Uuid) -> Result<Self> {
+        real_id(tenant_id)?;
+        Ok(Self {
+            client: client.clone(),
+            base: format!("/api/v1/platform/tenants/{tenant_id}/control"),
+        })
+    }
     async fn command<T: DeserializeOwned, B: Serialize>(
         &self,
         method: Method,
@@ -220,6 +230,16 @@ impl TenantControlApi {
         search: Option<&str>,
         token: &str,
     ) -> Result<Page<TenantMember>> {
+        self.members_filtered(page, size, search, None, token).await
+    }
+    pub async fn members_filtered(
+        &self,
+        page: u32,
+        size: u32,
+        search: Option<&str>,
+        status: Option<MembershipStatus>,
+        token: &str,
+    ) -> Result<Page<TenantMember>> {
         let mut path = format!("{}/members?{}", self.base, page_query(page, size)?);
         if let Some(search) = search.filter(|s| !s.trim().is_empty()) {
             if search.len() > 255 {
@@ -230,7 +250,29 @@ impl TenantControlApi {
                 super::common::encode_query_value(search)
             ));
         }
-        self.client.get_json_fresh(&path, Some(token)).await
+        if let Some(status) = status {
+            path.push_str("&status=");
+            path.push_str(status.as_str());
+        }
+        let out: Page<TenantMember> = self.client.get_json_fresh(&path, Some(token)).await?;
+        let expected_pages =
+            out.total / i64::from(size) + i64::from(out.total % i64::from(size) != 0);
+        if out.page != i64::from(page)
+            || out.page_size != i64::from(size)
+            || out.total < 0
+            || out.total_pages != expected_pages
+            || out.items.len() > size as usize
+            || out.items.len() as i64 > out.total
+            || out.items.iter().any(|member| {
+                member.user_id.is_nil()
+                    || status.is_some_and(|expected| member.membership_status != expected)
+            })
+        {
+            return Err(ClientError::InvalidResponse(
+                "Invalid tenant member page".into(),
+            ));
+        }
+        Ok(out)
     }
     pub async fn member(&self, user_id: Uuid, token: &str) -> Result<TenantMember> {
         real_id(user_id)?;

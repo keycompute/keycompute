@@ -74,18 +74,26 @@ pub fn TenantSettings() -> Element {
     let epoch = (auth.state)().session_id;
     let scope = WorkspaceScope::from_stores(auth, users);
     let key = format!("{epoch}:{scope:?}");
-    rsx! { for identity in [key] { TenantSettingsPage { key: "{identity}" } } }
+    rsx! {
+        if let Some(scope) = scope {
+            for identity in [key] { TenantSettingsPage { key: "{identity}", scope, embedded: false } }
+        }
+    }
 }
 
 #[component]
-fn TenantSettingsPage() -> Element {
+pub(crate) fn PlatformTenantSettings(scope: WorkspaceScope) -> Element {
+    rsx! { TenantSettingsPage { scope, embedded: true } }
+}
+
+#[component]
+fn TenantSettingsPage(scope: WorkspaceScope, embedded: bool) -> Element {
     let i18n = use_i18n();
     let auth = use_context::<AuthStore>();
     let mut users = use_context::<UserStore>();
     let mut ui = use_context::<UiStore>();
     let shared_dirty = use_context::<WorkspaceDraftState>();
     let draft_owner = use_hook(Uuid::new_v4);
-    let scope = WorkspaceScope::from_stores(auth, users);
     let mut saving = use_signal(|| false);
     let mut error = use_signal(String::new);
     let mut draft = use_signal(ConfigDraft::default);
@@ -93,21 +101,12 @@ fn TenantSettingsPage() -> Element {
     let mut pending = use_signal(|| None::<TenantPatch>);
     use_drop(move || shared_dirty.set(draft_owner, false));
 
-    let mut context = use_resource(move || {
-        let scope = WorkspaceScope::from_stores(auth, users);
-        async move {
-            let result = if let Some(scope) = scope {
-                common::read(auth, users, scope, move |token| async move {
-                    scope.api()?.context(&token).await
-                })
-                .await
-            } else {
-                Err(ClientError::Forbidden(
-                    "selected membership required".into(),
-                ))
-            };
-            KeyedResourceValue::new(scope, result)
-        }
+    let mut context = use_resource(move || async move {
+        let result = common::read(auth, users, scope, move |token| async move {
+            scope.api()?.context(&token).await
+        })
+        .await;
+        KeyedResourceValue::new(scope, result)
     });
     let loaded = current_keyed_value(&scope, context.state().cloned(), context());
     let current = loaded
@@ -115,7 +114,6 @@ fn TenantSettingsPage() -> Element {
         .and_then(|value| value.as_ref().ok())
         .cloned();
     use_effect(move || {
-        let scope = WorkspaceScope::from_stores(auth, users);
         let loaded = current_keyed_value(&scope, context.state().cloned(), context());
         if let Some(Ok(value)) = loaded
             && !dirty()
@@ -134,8 +132,7 @@ fn TenantSettingsPage() -> Element {
         if saving() {
             return;
         }
-        let (Some(scope), Some(body)) = (WorkspaceScope::from_stores(auth, users), pending())
-        else {
+        let Some(body) = pending() else {
             return;
         };
         saving.set(true);
@@ -152,7 +149,9 @@ fn TenantSettingsPage() -> Element {
             pending.set(None);
             match result {
                 Ok(row) => {
-                    if let Some(user) = users.info.write().as_mut() {
+                    if !scope.is_platform_target()
+                        && let Some(user) = users.info.write().as_mut()
+                    {
                         user.sync_tenant_display(
                             &row.id.to_string(),
                             row.name.as_str(),
@@ -180,9 +179,14 @@ fn TenantSettingsPage() -> Element {
 
     rsx! {
         div { class: "page-container tenant-workspace tenant-settings",
-            ui::PageHeader { title: i18n.t("tenant.settings").to_string(), description: i18n.t("tenant.settings_hint").to_string() }
-            WorkspaceLinks {}
-            WorkspaceContext {}
+            if !embedded {
+                ui::PageHeader { title: i18n.t("tenant.settings").to_string(), description: i18n.t("tenant.settings_hint").to_string() }
+                WorkspaceLinks {}
+                WorkspaceContext {}
+            } else {
+                h2 { class: "section-title", {i18n.t("tenant.settings")} }
+                p { class: "text-secondary", {i18n.t("tenant.settings_hint")} }
+            }
             if !error().is_empty() { div { class: "alert alert-error", role: "alert", "{error}" } }
             if let Some(value) = current {
                 section { class: "section", aria_label: i18n.t("tenant.settings"),
@@ -190,7 +194,11 @@ fn TenantSettingsPage() -> Element {
                     div { class: "section-body tenant-settings-form",
                         div { class: "tenant-settings-owner",
                             span { class: "tenant-settings-owner-label", {i18n.t("tenant.owner_id")} }
-                            TechnicalId { value: value.owner_user_id.to_string() }
+                            if let Some(owner_user_id) = value.owner_user_id {
+                                TechnicalId { value: owner_user_id.to_string() }
+                            } else {
+                                span { class: "text-secondary", {i18n.t("tenant.owner_unassigned")} }
+                            }
                         }
                         div { class: "form-field",
                             label { class: "form-label", r#for: "tenant-name", {i18n.t("tenants.name")} }

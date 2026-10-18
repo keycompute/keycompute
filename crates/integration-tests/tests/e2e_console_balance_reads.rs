@@ -10,7 +10,7 @@ use integration_tests::{
     db::{TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_billing::balance::BalanceService;
-use keycompute_db::{DbError, DbRouter, Tenant, User, UserBalance};
+use keycompute_db::{DbError, DbRouter, User, UserBalance};
 use keycompute_server::{AppState, create_router};
 use keycompute_types::{TenantRole, TenantScope};
 use rust_decimal::Decimal;
@@ -26,7 +26,7 @@ fn money(value: &serde_json::Value, field: &str) -> Decimal {
 struct Fixture {
     pool: DatabaseConnection,
     guard: TestDataGuard,
-    tenant: Tenant,
+    tenant: integration_tests::db::OwnedTenant,
     user: TenantActor,
     service: BalanceService,
     app: Router,

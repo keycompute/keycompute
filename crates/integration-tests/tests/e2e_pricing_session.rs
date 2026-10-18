@@ -17,7 +17,7 @@ use uuid::Uuid;
 struct Fixture {
     db: DatabaseConnection,
     state: AppState,
-    target: Tenant,
+    target: integration_tests::db::OwnedTenant,
     root: Uuid,
     database_url: String,
 }

@@ -14,7 +14,10 @@ use super::{
 };
 use crate::DbError;
 use chrono::{DateTime, Duration, Utc};
-use keycompute_types::{AuditResult, AuditScopeType, CredentialKind, TenantRole, TenantScope};
+use keycompute_types::{
+    AuditResult, AuditScopeType, CredentialKind, MembershipStatus, PlatformScope, TenantRole,
+    TenantScope,
+};
 use rand::RngCore;
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
@@ -148,6 +151,14 @@ fn member(memberships: &[TenantMembership], user_id: Uuid) -> Option<&TenantMemb
     memberships.iter().find(|member| member.user_id == user_id)
 }
 
+/// Removed memberships are retained as immutable history. They no longer
+/// establish tenant authority and therefore must not suppress the implicit
+/// tenant-admin authority of a platform root or operator.
+fn has_current_membership(memberships: &[TenantMembership], user_id: Uuid) -> bool {
+    member(memberships, user_id)
+        .is_some_and(|membership| membership.status != MembershipStatus::Removed.as_str())
+}
+
 fn user(users: &[User], user_id: Uuid) -> Option<&User> {
     users.iter().find(|user| user.id == user_id)
 }
@@ -160,12 +171,16 @@ async fn lock_issuance_authority(
     related_users: &[Uuid],
     require_admin: bool,
 ) -> Result<LockedAuthority, DbError> {
+    let platform_actor =
+        audit.actor_platform_role.is_platform_admin() && audit.actor_tenant_role.is_none();
     if audit.actor_user_id != scope.user_id()
         || audit.credential_kind != CredentialKind::Jwt
         || scope.tenant_id().is_nil()
-        || snapshot.tenant_authz_version <= 0
-        || snapshot.membership_authz_version <= 0
         || snapshot.token_version < 0
+        || (platform_actor
+            && (snapshot.tenant_authz_version != 0 || snapshot.membership_authz_version != 0))
+        || (!platform_actor
+            && (snapshot.tenant_authz_version <= 0 || snapshot.membership_authz_version <= 0))
     {
         return Err(invalid("current JWT tenant authority required"));
     }
@@ -174,7 +189,7 @@ async fn lock_issuance_authority(
         .await?
         .filter(|tenant| tenant.is_active())
         .ok_or_else(|| invalid("active tenant required"))?;
-    if tenant.authz_version != snapshot.tenant_authz_version {
+    if !platform_actor && tenant.authz_version != snapshot.tenant_authz_version {
         return Err(conflict("tenant authorization changed"));
     }
     let mut ids = Vec::with_capacity(1 + related_users.len());
@@ -184,17 +199,6 @@ async fn lock_issuance_authority(
     ids.dedup();
     if ids.iter().any(Uuid::is_nil) {
         return Err(invalid("real user IDs are required"));
-    }
-
-    // Reject foreign selectors before acquiring locks on global identity rows.
-    // The identity administration fence keeps these membership identities stable.
-    let members = tx.query_one(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "SELECT COUNT(*)::BIGINT AS count FROM tenant_memberships WHERE tenant_id=$1 AND user_id=ANY($2)",
-        [tenant.id.into(), ids.clone().into()],
-    )).await?.ok_or_else(|| invalid("tenant memberships are required"))?;
-    if members.try_get::<i64>("", "count")? != ids.len() as i64 {
-        return Err(invalid("tenant memberships are required"));
     }
 
     let users = User::find_by_statement(Statement::from_sql_and_values(
@@ -215,34 +219,43 @@ async fn lock_issuance_authority(
     ))
     .all(tx)
     .await?;
-    if memberships.len() != ids.len() {
-        return Err(invalid("tenant memberships are required"));
-    }
     let actor_user = users
         .iter()
         .find(|user| user.id == scope.user_id())
         .filter(|user| user.status == "active" && user.token_version == snapshot.token_version)
         .ok_or_else(|| conflict("user authorization changed"))?;
-    let actor_membership = memberships
-        .iter()
-        .find(|membership| membership.user_id == scope.user_id())
-        .filter(|membership| {
-            membership.status == "active"
-                && membership.authz_version == snapshot.membership_authz_version
-        })
-        .ok_or_else(|| conflict("membership authorization changed"))?;
-    let role = actor_membership.tenant_role()?;
-    if role != scope.tenant_role() || (require_admin && role != TenantRole::Admin) {
-        return Err(invalid("tenant administrator membership required"));
-    }
-    Ok(LockedAuthority {
-        tenant_id: tenant.id,
-        tenant_authz_version: tenant.authz_version,
-        actor: AuditContext {
+    let actor = if platform_actor {
+        if actor_user.platform_role()? != audit.actor_platform_role
+            || !actor_user.platform_role()?.is_platform_admin()
+            || has_current_membership(&memberships, scope.user_id())
+            || scope.tenant_role() != TenantRole::Admin
+        {
+            return Err(conflict("platform authorization changed"));
+        }
+        *audit
+    } else {
+        let actor_membership = memberships
+            .iter()
+            .find(|membership| membership.user_id == scope.user_id())
+            .filter(|membership| {
+                membership.status == "active"
+                    && membership.authz_version == snapshot.membership_authz_version
+            })
+            .ok_or_else(|| conflict("membership authorization changed"))?;
+        let role = actor_membership.tenant_role()?;
+        if role != scope.tenant_role() || (require_admin && role != TenantRole::Admin) {
+            return Err(invalid("tenant administrator membership required"));
+        }
+        AuditContext {
             actor_platform_role: actor_user.platform_role()?,
             actor_tenant_role: Some(role),
             ..*audit
-        },
+        }
+    };
+    Ok(LockedAuthority {
+        tenant_id: tenant.id,
+        tenant_authz_version: tenant.authz_version,
+        actor,
         users,
         memberships,
     })
@@ -262,7 +275,11 @@ async fn append_intent_audit(
 ) -> Result<(), DbError> {
     TenantAuditEvent::append(
         tx,
-        AuditScopeType::Tenant,
+        if actor.actor_platform_role.is_platform_admin() && actor.actor_tenant_role.is_none() {
+            AuditScopeType::Platform
+        } else {
+            AuditScopeType::Tenant
+        },
         Some(tenant_id),
         actor,
         action,
@@ -314,11 +331,22 @@ async fn request_intent_in_tx(
     let requester = user(users, authority.actor.actor_user_id)
         .filter(|user| user.status == "active")
         .ok_or_else(|| invalid("active requester required"))?;
-    let requester_membership = member(memberships, authority.actor.actor_user_id)
-        .filter(|membership| {
-            membership.status == "active" && membership.tenant_role == TenantRole::Admin.as_str()
-        })
-        .ok_or_else(|| invalid("tenant administrator membership required"))?;
+    let requester_authz_version = if authority.actor.actor_platform_role.is_platform_admin()
+        && authority.actor.actor_tenant_role.is_none()
+    {
+        if requester.platform_role()? != authority.actor.actor_platform_role {
+            return Err(invalid("current platform administrator required"));
+        }
+        0
+    } else {
+        member(memberships, authority.actor.actor_user_id)
+            .filter(|membership| {
+                membership.status == "active"
+                    && membership.tenant_role == TenantRole::Admin.as_str()
+            })
+            .ok_or_else(|| invalid("tenant administrator membership required"))?
+            .authz_version
+    };
 
     if let Some(replaces_key_id) = replaces_key_id {
         let pending = KeyIssuanceIntent::find_by_statement(Statement::from_sql_and_values(
@@ -350,7 +378,7 @@ async fn request_intent_in_tx(
                 .await?;
             } else if pending.requested_by_user_id == requester.id
                 && pending.requested_by_token_version == requester.token_version
-                && pending.requested_by_authz_version == requester_membership.authz_version
+                && pending.requested_by_authz_version == requester_authz_version
                 && pending.owner_token_version == owner.token_version
                 && pending.owner_authz_version == owner_membership.authz_version
                 && pending.tenant_authz_version == authority.tenant_authz_version
@@ -405,7 +433,7 @@ async fn request_intent_in_tx(
             requested_expires_at.into(),
             (now + Duration::seconds(KEY_ISSUANCE_TTL_SECONDS)).into(),
             requester.token_version.into(),
-            requester_membership.authz_version.into(),
+            requester_authz_version.into(),
             owner.token_version.into(),
             owner_membership.authz_version.into(),
             authority.tenant_authz_version.into(),
@@ -572,12 +600,13 @@ pub async fn list_in_tenant(
              WHERE i.tenant_id=$1 AND i.status='pending' AND i.expires_at>NOW()
                AND ($2::uuid IS NULL OR i.owner_user_id=$2)
                AND EXISTS (
-                   SELECT 1 FROM tenant_memberships m
-                   JOIN users u ON u.id=m.user_id
-                   JOIN tenants t ON t.id=m.tenant_id
-                   WHERE m.tenant_id=$1 AND m.user_id=$3
-                     AND m.status='active' AND m.tenant_role='admin'
-                     AND u.status='active' AND t.status='active'
+                   SELECT 1 FROM users u JOIN tenants t ON t.id=$1
+                   WHERE u.id=$3 AND u.status='active' AND t.status='active'
+                     AND (u.platform_role IN ('root','operator') OR EXISTS (
+                         SELECT 1 FROM tenant_memberships m
+                         WHERE m.tenant_id=$1 AND m.user_id=u.id
+                           AND m.status='active' AND m.tenant_role='admin'
+                     ))
                )
              ORDER BY i.created_at DESC,i.id DESC LIMIT $4 OFFSET $5",
                 intent_columns()
@@ -613,12 +642,13 @@ pub async fn count_in_tenant(
          WHERE i.tenant_id=$1 AND i.status='pending' AND i.expires_at>NOW()
            AND ($2::uuid IS NULL OR i.owner_user_id=$2)
            AND EXISTS (
-               SELECT 1 FROM tenant_memberships m
-               JOIN users u ON u.id=m.user_id
-               JOIN tenants t ON t.id=m.tenant_id
-               WHERE m.tenant_id=$1 AND m.user_id=$3
-                 AND m.status='active' AND m.tenant_role='admin'
-                 AND u.status='active' AND t.status='active'
+               SELECT 1 FROM users u JOIN tenants t ON t.id=$1
+               WHERE u.id=$3 AND u.status='active' AND t.status='active'
+                 AND (u.platform_role IN ('root','operator') OR EXISTS (
+                     SELECT 1 FROM tenant_memberships m
+                     WHERE m.tenant_id=$1 AND m.user_id=u.id
+                       AND m.status='active' AND m.tenant_role='admin'
+                 ))
            )",
         [
             scope.tenant_id().into(),
@@ -774,9 +804,14 @@ pub async fn update_key(
     let tx = begin(db).await?;
     let result =
         async {
-            let candidate = ProduceAiKey::find_in_tenant(&tx, scope, key_id)
-                .await?
-                .ok_or_else(|| DbError::not_found("ProduceAiKey", key_id))?;
+            let candidate = ProduceAiKey::find_by_statement(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT * FROM produce_ai_keys WHERE tenant_id=$1 AND id=$2",
+                [scope.tenant_id().into(), key_id.into()],
+            ))
+            .one(&tx)
+            .await?
+            .ok_or_else(|| DbError::not_found("ProduceAiKey", key_id))?;
             let authority =
                 lock_issuance_authority(&tx, scope, snapshot, actor, &[candidate.user_id], true)
                     .await?;
@@ -817,7 +852,13 @@ pub async fn update_key(
             })?;
             TenantAuditEvent::append(
                 &tx,
-                AuditScopeType::Tenant,
+                if authority.actor.actor_platform_role.is_platform_admin()
+                    && authority.actor.actor_tenant_role.is_none()
+                {
+                    AuditScopeType::Platform
+                } else {
+                    AuditScopeType::Tenant
+                },
                 Some(scope.tenant_id()),
                 &authority.actor,
                 "key.update",
@@ -846,7 +887,36 @@ pub async fn remove_key(
     let tx = begin(db).await?;
     let result = async {
         let authority = revalidate_admin(&tx, scope, snapshot, actor).await?;
-        let result = if revoke_only {
+        let result = if authority.actor.actor_platform_role.is_platform_admin()
+            && authority.actor.actor_tenant_role.is_none()
+        {
+            let platform = PlatformScope::checked(
+                authority.actor.actor_user_id,
+                authority.actor.actor_platform_role,
+            )
+            .map_err(DbError::Other)?;
+            if revoke_only {
+                ProduceAiKey::revoke_platform(
+                    &tx,
+                    platform,
+                    authority.tenant_id,
+                    key_id,
+                    &authority.actor,
+                    "platform tenant key revocation",
+                )
+                .await?
+            } else {
+                ProduceAiKey::remove_platform(
+                    &tx,
+                    platform,
+                    authority.tenant_id,
+                    key_id,
+                    &authority.actor,
+                    "platform tenant key removal",
+                )
+                .await?
+            }
+        } else if revoke_only {
             ProduceAiKey::revoke_in_tenant(&tx, scope, key_id, &authority.actor).await?
         } else {
             ProduceAiKey::remove_in_tenant(&tx, scope, key_id, &authority.actor).await?
@@ -925,14 +995,21 @@ async fn claim_in_tx_inner(
 
     let requester_user = user(&authority.users, intent.requested_by_user_id)
         .ok_or_else(|| conflict("the requesting administrator is unavailable"))?;
-    let requester_membership = member(&authority.memberships, intent.requested_by_user_id)
-        .ok_or_else(|| conflict("the requesting administrator is no longer a member"))?;
-    if requester_user.status != "active"
-        || requester_membership.status != "active"
-        || requester_membership.tenant_role != TenantRole::Admin.as_str()
-        || requester_user.token_version != intent.requested_by_token_version
-        || requester_membership.authz_version != intent.requested_by_authz_version
-    {
+    let requester_authorized = if intent.requested_by_authz_version == 0 {
+        requester_user.status == "active"
+            && requester_user.platform_role()?.is_platform_admin()
+            && requester_user.token_version == intent.requested_by_token_version
+            && !has_current_membership(&authority.memberships, intent.requested_by_user_id)
+    } else {
+        member(&authority.memberships, intent.requested_by_user_id).is_some_and(|membership| {
+            membership.status == "active"
+                && membership.tenant_role == TenantRole::Admin.as_str()
+                && membership.authz_version == intent.requested_by_authz_version
+                && requester_user.status == "active"
+                && requester_user.token_version == intent.requested_by_token_version
+        })
+    };
+    if !requester_authorized {
         return Err(conflict(
             "the requesting administrator authority changed; request a new key",
         ));
@@ -1084,5 +1161,45 @@ async fn finish<T>(tx: DatabaseTransaction, result: Result<T, DbError>) -> Resul
             tx.rollback().await?;
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TenantMembership, has_current_membership};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn membership(user_id: Uuid, status: &str) -> TenantMembership {
+        let now = Utc::now();
+        TenantMembership {
+            tenant_id: Uuid::new_v4(),
+            user_id,
+            tenant_role: "member".into(),
+            status: status.into(),
+            invited_by: None,
+            joined_at: now,
+            removed_at: (status == "removed").then_some(now),
+            authz_version: 1,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn removed_membership_is_history_not_current_authority() {
+        let active = Uuid::new_v4();
+        let suspended = Uuid::new_v4();
+        let removed = Uuid::new_v4();
+        let memberships = vec![
+            membership(active, "active"),
+            membership(suspended, "suspended"),
+            membership(removed, "removed"),
+        ];
+
+        assert!(has_current_membership(&memberships, active));
+        assert!(has_current_membership(&memberships, suspended));
+        assert!(!has_current_membership(&memberships, removed));
+        assert!(!has_current_membership(&memberships, Uuid::new_v4()));
     }
 }

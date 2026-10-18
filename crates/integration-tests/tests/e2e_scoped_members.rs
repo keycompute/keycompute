@@ -21,7 +21,13 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 fn scope(t: &Tenant) -> TenantScope {
-    TenantScope::checked(t.id, t.owner_user_id, TenantRole::Admin).unwrap()
+    TenantScope::checked(
+        t.id,
+        t.owner_user_id
+            .expect("member fixture tenant must have an owner"),
+        TenantRole::Admin,
+    )
+    .unwrap()
 }
 fn actor(id: Uuid) -> AuditContext {
     AuditContext {
@@ -56,7 +62,10 @@ async fn add(db: &DatabaseConnection, t: &Tenant, user: Uuid, role: TenantRole) 
             user_id: user,
             tenant_role: role,
         },
-        &actor(t.owner_user_id),
+        &actor(
+            t.owner_user_id
+                .expect("member fixture tenant must have an owner"),
+        ),
     )
     .await
     .unwrap();

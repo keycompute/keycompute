@@ -10,7 +10,7 @@ use axum::{
 };
 use integration_tests::{
     common::generate_test_id,
-    db::{TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{OwnedTenant, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_db::{DbRouter, Tenant, TenantMembership, User};
 use keycompute_server::{AppState, create_router};
@@ -24,7 +24,7 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    tenant: Tenant,
+    tenant: OwnedTenant,
     owner: User,
     member: User,
     owner_token: String,

@@ -13,7 +13,9 @@ use uuid::Uuid;
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct Tenant {
     pub id: Uuid,
-    pub owner_user_id: Uuid,
+    /// Assigned ordinary owner. Platform-provisioned tenants may be ownerless
+    /// until access is granted later.
+    pub owner_user_id: Option<Uuid>,
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
@@ -158,11 +160,27 @@ SELECT
 const TENANT_ACCOUNT_LOCK_SQL: &str =
     "SELECT id FROM accounts WHERE tenant_id = $1 ORDER BY id FOR UPDATE";
 
+fn valid_create_request(req: &CreateTenantRequest) -> bool {
+    let slug = req.slug.trim();
+    !req.name.trim().is_empty()
+        && req.name.len() <= 255
+        && !slug.is_empty()
+        && slug.len() <= 100
+        && slug == req.slug
+        && slug
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !slug.starts_with('-')
+        && !slug.ends_with('-')
+        && req.default_rpm_limit.is_none_or(|limit| limit >= 0)
+        && req.default_tpm_limit.is_none_or(|limit| limit >= 0)
+}
+
 impl Tenant {
-    /// Create an organization and its owner membership in one transaction.
-    /// Platform/system credentials are only accepted for an explicit self-owned tenant
-    /// provisioning operation.  Registration and server startup never call
-    /// this method implicitly.
+    /// Create an organization and its ordinary owner membership in one transaction.
+    /// A platform administrator may provision on behalf of that owner, but a
+    /// platform identity is never persisted as the owner or as a tenant member.
+    /// Registration and server startup never call this method implicitly.
     pub async fn create_owned(
         tx: &DatabaseTransaction,
         req: &CreateTenantRequest,
@@ -171,20 +189,7 @@ impl Tenant {
     ) -> Result<Tenant, DbError> {
         lock_identity_admin(tx).await?;
         let slug = req.slug.trim();
-        if owner_user_id.is_nil()
-            || req.name.trim().is_empty()
-            || req.name.len() > 255
-            || slug.is_empty()
-            || slug.len() > 100
-            || slug != req.slug
-            || !slug
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            || slug.starts_with('-')
-            || slug.ends_with('-')
-            || req.default_rpm_limit.is_some_and(|limit| limit < 0)
-            || req.default_tpm_limit.is_some_and(|limit| limit < 0)
-        {
+        if owner_user_id.is_nil() || !valid_create_request(req) {
             return Err(DbError::Other(
                 "invalid tenant owner, name, slug or limits".into(),
             ));
@@ -197,7 +202,7 @@ impl Tenant {
             let owner = super::user::User::find_by_id(tx, owner_user_id)
                 .await?
                 .filter(|user| user.status == "active")
-                .ok_or_else(|| DbError::Other("active tenant owner required".into()))?;
+                .ok_or_else(|| DbError::Other("tenant_owner_not_eligible".into()))?;
             AuditContext {
                 actor_platform_role: owner.platform_role()?,
                 actor_tenant_role: None,
@@ -209,7 +214,7 @@ impl Tenant {
         super::user::User::find_by_id_for_no_key_update(tx, owner_user_id)
             .await?
             .filter(|user| user.status == "active" && user.platform_role == "none")
-            .ok_or_else(|| DbError::Other("active tenant owner required".into()))?;
+            .ok_or_else(|| DbError::Other("tenant_owner_not_eligible".into()))?;
         let tenant = Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "INSERT INTO tenants(owner_user_id,name,slug,description,default_rpm_limit,default_tpm_limit) VALUES($1,$2,$3,$4,COALESCE($5,60),COALESCE($6,100000)) RETURNING *",
@@ -242,6 +247,48 @@ impl Tenant {
         Ok(tenant)
     }
 
+    /// Provision a tenant without assigning an ordinary owner or membership.
+    /// The platform actor keeps implicit authority through its global role and
+    /// can grant tenant access later.
+    pub async fn create_unowned(
+        tx: &DatabaseTransaction,
+        req: &CreateTenantRequest,
+        actor: &AuditContext,
+    ) -> Result<Tenant, DbError> {
+        lock_identity_admin(tx).await?;
+        if !valid_create_request(req) {
+            return Err(DbError::Other("invalid tenant name, slug or limits".into()));
+        }
+        let actor = actor.require_platform_admin(tx).await?;
+        let tenant = Self::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO tenants(owner_user_id,name,slug,description,default_rpm_limit,default_tpm_limit) VALUES(NULL,$1,$2,$3,COALESCE($4,60),COALESCE($5,100000)) RETURNING *",
+            [
+                req.name.trim().into(),
+                req.slug.trim().into(),
+                req.description.clone().into(),
+                req.default_rpm_limit.into(),
+                req.default_tpm_limit.into(),
+            ],
+        ))
+        .one(tx)
+        .await?
+        .ok_or_else(|| DbError::Other("tenant insert returned no row".into()))?;
+        TenantAuditEvent::append(
+            tx,
+            AuditScopeType::Platform,
+            Some(tenant.id),
+            &actor,
+            "tenant.create",
+            "tenant",
+            Some(&tenant.id.to_string()),
+            AuditResult::Success,
+            serde_json::json!({"owner_user_id":null,"reason":"ownerless tenant created"}),
+        )
+        .await?;
+        Ok(tenant)
+    }
+
     /// The existing owner transfers ownership only to another active admin.
     pub async fn transfer_ownership(
         tx: &DatabaseTransaction,
@@ -254,7 +301,7 @@ impl Tenant {
         let tenant = Self::find_by_id(tx, tenant_id)
             .await?
             .ok_or_else(|| DbError::not_found("Tenant", tenant_id))?;
-        if tenant.owner_user_id != actor.actor_user_id {
+        if tenant.owner_user_id != Some(actor.actor_user_id) {
             return Err(DbError::Other(
                 "only the tenant owner may transfer ownership".into(),
             ));

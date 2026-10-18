@@ -29,6 +29,38 @@ fn page(rows: Vec<Value>) -> Value {
     json!({"total":rows.len(),"items":rows,"page":1,"page_size":20,"total_pages":1})
 }
 #[tokio::test]
+async fn platform_reports_keep_the_explicit_tenant_in_the_path() {
+    let server = MockServer::start().await;
+    let tenant = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    let id = Uuid::new_v4();
+    let api = TenantReportingApi::platform_tenant(&client(&server), tenant).unwrap();
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/api/v1/platform/tenants/{tenant}/billing/records"
+        )))
+        .and(query_param("owner_user_id", owner.to_string()))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(page(vec![usage(tenant, owner, id)])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = api
+        .usage(
+            &ReportQuery {
+                owner_user_id: Some(owner),
+                ..Default::default()
+            },
+            &window(),
+            "global-console",
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.items[0].id, id);
+    assert!(TenantReportingApi::platform_tenant(&client(&server), Uuid::nil()).is_err());
+}
+#[tokio::test]
 async fn tenant_financial_reads_are_fresh_exact_and_metadata_only() {
     let s = MockServer::start().await;
     let t = Uuid::new_v4();

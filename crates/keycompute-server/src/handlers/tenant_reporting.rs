@@ -1,10 +1,10 @@
 //! Read-only tenant financial reporting with fixed scope and safe projections.
 use crate::{
-    console_session_proof::ConsoleSessionProof,
     error::{ApiError, Result},
     handlers::pagination::total_pages,
+    key_control_auth::finish_read_context,
     state::AppState,
-    tenant_access::TenantAdmin,
+    tenant_access::TenantAdministration,
 };
 use axum::{
     Json, Router,
@@ -19,7 +19,9 @@ use keycompute_db::{
     PaymentOrder, UserBalance, UserBalanceDisplaySnapshot,
     models::{
         payment_order::{PaymentOrderReportRow, PaymentOrderStatus},
-        usage_log::{CurrencyUsageStats, TenantUsageScope, UsageLogReportRow},
+        usage_log::{
+            CurrencyUsageStats, PlatformTenantUsageScope, TenantUsageScope, UsageLogReportRow,
+        },
     },
 };
 use serde::{Deserialize, Serialize};
@@ -127,15 +129,13 @@ fn validate_window(
     }
     Ok(())
 }
-fn scope(access: &TenantAdmin) -> Result<keycompute_types::TenantScope> {
+fn scope(access: &TenantAdministration) -> Result<keycompute_types::TenantScope> {
     access.require(AuthorizationAction::View)
 }
 // A delayed report is not allowed to publish under a revoked or regranted
 // original session. DAO ownership predicates remain mandatory and unchanged.
-async fn finish_read(state: &AppState, access: &TenantAdmin) -> Result<()> {
-    ConsoleSessionProof::from_console(access.auth())?
-        .verify_current(pool(state)?.write_conn())
-        .await
+async fn finish_read(state: &AppState, access: &TenantAdministration) -> Result<()> {
+    finish_read_context(pool(state)?.write_conn(), &access.authorization_context()).await
 }
 async fn private_report(mut response: Response) -> Response {
     response.headers_mut().insert(
@@ -148,44 +148,67 @@ async fn private_report(mut response: Response) -> Response {
     response
 }
 pub async fn list_usage(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     Query(q): Query<UsageQuery>,
 ) -> Result<Json<ReportPage<UsageLogReportRow>>> {
     access.require_path_tenant(path.tenant_id)?;
     validate_window(q.from, q.to, q.owner_user_id)?;
-    let usage = TenantUsageScope::new(scope(&access)?).map_err(db_error)?;
     let (number, size, offset) = pagination(q.page, q.page_size);
     let db = pool(&state)?.write_conn();
-    let rows = usage
-        .list_report(db, q.from, q.to, q.owner_user_id, size, offset)
-        .await
-        .map_err(db_error)?;
-    let total = usage
-        .count_report(db, q.from, q.to, q.owner_user_id)
-        .await
-        .map_err(db_error)?;
+    let (rows, total) = if let Some(platform) = access.platform_scope()? {
+        let usage = PlatformTenantUsageScope::new(platform, path.tenant_id).map_err(db_error)?;
+        (
+            usage
+                .list_report(db, q.from, q.to, q.owner_user_id, size, offset)
+                .await
+                .map_err(db_error)?,
+            usage
+                .count_report(db, q.from, q.to, q.owner_user_id)
+                .await
+                .map_err(db_error)?,
+        )
+    } else {
+        let usage = TenantUsageScope::new(scope(&access)?).map_err(db_error)?;
+        (
+            usage
+                .list_report(db, q.from, q.to, q.owner_user_id, size, offset)
+                .await
+                .map_err(db_error)?,
+            usage
+                .count_report(db, q.from, q.to, q.owner_user_id)
+                .await
+                .map_err(db_error)?,
+        )
+    };
     finish_read(&state, &access).await?;
     Ok(Json(page(rows, total, number, size)))
 }
 pub async fn get_usage(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
 ) -> Result<Json<UsageLogReportRow>> {
     access.require_path_tenant(path.tenant_id)?;
-    let usage = TenantUsageScope::new(scope(&access)?).map_err(db_error)?;
-    let row = usage
-        .find_report(pool(&state)?.write_conn(), path.id)
-        .await
-        .map_err(db_error)?
-        .ok_or_else(|| ApiError::NotFound("Usage record not found".into()))?;
+    let row = if let Some(platform) = access.platform_scope()? {
+        PlatformTenantUsageScope::new(platform, path.tenant_id)
+            .map_err(db_error)?
+            .find_report(pool(&state)?.write_conn(), path.id)
+            .await
+    } else {
+        TenantUsageScope::new(scope(&access)?)
+            .map_err(db_error)?
+            .find_report(pool(&state)?.write_conn(), path.id)
+            .await
+    }
+    .map_err(db_error)?
+    .ok_or_else(|| ApiError::NotFound("Usage record not found".into()))?;
     finish_read(&state, &access).await?;
     Ok(Json(row))
 }
 pub async fn usage_stats(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     Query(q): Query<StatsQuery>,
@@ -197,16 +220,28 @@ pub async fn usage_stats(
         .or_else(|| to.checked_sub_signed(Duration::days(30)))
         .ok_or_else(|| ApiError::BadRequest("report time range is invalid".into()))?;
     validate_window(Some(from), Some(to), q.owner_user_id)?;
-    let usage = TenantUsageScope::new(scope(&access)?).map_err(db_error)?;
-    let currencies = usage
-        .currency_stats(
-            pool(&state)?.write_conn(),
-            Some(from),
-            Some(to),
-            q.owner_user_id,
-        )
-        .await
-        .map_err(db_error)?;
+    let currencies = if let Some(platform) = access.platform_scope()? {
+        PlatformTenantUsageScope::new(platform, path.tenant_id)
+            .map_err(db_error)?
+            .currency_stats(
+                pool(&state)?.write_conn(),
+                Some(from),
+                Some(to),
+                q.owner_user_id,
+            )
+            .await
+    } else {
+        TenantUsageScope::new(scope(&access)?)
+            .map_err(db_error)?
+            .currency_stats(
+                pool(&state)?.write_conn(),
+                Some(from),
+                Some(to),
+                q.owner_user_id,
+            )
+            .await
+    }
+    .map_err(db_error)?;
     finish_read(&state, &access).await?;
     Ok(Json(ReportTotals {
         from,
@@ -215,7 +250,7 @@ pub async fn usage_stats(
     }))
 }
 pub async fn list_payments(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     Query(q): Query<PaymentQuery>,
@@ -228,41 +263,77 @@ pub async fn list_payments(
     {
         return Err(ApiError::BadRequest("invalid payment status".into()));
     }
-    let scope = scope(&access)?;
     let (number, size, offset) = pagination(q.page, q.page_size);
     let db = pool(&state)?.write_conn();
-    let rows = PaymentOrder::list_report_in_tenant(
-        db,
-        scope,
-        q.status.as_deref(),
-        q.owner_user_id,
-        size,
-        offset,
-    )
-    .await
-    .map_err(db_error)?;
-    let total = PaymentOrder::count_in_tenant(db, scope, q.status.as_deref(), q.owner_user_id)
-        .await
-        .map_err(db_error)?;
+    let (rows, total) = if let Some(platform) = access.platform_scope()? {
+        (
+            PaymentOrder::list_report_platform_tenant(
+                db,
+                platform,
+                path.tenant_id,
+                q.status.as_deref(),
+                q.owner_user_id,
+                size,
+                offset,
+            )
+            .await
+            .map_err(db_error)?,
+            PaymentOrder::count_platform_tenant(
+                db,
+                platform,
+                path.tenant_id,
+                q.status.as_deref(),
+                q.owner_user_id,
+            )
+            .await
+            .map_err(db_error)?,
+        )
+    } else {
+        let tenant = scope(&access)?;
+        (
+            PaymentOrder::list_report_in_tenant(
+                db,
+                tenant,
+                q.status.as_deref(),
+                q.owner_user_id,
+                size,
+                offset,
+            )
+            .await
+            .map_err(db_error)?,
+            PaymentOrder::count_in_tenant(db, tenant, q.status.as_deref(), q.owner_user_id)
+                .await
+                .map_err(db_error)?,
+        )
+    };
     finish_read(&state, &access).await?;
     Ok(Json(page(rows, total, number, size)))
 }
 pub async fn get_payment(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
 ) -> Result<Json<PaymentOrderReportRow>> {
     access.require_path_tenant(path.tenant_id)?;
-    let row =
+    let row = if let Some(platform) = access.platform_scope()? {
+        PaymentOrder::find_report_platform_tenant(
+            pool(&state)?.write_conn(),
+            platform,
+            path.tenant_id,
+            path.id,
+        )
+        .await
+    } else {
         PaymentOrder::find_report_in_tenant(pool(&state)?.write_conn(), scope(&access)?, path.id)
             .await
-            .map_err(db_error)?
-            .ok_or_else(|| ApiError::NotFound("Payment order not found".into()))?;
+    }
+    .map_err(db_error)?
+    .ok_or_else(|| ApiError::NotFound("Payment order not found".into()))?;
     finish_read(&state, &access).await?;
     Ok(Json(row))
 }
 pub async fn get_balance(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<WalletPath>,
     State(state): State<AppState>,
 ) -> Result<Json<UserBalanceDisplaySnapshot>> {
@@ -270,12 +341,22 @@ pub async fn get_balance(
     if path.user_id.is_nil() {
         return Err(ApiError::NotFound("Wallet owner not found".into()));
     }
-    let mut rows = UserBalance::find_display_snapshots_in_tenant(
-        pool(&state)?.write_conn(),
-        scope(&access)?,
-        &[path.user_id],
-    )
-    .await
+    let mut rows = if let Some(platform) = access.platform_scope()? {
+        UserBalance::find_display_snapshots_platform(
+            pool(&state)?.write_conn(),
+            platform,
+            path.tenant_id,
+            &[path.user_id],
+        )
+        .await
+    } else {
+        UserBalance::find_display_snapshots_in_tenant(
+            pool(&state)?.write_conn(),
+            scope(&access)?,
+            &[path.user_id],
+        )
+        .await
+    }
     .map_err(db_error)?;
     finish_read(&state, &access).await?;
     Ok(Json(rows.remove(&path.user_id).ok_or_else(|| {
@@ -309,6 +390,42 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/tenants/{tenant_id}/balances/{user_id}",
+            get(get_balance),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/usage",
+            get(list_usage),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/usage/stats",
+            get(usage_stats),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/usage/{id}",
+            get(get_usage),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/billing/records",
+            get(list_usage),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/billing/records/{id}",
+            get(get_usage),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/billing/stats",
+            get(usage_stats),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/payments/orders",
+            get(list_payments),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/payments/orders/{id}",
+            get(get_payment),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/balances/{user_id}",
             get(get_balance),
         )
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))

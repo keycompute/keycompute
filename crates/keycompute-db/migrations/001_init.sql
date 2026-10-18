@@ -20,11 +20,19 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_normalized ON users(lower(btrim(email)));
 
 CREATE INDEX IF NOT EXISTS idx_users_platform_role ON users(platform_role);
+-- Root is a one-time bootstrap identity, never a role that can be granted.
+-- The partial unique index is the concurrency-safe database backstop; the
+-- application bootstrap additionally requires the identity store to be empty.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_single_root
+    ON users(platform_role) WHERE platform_role='root';
 
 -- tenants: 租户/组织表
 CREATE TABLE IF NOT EXISTS tenants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    -- Platform administrators may provision an empty tenant and grant access
+    -- later.  NULL means no ordinary tenant owner has been assigned; it never
+    -- means that the creating root/operator is a tenant member or owner.
+    owner_user_id UUID REFERENCES users(id) ON DELETE RESTRICT,
     name VARCHAR(255) NOT NULL,
     slug VARCHAR(100) NOT NULL UNIQUE,
     description TEXT,
@@ -57,7 +65,8 @@ CREATE TABLE IF NOT EXISTS tenants (
 CREATE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);
 CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
 
--- Tenant membership is the sole source of tenant role and tenant ownership.
+-- Membership is the sole source of persisted tenant roles and ordinary
+-- ownership. Platform administration remains implicit and is never stored here.
 CREATE TABLE IF NOT EXISTS tenant_memberships (
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
@@ -181,7 +190,7 @@ CREATE TABLE IF NOT EXISTS tenant_key_issuance_intents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     owner_user_id UUID NOT NULL,
-    requested_by_user_id UUID NOT NULL,
+    requested_by_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     replaces_key_id UUID,
     requested_name VARCHAR(255) NOT NULL,
     requested_expires_at TIMESTAMPTZ,
@@ -195,16 +204,14 @@ CREATE TABLE IF NOT EXISTS tenant_key_issuance_intents (
     created_key_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     requested_by_token_version INTEGER NOT NULL CHECK (requested_by_token_version >= 0),
-    requested_by_authz_version BIGINT NOT NULL CHECK (requested_by_authz_version > 0),
+    -- Tenant requesters snapshot their membership authz version. Platform
+    -- requesters have no membership and persist zero instead.
+    requested_by_authz_version BIGINT NOT NULL CHECK (requested_by_authz_version >= 0),
     owner_token_version INTEGER NOT NULL CHECK (owner_token_version >= 0),
     owner_authz_version BIGINT NOT NULL CHECK (owner_authz_version > 0),
     tenant_authz_version BIGINT NOT NULL CHECK (tenant_authz_version > 0),
     CONSTRAINT fk_key_issuance_owner_membership
         FOREIGN KEY (tenant_id, owner_user_id)
-        REFERENCES tenant_memberships(tenant_id, user_id)
-        ON DELETE CASCADE,
-    CONSTRAINT fk_key_issuance_requester_membership
-        FOREIGN KEY (tenant_id, requested_by_user_id)
         REFERENCES tenant_memberships(tenant_id, user_id)
         ON DELETE CASCADE,
     CONSTRAINT ck_key_issuance_name
@@ -2236,13 +2243,13 @@ CREATE TRIGGER membership_credentials_revoked AFTER UPDATE OF tenant_role,status
 CREATE OR REPLACE FUNCTION assert_identity_invariants() RETURNS TRIGGER AS $$
 BEGIN
     IF EXISTS (
-        SELECT 1 FROM tenants t WHERE NOT EXISTS (
+        SELECT 1 FROM tenants t WHERE t.owner_user_id IS NOT NULL AND NOT EXISTS (
             SELECT 1 FROM tenant_memberships m JOIN users owner_identity ON owner_identity.id=m.user_id
             WHERE m.tenant_id=t.id AND m.user_id=t.owner_user_id
               AND m.tenant_role='admin' AND m.status='active' AND owner_identity.status='active'
         )
     ) THEN
-        RAISE EXCEPTION 'tenant owner must be an active admin; last admin cannot be removed' USING ERRCODE='23514';
+        RAISE EXCEPTION 'an assigned tenant owner must be an active admin' USING ERRCODE='23514';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM users WHERE platform_role='root' AND status='active') THEN
         RAISE EXCEPTION 'at least one active root is required' USING ERRCODE='23514';
@@ -2261,6 +2268,9 @@ END; $$ LANGUAGE plpgsql;
 -- possible, but its authority and existence cannot be changed by any role.
 CREATE OR REPLACE FUNCTION protect_root_identity() RETURNS TRIGGER AS $$
 BEGIN
+    IF TG_OP='TRUNCATE' AND EXISTS (SELECT 1 FROM users WHERE platform_role='root') THEN
+        RAISE EXCEPTION 'root identity cannot be deleted' USING ERRCODE='23514';
+    END IF;
     IF TG_OP='DELETE' AND OLD.platform_role='root' THEN
         RAISE EXCEPTION 'root identity cannot be deleted' USING ERRCODE='23514';
     END IF;
@@ -2273,6 +2283,9 @@ END; $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS protected_root_identity ON users;
 CREATE TRIGGER protected_root_identity BEFORE UPDATE OF platform_role,status OR DELETE ON users
     FOR EACH ROW EXECUTE FUNCTION protect_root_identity();
+DROP TRIGGER IF EXISTS protected_root_truncate ON users;
+CREATE TRIGGER protected_root_truncate BEFORE TRUNCATE ON users
+    FOR EACH STATEMENT EXECUTE FUNCTION protect_root_identity();
 DROP TRIGGER IF EXISTS identity_users_guard ON users;
 CREATE CONSTRAINT TRIGGER identity_users_guard AFTER INSERT OR UPDATE OF platform_role,status OR DELETE ON users
     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION assert_identity_invariants();

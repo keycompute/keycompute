@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
  status TEXT, token_version INTEGER, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
 );
 CREATE TABLE IF NOT EXISTS tenants (
- id UUID, owner_user_id UUID NOT NULL, revision BIGINT NOT NULL,
+ id UUID, owner_user_id UUID, revision BIGINT NOT NULL,
  authz_version BIGINT NOT NULL,
  status TEXT CHECK(status IN ('active','inactive'))
 );
@@ -74,8 +74,8 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(self.issues(SCHEMA.replace("'admin','member'", "'root','admin','member'")))
         self.assertTrue(self.issues(SCHEMA.replace("'active','suspended','removed'", "'active','suspended','revoked'")))
 
-    def test_required_ownership_and_membership_primary_key(self):
-        self.assertTrue(self.issues(SCHEMA.replace('owner_user_id UUID NOT NULL', 'owner_user_id UUID')))
+    def test_optional_ownership_and_membership_primary_key(self):
+        self.assertTrue(self.issues(SCHEMA.replace('owner_user_id UUID,', 'owner_user_id UUID NOT NULL,')))
         self.assertTrue(self.issues(SCHEMA.replace('PRIMARY KEY(tenant_id,user_id)', 'UNIQUE(tenant_id,user_id)')))
         self.assertTrue(self.issues(SCHEMA.replace('token_version INTEGER,', '')))
 

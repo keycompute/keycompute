@@ -113,7 +113,11 @@ impl TenantInvitation {
         )).one(tx).await?.ok_or_else(invalid)?;
         TenantAuditEvent::append(
             tx,
-            AuditScopeType::Tenant,
+            if actor.actor_platform_role.is_platform_admin() {
+                AuditScopeType::Platform
+            } else {
+                AuditScopeType::Tenant
+            },
             Some(req.tenant_id),
             &actor,
             "invitation.create",
@@ -194,10 +198,16 @@ impl TenantInvitation {
         if !verified || current_email != invitation.email {
             return Err(invalid());
         }
-        super::tenant_membership::TenantMembership::find(tx, tenant, invitation.invited_by)
+        let inviter = super::user::User::find_by_id(tx, invitation.invited_by)
             .await?
-            .filter(|member| member.status == "active" && member.tenant_role == "admin")
+            .filter(|user| user.status == "active")
             .ok_or_else(invalid)?;
+        if !inviter.platform_role()?.is_platform_admin() {
+            super::tenant_membership::TenantMembership::find(tx, tenant, invitation.invited_by)
+                .await?
+                .filter(|member| member.status == "active" && member.tenant_role == "admin")
+                .ok_or_else(invalid)?;
+        }
         let existing =
             super::tenant_membership::TenantMembership::find_any(tx, tenant, user).await?;
         if let Some(existing) = &existing
@@ -221,6 +231,16 @@ impl TenantInvitation {
                 "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status,invited_by,joined_at,removed_at) VALUES($1,$2,$3,'active',$4,$5,NULL) ON CONFLICT(tenant_id,user_id) DO UPDATE SET tenant_role=EXCLUDED.tenant_role,status='active',invited_by=EXCLUDED.invited_by,joined_at=EXCLUDED.joined_at,removed_at=NULL WHERE tenant_memberships.status<>'active'",
                 [tenant.into(),user.into(),invitation.tenant_role.clone().into(),invitation.invited_by.into(),accepted.accepted_at.into()],
             )).await?;
+        }
+        if invitation.tenant_role == TenantRole::Admin.as_str() {
+            // The first accepted administrator becomes the ordinary owner.
+            // A later platform action may deliberately clear or reassign it.
+            tx.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE tenants SET owner_user_id=$2 WHERE id=$1 AND owner_user_id IS NULL",
+                [tenant.into(), user.into()],
+            ))
+            .await?;
         }
         let actor = AuditContext {
             actor_platform_role: current.platform_role()?,
@@ -283,7 +303,11 @@ impl TenantInvitation {
         )).one(tx).await?.ok_or_else(invalid)?;
         TenantAuditEvent::append(
             tx,
-            AuditScopeType::Tenant,
+            if actor.actor_platform_role.is_platform_admin() {
+                AuditScopeType::Platform
+            } else {
+                AuditScopeType::Tenant
+            },
             Some(tenant),
             &actor,
             "invitation.revoke",
@@ -306,7 +330,11 @@ impl TenantInvitation {
         if expired > 0 {
             TenantAuditEvent::append(
                 tx,
-                AuditScopeType::Tenant,
+                if actor.actor_platform_role.is_platform_admin() {
+                    AuditScopeType::Platform
+                } else {
+                    AuditScopeType::Tenant
+                },
                 Some(tenant),
                 actor,
                 "invitation.expire",

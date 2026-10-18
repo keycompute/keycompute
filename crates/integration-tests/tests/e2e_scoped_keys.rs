@@ -26,7 +26,13 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 fn admin(t: &Tenant) -> TenantScope {
-    TenantScope::checked(t.id, t.owner_user_id, TenantRole::Admin).unwrap()
+    TenantScope::checked(
+        t.id,
+        t.owner_user_id
+            .expect("key fixture tenant must have an owner"),
+        TenantRole::Admin,
+    )
+    .unwrap()
 }
 fn actor(scope: TenantScope) -> AuditContext {
     AuditContext {
@@ -49,8 +55,8 @@ fn request(t: Uuid, u: Uuid) -> CreateProduceAiKeyRequest {
 }
 struct Fixture {
     db: DatabaseConnection,
-    a: Tenant,
-    b: Tenant,
+    a: integration_tests::db::OwnedTenant,
+    b: integration_tests::db::OwnedTenant,
     user: TenantActor,
     peer: TenantActor,
     operator: User,

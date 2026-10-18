@@ -8,7 +8,7 @@ use super::common::{
 };
 use crate::{
     hooks::use_i18n::use_i18n,
-    services::api_client::{get_client, user_error_message},
+    services::api_client::user_error_message,
     stores::{auth_store::AuthStore, user_store::UserStore},
     utils::{
         display::payment_status_label,
@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use client_api::api::tenant_reporting::{
-    MemberWallet, ReportPage, TenantPaymentRecord, TenantReportingApi, TenantUsageRecord,
+    MemberWallet, ReportPage, TenantPaymentRecord, TenantUsageRecord,
 };
 use dioxus::prelude::*;
 use types::{Detail, Query, Tab};
@@ -38,10 +38,14 @@ pub fn TenantFinance() -> Element {
         .read()
         .as_ref()
         .is_some_and(|v| v.can_manage_billing());
-    rsx! {if let Some(scope)=WorkspaceScope::from_stores(auth,users).filter(|_|allowed){for key in [format!("{scope:?}")]{FinanceWorkspace{key:"{key}",scope}}}else{p{role:"alert",{i18n.t("tenant.admin_required")}}}}
+    rsx! {if let Some(scope)=WorkspaceScope::from_stores(auth,users).filter(|_|allowed){for key in [format!("{scope:?}")]{FinanceWorkspace{key:"{key}",scope,embedded:false}}}else{p{role:"alert",{i18n.t("tenant.admin_required")}}}}
 }
 #[component]
-fn FinanceWorkspace(scope: WorkspaceScope) -> Element {
+pub(crate) fn PlatformTenantFinance(scope: WorkspaceScope) -> Element {
+    rsx! { FinanceWorkspace { scope, embedded: true } }
+}
+#[component]
+fn FinanceWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let i18n = use_i18n();
@@ -60,7 +64,7 @@ fn FinanceWorkspace(scope: WorkspaceScope) -> Element {
             let result = common::read(auth, users, scope, move |token| {
                 let q = q.clone();
                 async move {
-                    let api = TenantReportingApi::new(&get_client(), scope.tenant_id)?;
+                    let api = scope.reporting_api()?;
                     match q.tab {
                         Tab::Usage => api
                             .usage(&q.report(), &q.window, &token)
@@ -101,7 +105,8 @@ fn FinanceWorkspace(scope: WorkspaceScope) -> Element {
                     move |token| {
                         let w = w.clone();
                         async move {
-                            TenantReportingApi::new(&get_client(), scope.tenant_id)?
+                            scope
+                                .reporting_api()?
                                 .totals(&w, key.2, &token)
                                 .await
                                 .map(Some)
@@ -149,9 +154,14 @@ fn FinanceWorkspace(scope: WorkspaceScope) -> Element {
         }
     };
     rsx! {div{class:"page-container tenant-finance",
-        ui::PageHeader{title:i18n.t("tenant_finance.title").to_string(),description:i18n.t("tenant_finance.hint").to_string()}
-        WorkspaceLinks{}
-        WorkspaceContext{note:i18n.t("tenant_finance.shared_payment").to_string()}
+        if !embedded {
+            ui::PageHeader{title:i18n.t("tenant_finance.title").to_string(),description:i18n.t("tenant_finance.hint").to_string()}
+            WorkspaceLinks{}
+            WorkspaceContext{note:i18n.t("tenant_finance.shared_payment").to_string()}
+        } else {
+            h2 { class: "section-title", {i18n.t("tenant_finance.title")} }
+            p { class: "text-secondary", {i18n.t("tenant_finance.shared_payment")} }
+        }
         nav{class:"segmented-control",aria_label:i18n.t("tenant_finance.title"),
             button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Usage,onclick:move |_|select_tab(Tab::Usage),{i18n.t("tenant_finance.usage")}}
             button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Orders,onclick:move |_|select_tab(Tab::Orders),{i18n.t("tenant_finance.orders")}}

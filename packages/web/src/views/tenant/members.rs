@@ -214,9 +214,9 @@ fn TenantMembersPage() -> Element {
                         tbody {
                             for member in value.page.items.iter() {
                                 {let role_member=member.clone();let suspend_member=member.clone();let remove_member=member.clone();let transfer_member=member.clone();
-                                    let owner=member.user_id==value.context.owner_user_id;
+                                    let owner=value.context.owner_user_id==Some(member.user_id);
                                     let removed=member.membership_status==MembershipStatus::Removed;
-                                    let can_transfer=scope.is_some_and(|s|s.user_id==value.context.owner_user_id) && !owner && member.membership_status==MembershipStatus::Active && member.user_status==UserStatus::Active && member.tenant_role==TenantRole::Admin;
+                                    let can_transfer=scope.is_some_and(|s|Some(s.user_id)==value.context.owner_user_id) && !owner && member.membership_status==MembershipStatus::Active && member.user_status==UserStatus::Active && member.tenant_role==TenantRole::Admin;
                                     rsx!{tr {key:"{member.user_id}",
                                         td {"{member.email}" if owner {span {class:"badge",{i18n.t("tenant.owner")}}}}
                                         td {{role_label(i18n, member.tenant_role)}}

@@ -6,14 +6,16 @@
 //! it through the `/me/key-issuance` routes.
 
 use crate::key_control_auth::{
-    KeyChange, begin as key_mutation_transaction, commit as commit_key_mutation, finish_read,
+    KeyChange, begin as key_mutation_transaction,
+    begin_context as key_mutation_transaction_context, commit as commit_key_mutation,
+    commit_context as commit_key_mutation_context, finish_read, finish_read_context,
 };
 use crate::{
     error::{ApiError, Result},
     extractors::{ConsoleAuth, RequestId},
     handlers::pagination::total_pages,
     state::AppState,
-    tenant_access::TenantAdmin,
+    tenant_access::TenantAdministration,
 };
 use axum::{
     Json,
@@ -272,7 +274,7 @@ fn ensure_owner_filter(owner_user_id: Option<Uuid>) -> Result<Option<Uuid>> {
     Ok(owner_user_id)
 }
 
-fn audit(auth: &TenantAdmin, request_id: RequestId) -> keycompute_db::AuditContext {
+fn audit(auth: &TenantAdministration, request_id: RequestId) -> keycompute_db::AuditContext {
     auth.audit(request_id)
 }
 
@@ -285,7 +287,7 @@ fn self_mutation_scope(auth: &ConsoleAuth) -> Result<TenantScope> {
 }
 
 pub async fn list_tenant_keys(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     Query(query): Query<TenantKeyListQuery>,
@@ -296,21 +298,46 @@ pub async fn list_tenant_keys(
     let p = page(query.page, query.page_size);
     let (page_number, page_size, offset) = (p.page, p.page_size, p.offset);
     let scope = access.scope();
+    let session = access.authorization_context();
     let db = pool(&state)?;
-    let keys = ProduceAiKey::list_in_tenant(
-        db.write_conn(),
-        scope,
-        owner,
-        query.include_revoked,
-        page_size,
-        offset,
-    )
-    .await
-    .map_err(map_db_error)?;
-    let total = ProduceAiKey::count_in_tenant(db.write_conn(), scope, owner, query.include_revoked)
+    let platform = access.platform_scope()?;
+    let keys = if let Some(platform) = platform {
+        ProduceAiKey::list_platform(
+            db.write_conn(),
+            platform,
+            path.tenant_id,
+            owner,
+            query.include_revoked,
+            page_size,
+            offset,
+        )
         .await
-        .map_err(map_db_error)?;
-    finish_read(pool(&state)?.write_conn(), access.auth()).await?;
+    } else {
+        ProduceAiKey::list_in_tenant(
+            db.write_conn(),
+            scope,
+            owner,
+            query.include_revoked,
+            page_size,
+            offset,
+        )
+        .await
+    }
+    .map_err(map_db_error)?;
+    let total = if let Some(platform) = platform {
+        ProduceAiKey::count_platform(
+            db.write_conn(),
+            platform,
+            path.tenant_id,
+            owner,
+            query.include_revoked,
+        )
+        .await
+    } else {
+        ProduceAiKey::count_in_tenant(db.write_conn(), scope, owner, query.include_revoked).await
+    }
+    .map_err(map_db_error)?;
+    finish_read_context(pool(&state)?.write_conn(), &session).await?;
     Ok(Json(TenantKeyPage {
         keys: keys.into_iter().map(key_metadata).collect(),
         total,
@@ -321,22 +348,32 @@ pub async fn list_tenant_keys(
 }
 
 pub async fn get_tenant_key(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantKeyPath>,
     State(state): State<AppState>,
 ) -> Result<Json<TenantKeyMetadata>> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
-    let key = ProduceAiKey::find_in_tenant(pool(&state)?.write_conn(), access.scope(), path.id)
+    let session = access.authorization_context();
+    let key = if let Some(platform) = access.platform_scope()? {
+        ProduceAiKey::find_platform(
+            pool(&state)?.write_conn(),
+            platform,
+            path.tenant_id,
+            path.id,
+        )
         .await
-        .map_err(map_db_error)?
-        .ok_or_else(|| ApiError::NotFound("tenant key resource not found".into()))?;
-    finish_read(pool(&state)?.write_conn(), access.auth()).await?;
+    } else {
+        ProduceAiKey::find_in_tenant(pool(&state)?.write_conn(), access.scope(), path.id).await
+    }
+    .map_err(map_db_error)?
+    .ok_or_else(|| ApiError::NotFound("tenant key resource not found".into()))?;
+    finish_read_context(pool(&state)?.write_conn(), &session).await?;
     Ok(Json(key_metadata(key)))
 }
 
 pub async fn patch_tenant_key(
-    access: TenantAdmin,
+    access: TenantAdministration,
     request_id: RequestId,
     Path(path): Path<TenantKeyPath>,
     State(state): State<AppState>,
@@ -354,41 +391,43 @@ pub async fn patch_tenant_key(
         name: request.name,
         expires_at: request.expires_at,
     };
-    let tx = key_mutation_transaction(&state, access.auth()).await?;
+    let session = access.authorization_context();
+    let tx = key_mutation_transaction_context(&state, &session).await?;
     let updated = key_issuance::update_key(
         &tx,
         access.scope(),
-        snapshot(access.auth()),
+        access.snapshot(),
         path.id,
         &patch,
         &audit(&access, request_id),
     )
     .await
     .map_err(map_db_error)?;
-    commit_key_mutation(&state, tx, access.auth(), KeyChange::Credential).await?;
+    commit_key_mutation_context(&state, tx, &session, KeyChange::Credential).await?;
     Ok(Json(key_metadata(updated)))
 }
 
 pub async fn revoke_tenant_key(
-    access: TenantAdmin,
+    access: TenantAdministration,
     request_id: RequestId,
     Path(path): Path<TenantKeyPath>,
     State(state): State<AppState>,
 ) -> Result<Json<KeyMutationResponse>> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
-    let tx = key_mutation_transaction(&state, access.auth()).await?;
+    let session = access.authorization_context();
+    let tx = key_mutation_transaction_context(&state, &session).await?;
     let result = key_issuance::remove_key(
         &tx,
         access.scope(),
-        snapshot(access.auth()),
+        access.snapshot(),
         path.id,
         &audit(&access, request_id),
         true,
     )
     .await
     .map_err(map_db_error)?;
-    commit_key_mutation(&state, tx, access.auth(), KeyChange::Credential).await?;
+    commit_key_mutation_context(&state, tx, &session, KeyChange::Credential).await?;
     Ok(Json(KeyMutationResponse {
         success: true,
         key: key_metadata_from_removal(&result),
@@ -405,25 +444,26 @@ pub async fn revoke_tenant_key(
 }
 
 pub async fn delete_tenant_key(
-    access: TenantAdmin,
+    access: TenantAdministration,
     request_id: RequestId,
     Path(path): Path<TenantKeyPath>,
     State(state): State<AppState>,
 ) -> Result<Json<KeyMutationResponse>> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
-    let tx = key_mutation_transaction(&state, access.auth()).await?;
+    let session = access.authorization_context();
+    let tx = key_mutation_transaction_context(&state, &session).await?;
     let result = key_issuance::remove_key(
         &tx,
         access.scope(),
-        snapshot(access.auth()),
+        access.snapshot(),
         path.id,
         &audit(&access, request_id),
         false,
     )
     .await
     .map_err(map_db_error)?;
-    commit_key_mutation(&state, tx, access.auth(), KeyChange::Credential).await?;
+    commit_key_mutation_context(&state, tx, &session, KeyChange::Credential).await?;
     Ok(Json(KeyMutationResponse {
         success: true,
         key: key_metadata_from_removal(&result),
@@ -452,7 +492,7 @@ fn issuance_response(intent: KeyIssuanceIntent, already_pending: bool) -> Issuan
 }
 
 pub async fn request_tenant_key(
-    access: TenantAdmin,
+    access: TenantAdministration,
     request_id: RequestId,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
@@ -460,11 +500,12 @@ pub async fn request_tenant_key(
 ) -> Result<(StatusCode, Json<IssuanceResponse>)> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
-    let tx = key_mutation_transaction(&state, access.auth()).await?;
+    let session = access.authorization_context();
+    let tx = key_mutation_transaction_context(&state, &session).await?;
     let (intent, already_pending) = key_issuance::request_new(
         &tx,
         access.scope(),
-        snapshot(access.auth()),
+        access.snapshot(),
         request.owner_user_id,
         &request.name,
         request.expires_at,
@@ -472,7 +513,7 @@ pub async fn request_tenant_key(
     )
     .await
     .map_err(map_db_error)?;
-    commit_key_mutation(&state, tx, access.auth(), KeyChange::Intent).await?;
+    commit_key_mutation_context(&state, tx, &session, KeyChange::Intent).await?;
     Ok((
         if already_pending {
             StatusCode::OK
@@ -484,7 +525,7 @@ pub async fn request_tenant_key(
 }
 
 pub async fn rotate_tenant_key(
-    access: TenantAdmin,
+    access: TenantAdministration,
     request_id: RequestId,
     Path(path): Path<TenantKeyPath>,
     State(state): State<AppState>,
@@ -492,11 +533,12 @@ pub async fn rotate_tenant_key(
 ) -> Result<(StatusCode, Json<IssuanceResponse>)> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
-    let tx = key_mutation_transaction(&state, access.auth()).await?;
+    let session = access.authorization_context();
+    let tx = key_mutation_transaction_context(&state, &session).await?;
     let (intent, already_pending) = key_issuance::request_rotation(
         &tx,
         access.scope(),
-        snapshot(access.auth()),
+        access.snapshot(),
         path.id,
         &request.name,
         request.expires_at,
@@ -504,7 +546,7 @@ pub async fn rotate_tenant_key(
     )
     .await
     .map_err(map_db_error)?;
-    commit_key_mutation(&state, tx, access.auth(), KeyChange::Intent).await?;
+    commit_key_mutation_context(&state, tx, &session, KeyChange::Intent).await?;
     Ok((
         if already_pending {
             StatusCode::OK
@@ -516,7 +558,7 @@ pub async fn rotate_tenant_key(
 }
 
 pub async fn list_tenant_key_issuances(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     Query(query): Query<IssuanceListQuery>,
@@ -525,6 +567,7 @@ pub async fn list_tenant_key_issuances(
     access.require(AuthorizationAction::ManageTenantResource)?;
     let owner = ensure_owner_filter(query.owner_user_id)?;
     let page = page(query.page, query.page_size);
+    let session = access.authorization_context();
     let db = pool(&state)?;
     let intents = key_issuance::list_in_tenant(db.write_conn(), access.scope(), owner, page)
         .await
@@ -532,7 +575,7 @@ pub async fn list_tenant_key_issuances(
     let total = key_issuance::count_in_tenant(db.write_conn(), access.scope(), owner)
         .await
         .map_err(map_db_error)?;
-    finish_read(pool(&state)?.write_conn(), access.auth()).await?;
+    finish_read_context(pool(&state)?.write_conn(), &session).await?;
     Ok(Json(IssuancePage {
         intents,
         total,
@@ -543,24 +586,25 @@ pub async fn list_tenant_key_issuances(
 }
 
 pub async fn cancel_tenant_key_issuance(
-    access: TenantAdmin,
+    access: TenantAdministration,
     request_id: RequestId,
     Path(path): Path<TenantKeyPath>,
     State(state): State<AppState>,
 ) -> Result<Json<IssuanceResponse>> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
-    let tx = key_mutation_transaction(&state, access.auth()).await?;
+    let session = access.authorization_context();
+    let tx = key_mutation_transaction_context(&state, &session).await?;
     let intent = key_issuance::cancel_in_tenant(
         &tx,
         access.scope(),
-        snapshot(access.auth()),
+        access.snapshot(),
         path.id,
         &audit(&access, request_id),
     )
     .await
     .map_err(map_db_error)?;
-    commit_key_mutation(&state, tx, access.auth(), KeyChange::Intent).await?;
+    commit_key_mutation_context(&state, tx, &session, KeyChange::Intent).await?;
     Ok(Json(IssuanceResponse {
         intent,
         outcome: "cancelled",
@@ -718,6 +762,36 @@ pub fn router() -> axum::Router<AppState> {
         )
         .route(
             "/api/v1/tenants/{tenant_id}/key-issuance/{id}/cancel",
+            post(cancel_tenant_key_issuance),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/keys",
+            get(list_tenant_keys),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/keys/{id}",
+            get(get_tenant_key)
+                .patch(patch_tenant_key)
+                .delete(delete_tenant_key),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/keys/{id}/revoke",
+            post(revoke_tenant_key),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/keys/issuance",
+            post(request_tenant_key),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/keys/{id}/rotate",
+            post(rotate_tenant_key),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/key-issuance",
+            get(list_tenant_key_issuances),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/key-issuance/{id}/cancel",
             post(cancel_tenant_key_issuance),
         )
         .route("/api/v1/me/key-issuance", get(list_my_key_issuances))

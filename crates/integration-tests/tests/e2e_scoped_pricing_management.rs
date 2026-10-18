@@ -20,8 +20,8 @@ use uuid::Uuid;
 struct Fixture {
     db: DatabaseConnection,
     run_id: String,
-    a: keycompute_db::Tenant,
-    b: keycompute_db::Tenant,
+    a: integration_tests::db::OwnedTenant,
+    b: integration_tests::db::OwnedTenant,
     member_a: integration_tests::db::TenantActor,
     root: Uuid,
     second_root: Uuid,

@@ -20,8 +20,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: Tenant,
-    b: Tenant,
+    a: integration_tests::db::OwnedTenant,
+    b: integration_tests::db::OwnedTenant,
     run: String,
 }
 impl Fixture {

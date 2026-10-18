@@ -29,8 +29,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: Tenant,
-    b: Tenant,
+    a: integration_tests::db::OwnedTenant,
+    b: integration_tests::db::OwnedTenant,
     member: User,
     root: User,
     run: String,
@@ -134,7 +134,14 @@ impl Fixture {
     }
     async fn create(&self, t: Uuid) -> TenantDistributionRule {
         let tenant = Tenant::find_by_id(&self.db, t).await.unwrap().unwrap();
-        let (who, audit) = self.authority(t, tenant.owner_user_id).await;
+        let (who, audit) = self
+            .authority(
+                t,
+                tenant
+                    .owner_user_id
+                    .expect("distribution fixture tenant must have an owner"),
+            )
+            .await;
         dao::create(
             &self.db,
             who,

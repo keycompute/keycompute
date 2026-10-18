@@ -7,6 +7,7 @@ enum ReadScope {
     Personal(TenantScope),
     Tenant(TenantScope),
     Platform(PlatformScope),
+    PlatformTenant(PlatformScope, Uuid),
 }
 
 #[derive(Default, Clone, Copy)]
@@ -80,6 +81,10 @@ fn query_filtered(
             "EXISTS (SELECT 1 FROM users actor WHERE actor.id=$1 AND actor.status='active' AND actor.platform_role IN ('root','operator'))".to_owned(),
             vec![scope.user_id().into()],
         ),
+        ReadScope::PlatformTenant(scope, tenant) => (
+            "l.tenant_id=$2 AND EXISTS (SELECT 1 FROM users actor WHERE actor.id=$1 AND actor.status='active' AND actor.platform_role IN ('root','operator'))".to_owned(),
+            vec![scope.user_id().into(), tenant.into()],
+        ),
     };
     let predicate = match scope {
         ReadScope::Personal(_) => format!("l.tenant_id=$1 AND l.user_id=$2 AND {ACTIVE_MEMBER}"),
@@ -91,7 +96,7 @@ fn query_filtered(
             }
             format!("l.tenant_id=$1 AND {ACTIVE_ADMIN}")
         }
-        ReadScope::Platform(_) => predicate,
+        ReadScope::Platform(_) | ReadScope::PlatformTenant(_, _) => predicate,
     };
     let from_index = values.len() + 1;
     values.extend([window.from.into(), window.to.into()]);
@@ -370,6 +375,10 @@ impl TenantUsageScope {
 /// Only aggregate information is exposed to platform operators, never raw rows.
 #[derive(Debug, Clone, Copy)]
 pub struct PlatformUsageScope(PlatformScope);
+/// Raw reporting is available only with both current platform authority and
+/// an explicit target tenant; it never falls back to a selected workspace.
+#[derive(Debug, Clone, Copy)]
+pub struct PlatformTenantUsageScope(PlatformScope, Uuid);
 #[derive(Debug, Clone, FromQueryResult, Serialize)]
 pub struct CurrencyUsageStats {
     pub currency: String,
@@ -396,6 +405,99 @@ impl PlatformUsageScope {
             Window::new(Some(from), Some(to)),
             None,
             None,
+        )?)
+        .all(db)
+        .await?)
+    }
+}
+
+impl PlatformTenantUsageScope {
+    pub fn new(scope: PlatformScope, tenant: Uuid) -> Result<Self, DbError> {
+        if tenant.is_nil() {
+            return Err(DbError::Other(
+                "platform tenant usage scope required".into(),
+            ));
+        }
+        Ok(Self(scope, tenant))
+    }
+
+    pub async fn find_report(
+        &self,
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<UsageLogReportRow>, DbError> {
+        Ok(UsageLogReportRow::find_by_statement(query_filtered(
+            ReadScope::PlatformTenant(self.0, self.1),
+            REPORT_COLUMNS,
+            "",
+            Window::default(),
+            None,
+            Some(id),
+            None,
+        )?)
+        .one(db)
+        .await?)
+    }
+
+    pub async fn list_report(
+        &self,
+        db: &impl ConnectionTrait,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        owner: Option<Uuid>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<UsageLogReportRow>, DbError> {
+        Ok(UsageLogReportRow::find_by_statement(query_filtered(
+            ReadScope::PlatformTenant(self.0, self.1),
+            REPORT_COLUMNS,
+            "ORDER BY l.created_at DESC,l.id DESC",
+            Window::new(from, to),
+            Some((limit, offset)),
+            None,
+            owner,
+        )?)
+        .all(db)
+        .await?)
+    }
+
+    pub async fn count_report(
+        &self,
+        db: &impl ConnectionTrait,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        owner: Option<Uuid>,
+    ) -> Result<i64, DbError> {
+        let row = db
+            .query_one(query_filtered(
+                ReadScope::PlatformTenant(self.0, self.1),
+                "COUNT(*)",
+                "",
+                Window::new(from, to),
+                None,
+                None,
+                owner,
+            )?)
+            .await?
+            .ok_or_else(|| DbError::Other("usage report count returned no row".into()))?;
+        Ok(row.try_get_by_index(0)?)
+    }
+
+    pub async fn currency_stats(
+        &self,
+        db: &impl ConnectionTrait,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        owner: Option<Uuid>,
+    ) -> Result<Vec<CurrencyUsageStats>, DbError> {
+        Ok(CurrencyUsageStats::find_by_statement(query_filtered(
+            ReadScope::PlatformTenant(self.0, self.1),
+            &format!("l.currency,{TOTALS}"),
+            "GROUP BY l.currency ORDER BY l.currency",
+            Window::new(from, to),
+            None,
+            None,
+            owner,
         )?)
         .all(db)
         .await?)

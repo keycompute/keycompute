@@ -30,7 +30,7 @@ pub const MAX_TENANT_DESCRIPTION_BYTES: usize = 16 * 1024;
 #[derive(Debug, Clone, FromQueryResult, Serialize)]
 pub struct TenantContext {
     pub id: Uuid,
-    pub owner_user_id: Uuid,
+    pub owner_user_id: Option<Uuid>,
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
@@ -165,28 +165,47 @@ fn escape_like_pattern(value: &str) -> String {
 }
 
 const ADMIN_ACTOR_PREDICATE: &str = "EXISTS (
-    SELECT 1
-    FROM tenant_memberships actor_membership
-    JOIN users actor_user ON actor_user.id = actor_membership.user_id
-    JOIN tenants actor_tenant ON actor_tenant.id = actor_membership.tenant_id
-    WHERE actor_membership.tenant_id = $1
-      AND actor_membership.user_id = $2
-      AND actor_membership.tenant_role = 'admin'
-      AND actor_membership.status = 'active'
-      AND actor_user.status = 'active'
-      AND actor_tenant.status = 'active'
+    SELECT 1 FROM users actor_user
+    WHERE actor_user.id=$2 AND actor_user.status='active' AND (
+        actor_user.platform_role IN ('root','operator')
+        OR EXISTS (
+            SELECT 1 FROM tenant_memberships actor_membership
+            JOIN tenants actor_tenant ON actor_tenant.id=actor_membership.tenant_id
+            WHERE actor_membership.tenant_id=$1
+              AND actor_membership.user_id=actor_user.id
+              AND actor_membership.tenant_role='admin'
+              AND actor_membership.status='active'
+              AND actor_tenant.status='active'
+        )
+    )
+)";
+
+// Tenant administrators may inspect only events produced with tenant
+// authority. A current root/operator may inspect the complete timeline for an
+// explicitly targeted tenant, including platform operations affecting it.
+const AUDIT_VISIBILITY_PREDICATE: &str = "(
+    tenant_audit_events.scope_type='tenant'
+    OR EXISTS (
+        SELECT 1 FROM users audit_reader
+        WHERE audit_reader.id=$2
+          AND audit_reader.status='active'
+          AND audit_reader.platform_role IN ('root','operator')
+    )
 )";
 
 const MEMBER_ACTOR_PREDICATE: &str = "EXISTS (
-    SELECT 1
-    FROM tenant_memberships actor_membership
-    JOIN users actor_user ON actor_user.id = actor_membership.user_id
-    JOIN tenants actor_tenant ON actor_tenant.id = actor_membership.tenant_id
-    WHERE actor_membership.tenant_id = $1
-      AND actor_membership.user_id = $2
-      AND actor_membership.status = 'active'
-      AND actor_user.status = 'active'
-      AND actor_tenant.status = 'active'
+    SELECT 1 FROM users actor_user
+    WHERE actor_user.id=$2 AND actor_user.status='active' AND (
+        actor_user.platform_role IN ('root','operator')
+        OR EXISTS (
+            SELECT 1 FROM tenant_memberships actor_membership
+            JOIN tenants actor_tenant ON actor_tenant.id=actor_membership.tenant_id
+            WHERE actor_membership.tenant_id=$1
+              AND actor_membership.user_id=actor_user.id
+              AND actor_membership.status='active'
+              AND actor_tenant.status='active'
+        )
+    )
 )";
 
 async fn lock_tenant_parent_after_fence(
@@ -224,8 +243,6 @@ pub async fn revalidate_in_transaction(
         || actor.credential_kind != keycompute_types::CredentialKind::Jwt
         || actor.actor_user_id.is_nil()
         || snapshot.token_version < 0
-        || snapshot.tenant_authz_version <= 0
-        || snapshot.membership_authz_version <= 0
     {
         return Err(invariant("current JWT tenant authority required"));
     }
@@ -236,6 +253,28 @@ pub async fn revalidate_in_transaction(
         .await?
         .filter(|user| user.status == "active")
         .ok_or_else(|| invariant("active actor required"))?;
+    let platform_role = user.platform_role()?;
+    if platform_role.is_platform_admin() {
+        if user.token_version != snapshot.token_version
+            || actor.actor_platform_role != platform_role
+            || actor.actor_tenant_role.is_some()
+            || snapshot.tenant_authz_version != 0
+            || snapshot.membership_authz_version != 0
+        {
+            return Err(conflict("platform tenant authority", tenant.id));
+        }
+        return Ok(TenantWriteAuthority {
+            tenant_id: tenant.id,
+            actor: AuditContext {
+                actor_platform_role: platform_role,
+                actor_tenant_role: None,
+                ..*actor
+            },
+        });
+    }
+    if snapshot.tenant_authz_version <= 0 || snapshot.membership_authz_version <= 0 {
+        return Err(invariant("current JWT tenant authority required"));
+    }
     let membership = TenantMembership::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SELECT * FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR UPDATE",
@@ -256,7 +295,7 @@ pub async fn revalidate_in_transaction(
     Ok(TenantWriteAuthority {
         tenant_id: tenant.id,
         actor: AuditContext {
-            actor_platform_role: user.platform_role()?,
+            actor_platform_role: platform_role,
             actor_tenant_role: Some(membership.tenant_role()?),
             ..*actor
         },
@@ -293,10 +332,12 @@ pub async fn get_tenant_context(
     scope: TenantScope,
 ) -> Result<Option<TenantContext>, DbError> {
     let sql = format!(
-        "SELECT t.id,t.owner_user_id,t.name,t.slug,t.description,t.status,t.default_rpm_limit,t.default_tpm_limit,t.revision,t.authz_version,m.tenant_role,m.authz_version AS membership_authz_version
+        "SELECT t.id,t.owner_user_id,t.name,t.slug,t.description,t.status,t.default_rpm_limit,t.default_tpm_limit,t.revision,t.authz_version,
+                CASE WHEN u.platform_role IN ('root','operator') THEN 'admin' ELSE m.tenant_role END AS tenant_role,
+                CASE WHEN u.platform_role IN ('root','operator') THEN 0 ELSE m.authz_version END AS membership_authz_version
          FROM tenants t
-         JOIN tenant_memberships m ON m.tenant_id=t.id AND m.user_id=$2 AND m.status='active'
-         JOIN users u ON u.id=m.user_id AND u.status='active'
+         JOIN users u ON u.id=$2 AND u.status='active'
+         LEFT JOIN tenant_memberships m ON m.tenant_id=t.id AND m.user_id=u.id AND m.status='active'
          WHERE t.id=$1 AND t.status='active' AND {MEMBER_ACTOR_PREDICATE}"
     );
     Ok(
@@ -463,7 +504,11 @@ pub async fn update_tenant(
     .ok_or_else(|| conflict("tenant", tenant.id))?;
     TenantAuditEvent::append(
         tx,
-        AuditScopeType::Tenant,
+        if authority.actor.actor_platform_role.is_platform_admin() {
+            AuditScopeType::Platform
+        } else {
+            AuditScopeType::Tenant
+        },
         Some(tenant.id),
         &authority.actor,
         "tenant.update",
@@ -513,6 +558,7 @@ pub async fn update_member(
     }
     let next_role = patch.tenant_role.unwrap_or(before.tenant_role()?);
     let next_status = patch.status.unwrap_or(before.membership_status()?);
+    let platform_actor = authority.actor.actor_platform_role.is_platform_admin();
     if before.status == MembershipStatus::Removed.as_str()
         && (next_status != MembershipStatus::Removed || patch.tenant_role.is_some())
     {
@@ -520,12 +566,20 @@ pub async fn update_member(
             "removed membership requires a newly accepted invitation",
         ));
     }
-    if user_id == tenant.owner_user_id
+    if tenant.owner_user_id == Some(user_id)
         && (next_role != TenantRole::Admin || next_status != MembershipStatus::Active)
     {
-        return Err(invariant(
-            "the tenant owner must remain an active tenant administrator",
-        ));
+        if !platform_actor {
+            return Err(invariant(
+                "the tenant owner must remain an active tenant administrator",
+            ));
+        }
+        tx.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE tenants SET owner_user_id=NULL WHERE id=$1 AND owner_user_id=$2",
+            [tenant.id.into(), user_id.into()],
+        ))
+        .await?;
     }
     if next_status == MembershipStatus::Active
         && next_role == TenantRole::Admin
@@ -544,7 +598,7 @@ pub async fn update_member(
         .try_get_by_index(0)?;
     let final_admins = active_admins
         + i64::from(next_status == MembershipStatus::Active && next_role == TenantRole::Admin);
-    if final_admins < 1 {
+    if final_admins < 1 && !platform_actor {
         return Err(invariant(
             "a tenant must retain at least one active administrator",
         ));
@@ -564,7 +618,11 @@ pub async fn update_member(
     .ok_or_else(|| conflict("tenant_membership", format!("{}/{}", tenant.id, user_id)))?;
     TenantAuditEvent::append(
         tx,
-        AuditScopeType::Tenant,
+        if platform_actor {
+            AuditScopeType::Platform
+        } else {
+            AuditScopeType::Tenant
+        },
         Some(tenant.id),
         &authority.actor,
         "membership.update",
@@ -628,7 +686,8 @@ pub async fn transfer_ownership(
     let tenant = Tenant::find_by_id_for_update(tx, authority.tenant_id)
         .await?
         .ok_or_else(|| DbError::not_found("Tenant", authority.tenant_id))?;
-    if tenant.owner_user_id != scope.user_id() {
+    let platform_actor = authority.actor.actor_platform_role.is_platform_admin();
+    if !platform_actor && tenant.owner_user_id != Some(scope.user_id()) {
         return Err(invariant(
             "only the current tenant owner may transfer ownership",
         ));
@@ -642,7 +701,7 @@ pub async fn transfer_ownership(
             "ownership target must be an active tenant administrator",
         ));
     }
-    if new_owner_user_id == tenant.owner_user_id {
+    if tenant.owner_user_id == Some(new_owner_user_id) {
         return get_tenant_context(tx, scope)
             .await?
             .ok_or_else(|| invariant("tenant context disappeared"));
@@ -657,7 +716,11 @@ pub async fn transfer_ownership(
     .ok_or_else(|| DbError::not_found("Tenant", tenant.id))?;
     TenantAuditEvent::append(
         tx,
-        AuditScopeType::Tenant,
+        if platform_actor {
+            AuditScopeType::Platform
+        } else {
+            AuditScopeType::Tenant
+        },
         Some(tenant.id),
         &authority.actor,
         "tenant.transfer_owner",
@@ -888,7 +951,9 @@ pub async fn list_audit_events(
     let sql = format!(
         "SELECT id,scope_type,tenant_id,actor_user_id,action,resource_type,resource_id,request_id,credential_kind,platform_role,tenant_role,metadata,result,created_at
          FROM tenant_audit_events
-         WHERE scope_type='tenant' AND tenant_id=$1 AND {ADMIN_ACTOR_PREDICATE}
+         WHERE tenant_id=$1
+           AND {AUDIT_VISIBILITY_PREDICATE}
+           AND {ADMIN_ACTOR_PREDICATE}
          ORDER BY created_at DESC,id DESC
          LIMIT $3 OFFSET $4"
     );
@@ -919,7 +984,9 @@ pub async fn count_audit_events(
     let sql = format!(
         "SELECT COUNT(*)::BIGINT AS total
          FROM tenant_audit_events
-         WHERE scope_type='tenant' AND tenant_id=$1 AND {ADMIN_ACTOR_PREDICATE}"
+         WHERE tenant_id=$1
+           AND {AUDIT_VISIBILITY_PREDICATE}
+           AND {ADMIN_ACTOR_PREDICATE}"
     );
     Ok(Count::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,

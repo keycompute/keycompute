@@ -2,14 +2,11 @@ use super::super::common::{self, Pager, WorkspaceScope};
 use super::types::{Draft, Expiry, Operation};
 use crate::{
     hooks::use_i18n::use_i18n,
-    services::api_client::{get_client, user_error_message},
+    services::api_client::user_error_message,
     stores::{auth_store::AuthStore, ui_store::UiStore, user_store::UserStore},
     utils::resource::{KeyedResourceValue, current_keyed_value},
 };
-use client_api::{
-    ClientError, MembershipStatus, UserStatus,
-    api::key_control::{IssuanceOutcome, TenantKeyApi},
-};
+use client_api::{ClientError, MembershipStatus, UserStatus, api::key_control::IssuanceOutcome};
 use dioxus::prelude::*;
 use uuid::Uuid;
 
@@ -54,7 +51,7 @@ pub(super) fn Editor(
         error.set(String::new());
         spawn(async move {
             let result = common::command(auth, users, scope, move |token| async move {
-                let api = TenantKeyApi::new(&get_client(), scope.tenant_id)?;
+                let api = scope.key_api()?;
                 let invalid = || {
                     ClientError::InvalidResponse(
                         "Key result did not preserve its original owner".into(),

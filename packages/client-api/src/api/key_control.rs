@@ -1,5 +1,6 @@
 //! Tenant metadata management and a separate, owner-only one-time issuance client.
-//! No platform bypass, secret read API, implicit target or automatic command replay.
+//! Platform administration always uses an explicit tenant target; there is no
+//! secret read API, implicit target, or automatic command replay.
 use crate::{ApiClient, ClientError, Result};
 use reqwest::Method;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -247,6 +248,14 @@ impl TenantKeyApi {
             client: client.clone(),
             tenant,
             base: format!("/api/v1/tenants/{tenant}"),
+        })
+    }
+    pub fn platform_tenant(client: &ApiClient, tenant: Uuid) -> Result<Self> {
+        real(tenant)?;
+        Ok(Self {
+            client: client.clone(),
+            tenant,
+            base: format!("/api/v1/platform/tenants/{tenant}"),
         })
     }
     fn check(&self, row: &KeyMetadata, id: Option<Uuid>, owner: Option<Uuid>) -> Result<()> {

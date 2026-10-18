@@ -807,7 +807,7 @@ fn route_page_title(route: &Route, i18n: &I18n) -> String {
         Route::Pricing {} => "page.pricing",
         Route::PaymentOrders {} => "page.payment_orders",
         Route::DistributionRecords {} => "page.distribution_records",
-        Route::Tenants {} => "page.tenants",
+        Route::Tenants {} | Route::PlatformTenantAccess { .. } => "page.tenants",
         Route::System {} => "page.monitoring",
         Route::NodeGateway {} => "page.node_gateway",
         Route::Monitoring {} => "page.monitoring",
@@ -862,6 +862,9 @@ mod tests {
             Route::PaymentOrders {},
             Route::DistributionRecords {},
             Route::Tenants {},
+            Route::PlatformTenantAccess {
+                tenant_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            },
             Route::System {},
             Route::NodeGateway {},
             Route::Monitoring {},

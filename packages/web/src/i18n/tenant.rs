@@ -275,6 +275,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("tenant.config", "租户配置", "Tenant configuration"),
     ("tenant.owner", "工作区所有者", "Workspace owner"),
     ("tenant.owner_id", "所有者 ID", "Owner ID"),
+    (
+        "tenant.owner_unassigned",
+        "尚未分配；首位接受管理员邀请的普通用户将成为所有者",
+        "Unassigned; the first ordinary user to accept an administrator invitation becomes owner",
+    ),
     ("tenant.description", "描述", "Description"),
     ("tenant.save", "保存修改", "Save changes"),
     ("tenant.saved", "修改已保存。", "Changes saved."),

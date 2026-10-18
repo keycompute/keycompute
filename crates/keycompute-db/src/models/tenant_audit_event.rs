@@ -83,8 +83,9 @@ impl AuditContext {
         })
     }
 
-    /// Parent-first authorization under the caller's transaction. Every tenant
-    /// operation requires membership, independently of platform privilege.
+    /// Parent-first authorization under the caller's transaction. Ordinary
+    /// identities require an active admin membership; root/operator receive
+    /// implicit authority without acquiring a membership row.
     pub(crate) async fn require_tenant_admin(
         &self,
         tx: &DatabaseTransaction,
@@ -106,12 +107,20 @@ impl AuditContext {
             .await?
             .filter(|user| user.status == "active")
             .ok_or_else(|| DbError::Other("active actor required".into()))?;
+        let platform_role = user.platform_role()?;
+        if platform_role.is_platform_admin() {
+            return Ok(Self {
+                actor_platform_role: platform_role,
+                actor_tenant_role: None,
+                ..*self
+            });
+        }
         let member = super::tenant_membership::TenantMembership::find_any(tx, current.id, user.id)
             .await?
             .filter(|member| member.status == "active" && member.tenant_role == "admin")
             .ok_or_else(|| DbError::Other("tenant administrator membership required".into()))?;
         Ok(Self {
-            actor_platform_role: user.platform_role()?,
+            actor_platform_role: platform_role,
             actor_tenant_role: Some(member.tenant_role()?),
             ..*self
         })

@@ -12,14 +12,15 @@ No complete-subsystem or production-cutover acceptance is claimed.
 | 2 | Credential separation, live original-session proof and queue/dispatch authority; Key/pricing/reporting timing regressions | Remaining provider/binding and other endpoint timing review |
 | 3/5 | Tenant-scoped core/resource backends, financial/distribution controls, node/tasks, local managed resources, native account-pool Responses and indexed Conversations/Responses control | Remaining control and object-scope review |
 | 4 | Member/invitation/ownership backend, typed SDK and working core Web pages | Final deployment acceptance |
-| 6 | Root lifecycle/settings, operator read allowlist and operations UI; platform monitoring | Remaining platform endpoint provenance review |
-| 7 | Role-aware workspace/settings/global switcher, member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, provider/binding, local and indexed native Responses/Conversations, Key/owner, distribution and tenant financial pages | Final UI accessibility review and release acceptance |
+| 6 | Root/operator platform parity, protected-identity hierarchy, lifecycle/settings, operations UI and platform monitoring | Remaining platform endpoint provenance review |
+| 7 | Role-aware workspace/settings/global switcher, member/invitation/audit, explicit platform-target tenant administration, nodes/tasks, tenant/platform pricing, provider/binding, local and indexed native Responses/Conversations, Key/owner, distribution and tenant financial pages | Final UI accessibility review and release acceptance |
 | 8 | Limited static foundation gate, Rust foreign-identity rejection and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/rollback acceptance |
 
 Payment channels remain platform-wide. Financial records are tenant-scoped and
 wallets remain per-member, not a shared tenant balance pool. Finance pages stay
-narrow: the control page exposes only expired-reservation recovery and metadata-only
-pending-withdrawal review, and does not expose the broader financial write APIs.
+narrow: the control page exposes earnings history, expired-reservation recovery
+and metadata-only pending-withdrawal review, and does not expose broader financial
+write APIs.
 
 Page hiding is presentation only; the server continues to enforce the credential,
 current role/membership, resource scope, ownership and state. UI behavior is
@@ -39,8 +40,8 @@ The authenticated header now switches among personal/platform context and active
 tenant memberships. `/tenant` is a role-aware overview available to every signed-in
 user, including a zero-membership state; tenant controls and resource links render
 only for their verified capability. Workspace settings moved to
-`/tenant/settings`, and platform tenant creation searches active global users for
-the initial owner instead of requiring a raw UUID.
+`/tenant/settings`. The later ownerless-tenant cutover supersedes the initial-owner
+selector described by this historical checkpoint.
 
 Editable tenant configuration now uses `tenants.revision` and
 `expected_revision`, independently of authorization versions. Name, description
@@ -142,8 +143,8 @@ Current member/invitation/audit reads validate the actor in their data query.
 Independent review caught a draft regression that removed global-user activity
 from the owner invariant and incorrectly changed a script assertion to accept
 owner suspension. Both were restored; suspension remains allowed after explicit
-ownership transfer. The PostgreSQL tests also verify last-root protection,
-concurrent root demotion, immutable audit retention and safe schema replay.
+ownership transfer. The PostgreSQL tests also verify one-time single-root
+bootstrap, root immutability, immutable audit retention and safe schema replay.
 
 Final validation for this source set: `cargo test --workspace` **2,426 passed,
 0 failed, 30 default ignored**, with desktop/mobile included; all-target/all-feature
@@ -158,9 +159,9 @@ provider/pricing/control/operations/Responses/UI modules are not live code yet.
 Canonical tenant context/configuration, member list/detail/update/removal,
 invitation list/create/revoke/accept, ownership transfer and tenant audit routes
 are now mounted under `/api/v1/tenants/{tenant_id}/**`. The path must match
-the selected verified membership. Global root authority does not substitute
-for tenant membership. Root tenant lifecycle routes and client calls use
-`/api/v1/platform/tenants`; the old collection alias retains the same root
+the selected verified membership. Global root/operator authority does not substitute
+for tenant membership. Platform tenant lifecycle routes and client calls use
+`/api/v1/platform/tenants`; the old collection alias retains the same platform
 authorization, not an old role interpretation.
 
 Writes recheck signed user/member/tenant versions under retained locks and
@@ -187,15 +188,15 @@ found no remaining actionable issue in this accepted control API slice.
 
 This does not close all resource routing or the complete subsystem: provider,
 binding, pricing, tenant financial/node/distribution/Responses administration,
-operator allowlists, full client UI and final release gates remain. No
+platform parity, full client UI and final release gates remain. No
 production data, credentials, running service or deployment was changed.
 
 ## Current phases 3/5 — scoped tenant pricing accepted
 
-Pricing reads, counts and mutations now use explicit tenant-admin or root
+Pricing reads, counts and mutations now use explicit tenant-admin or root/operator
 platform scopes. Tenant HTTP APIs are `/api/v1/tenants/{tenant_id}/pricing/**`;
-root APIs are `/api/v1/platform/pricing/**`. Existing pricing URLs retain only
-the new root authorization. Tenant payloads cannot set tenant ownership or
+platform APIs are `/api/v1/platform/pricing/**`. Existing pricing URLs retain only
+the new platform authorization. Tenant payloads cannot set tenant ownership or
 platform scope. Current signed user/tenant/membership versions are rechecked
 under retained locks, including requests queued during administrator demotion.
 
@@ -1021,10 +1022,10 @@ remain open; this does not close the complete tenant subsystem.
 
 The baseline was `b833c42` with a clean main checkout; prior CI123 was confirmed
 successful separately. Global configuration belongs to the platform, not a
-tenant. A current root console identity without any selected membership
-can use canonical platform settings and earnings-ratio routes. Operator, ordinary
-member and tenant-admin roles cannot obtain platform settings authority, including
-when a handler is mounted without the outer platform middleware.
+tenant. A current root/operator console identity without any selected membership
+can use canonical platform settings and earnings-ratio routes. Ordinary members
+and tenant-admin roles cannot obtain platform settings authority, including when a
+handler is mounted without the outer platform middleware.
 
 Every console query uses a primary, authority-bearing safe projection. One explicit
 nonsecret-key registry drives both validation and SQL CASE masking: flagged secret
@@ -1067,15 +1068,18 @@ Native and operator/UI preparations are not included in this acceptance; broad
 platform routing, native resource adaptation and release gates remain separate.
 
 
-## Current phase 6 — operator operational read allowlist accepted
+## Historical phase 6 checkpoint — operator operational read allowlist
+
+This checkpoint predates the current root/operator platform-parity contract. Its
+bounded operations API remains available, but the latest policy also authorizes
+operators on explicit platform and tenant-target administration routes.
 
 Baseline `c6e095e` global settings was committed before integrating this slice.
 Five canonical GET-only platform operations routes expose tenant health metadata,
 platform/named-tenant usage aggregates, and safe process-capacity diagnostics.
 Root and operator can use a global console session without joining any target
-tenant. This does not authorize tenant membership routes, raw
-monitoring traces, individual orders/wallets, secrets, Responses bodies or any
-business write. It does not claim completion of all platform lifecycle endpoints.
+tenant. It does not authorize ordinary membership-bound tenant routes; broader
+administration uses explicit platform-target routes and current platform checks.
 
 Typed PlatformOperationsScope carries the actual platform role and original JWT
 version/expiry. Every DAO query rechecks that current state on the primary;
@@ -1104,13 +1108,14 @@ services or deployment changed. Native resource and frontend preparations remain
 outside main and unaccepted; root lifecycle authority is the next separate slice.
 
 
-## Current phases 3/6 — root identity and tenant lifecycle accepted
+## Current phases 3/6 — platform identity and tenant lifecycle accepted
 
 Baseline `aed6844` operational reads was committed before this implementation.
 Platform user list/detail/profile/security/deletion and tenant lifecycle commands
-now go through PlatformIdentity with an explicit original signed root global
-scope. Global root does not need an arbitrary tenant membership. Operator and
-tenant-admin identity cannot enter these routes, including bare-handler tests.
+now go through PlatformIdentity with an explicit original signed root/operator
+global scope. Neither role needs an arbitrary tenant membership. Operators cannot
+modify root or peer operator identities; only root may manage operators, and root
+identities remain non-deletable. Tenant-admin identity cannot enter these routes.
 Canonical `/api/v1/platform/users` and detail/update/delete paths are wired; the
 platform tenant detail and PATCH routes are complete. Retained URLs use the same
 new model, not a second role or optional-tenant authorization branch.
@@ -1134,12 +1139,10 @@ No tenant has platform identity semantics, so no tenant-specific destructive
 operation receives an implicit platform exemption. No platform secret or resource
 owner is transferred.
 
-Review found the old create-tenant SDK omitted the required owner_user_id. It now
-requires a real UUID in constructor/request, rejects nil before HTTP, and keeps
-canonical fresh reads. The existing platform tenant modal defaults to the verified
-current global user with editable explicit owner input, uses platform capability
-rather than generic admin display, and fences late completion across logins.
-This is a targeted platform page repair, not a claim of the full phase-7 tenant UI.
+The ownerless-tenant cutover supersedes this checkpoint's create-tenant owner
+requirement. The current SDK sends only tenant metadata; the platform modal does
+not select or synthesize an initial member. Access is granted later through the
+explicit platform tenant administration page.
 
 Ten new isolated PG/HTTP cases cover primary scopes, safe projections, real request
 IDs, exact-backend queued demotion and expiry, self-invalidating operations,
@@ -1202,8 +1205,9 @@ root business-console pages. The shared navigation, route layout, dashboard
 platform queries and existing provider/pricing/payment/distribution/settings
 views now use can_manage_platform, which consumes only the server-returned
 platform users:manage capability. Role labels, console access and tenant vectors
-never imply that grant. The separate operator operational allowlist is not a
-root business-page capability. The backend remains the authorization boundary.
+never imply that grant. Root and operator receive the platform capability from the
+verified server profile; protected-identity checks remain target-sensitive in the
+backend, which is the authorization boundary.
 
 Four regression tests cover tenant-admin capability vectors across role labels,
 operator/console-only denial, absent capabilities and live Dioxus store changes.

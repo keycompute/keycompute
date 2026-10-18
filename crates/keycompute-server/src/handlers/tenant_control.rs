@@ -9,7 +9,7 @@ use crate::{
     extractors::{GlobalConsoleAuth, RequestId},
     handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
-    tenant_access::{TenantAdmin, TenantMember as TenantMemberAccess},
+    tenant_access::{TenantAdministration, TenantContextAccess},
 };
 use axum::{
     Json, Router,
@@ -239,7 +239,7 @@ fn db_error(error: keycompute_db::DbError) -> ApiError {
     }
 }
 
-fn audit_from_request(admin: &TenantAdmin, request_id: RequestId) -> AuditContext {
+fn audit_from_request(admin: &TenantAdministration, request_id: RequestId) -> AuditContext {
     admin.audit(request_id)
 }
 
@@ -253,12 +253,8 @@ fn audit_from_global(auth: &GlobalConsoleAuth, request_id: RequestId) -> AuditCo
     }
 }
 
-fn snapshot(access: &TenantAdmin) -> TenantAuthzSnapshot {
-    TenantAuthzSnapshot {
-        token_version: access.auth().token_version,
-        tenant_authz_version: access.auth().authz_version,
-        membership_authz_version: access.auth().membership_authz_version,
-    }
+fn snapshot(access: &TenantAdministration) -> TenantAuthzSnapshot {
+    access.snapshot()
 }
 
 async fn rollback<T>(tx: DatabaseTransaction, error: ApiError) -> Result<T> {
@@ -276,7 +272,7 @@ async fn commit_mutation(tx: DatabaseTransaction, state: &AppState) -> Result<()
 }
 
 pub async fn get_tenant(
-    access: TenantMemberAccess,
+    access: TenantContextAccess,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
 ) -> Result<Json<TenantContext>> {
@@ -290,7 +286,7 @@ pub async fn get_tenant(
 }
 
 pub async fn patch_tenant(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     request_id: RequestId,
@@ -326,7 +322,7 @@ pub async fn patch_tenant(
 }
 
 pub async fn list_members(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     Query(query): Query<MemberListQuery>,
@@ -365,7 +361,7 @@ pub async fn list_members(
 }
 
 pub async fn get_member(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<MemberPath>,
     State(state): State<AppState>,
 ) -> Result<Json<TenantMemberRecord>> {
@@ -379,7 +375,7 @@ pub async fn get_member(
 }
 
 pub async fn patch_member(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<MemberPath>,
     State(state): State<AppState>,
     request_id: RequestId,
@@ -414,7 +410,7 @@ pub async fn patch_member(
 }
 
 pub async fn delete_member(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<MemberPath>,
     State(state): State<AppState>,
     request_id: RequestId,
@@ -450,7 +446,7 @@ pub struct ExpectedVersionRequest {
 }
 
 pub async fn list_invitations(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     Query(query): Query<InvitationListQuery>,
@@ -478,7 +474,7 @@ pub async fn list_invitations(
 }
 
 pub async fn create_invitation(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     request_id: RequestId,
@@ -582,7 +578,7 @@ pub async fn create_invitation(
 }
 
 pub async fn revoke_invitation(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<InvitationPath>,
     State(state): State<AppState>,
     request_id: RequestId,
@@ -673,7 +669,7 @@ pub async fn accept_invitation(
 }
 
 pub async fn transfer_ownership(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     request_id: RequestId,
@@ -702,7 +698,7 @@ pub async fn transfer_ownership(
 }
 
 pub async fn list_audit_events(
-    access: TenantAdmin,
+    access: TenantAdministration,
     Path(path): Path<TenantPath>,
     State(state): State<AppState>,
     Query(query): Query<AuditListQuery>,
@@ -756,6 +752,34 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/tenants/{tenant_id}/audit-events",
+            get(list_audit_events),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/control",
+            get(get_tenant).patch(patch_tenant),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/control/members",
+            get(list_members),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/control/members/{user_id}",
+            get(get_member).patch(patch_member).delete(delete_member),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/control/invitations",
+            get(list_invitations).post(create_invitation),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/control/invitations/{id}/revoke",
+            post(revoke_invitation),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/control/transfer-ownership",
+            post(transfer_ownership),
+        )
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/control/audit-events",
             get(list_audit_events),
         )
         .layer(axum::extract::DefaultBodyLimit::max(

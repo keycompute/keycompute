@@ -14,7 +14,7 @@ use keycompute_db::models::{
     referral_display::find_referral_display_page,
     system_setting::setting_keys,
 };
-use keycompute_db::{CreateUsageLogRequest, DbRouter, Tenant, UsageLog, User};
+use keycompute_db::{CreateUsageLogRequest, DbRouter, UsageLog, User};
 use keycompute_server::{AppState, create_router};
 use keycompute_types::{PlatformRole, PlatformScope, TenantRole, TenantScope};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
@@ -26,8 +26,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: Tenant,
-    b: Tenant,
+    a: integration_tests::db::OwnedTenant,
+    b: integration_tests::db::OwnedTenant,
     member: Uuid,
     run: String,
 }

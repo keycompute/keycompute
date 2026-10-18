@@ -115,7 +115,7 @@ fn identity_error(error: keycompute_db::DbError) -> ApiError {
         }
         if code == "tenant_retained_members_or_accounts" {
             return ApiError::Conflict(
-                "Tenant retains more than one active member or a channel account".into(),
+                "Tenant retains an active member or a channel account".into(),
             );
         }
     }
@@ -895,7 +895,6 @@ pub struct TenantInfo {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateTenantRequest {
-    pub owner_user_id: Uuid,
     pub name: String,
     #[serde(default)]
     pub slug: Option<String>,
@@ -1070,7 +1069,6 @@ pub async fn create_tenant(
             default_rpm_limit: None,
             default_tpm_limit: None,
         },
-        req.owner_user_id,
     )
     .await
     .map_err(|e| map_tenant_db_error(e, "create"))?;
@@ -1123,7 +1121,7 @@ pub async fn update_tenant(
     Ok(Json(build_tenant_info(tenant)))
 }
 
-/// 删除租户。租户最多保留创建者这一名活跃成员，且不能有渠道账号或其它受保护资源。
+/// 删除租户。租户不能保留任何活跃成员、渠道账号或其它受保护资源。
 ///
 /// DELETE /api/v1/tenants/{id}
 pub async fn delete_tenant(
@@ -1219,6 +1217,17 @@ mod tests {
     }
 
     #[test]
+    fn platform_tenant_creation_rejects_an_initial_owner() {
+        assert!(
+            serde_json::from_value::<CreateTenantRequest>(serde_json::json!({
+                "name": "Ownerless tenant",
+                "owner_user_id": Uuid::new_v4()
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn platform_user_query_accepts_only_typed_lifecycle_statuses() {
         let query: UserListQueryParams = serde_json::from_value(serde_json::json!({
             "status": "active",
@@ -1251,6 +1260,16 @@ mod tests {
         ));
         assert!(
             matches!(mapped, ApiError::Conflict(message) if message.contains("Protected platform identity"))
+        );
+    }
+
+    #[test]
+    fn retained_tenant_member_or_account_error_requires_an_empty_tenant() {
+        let mapped = identity_error(keycompute_db::DbError::Other(
+            "tenant_retained_members_or_accounts".to_string(),
+        ));
+        assert!(
+            matches!(mapped, ApiError::Conflict(message) if message == "Tenant retains an active member or a channel account")
         );
     }
 

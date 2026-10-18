@@ -4,7 +4,9 @@
 TenantKeyApi and the verified selected membership. `/api-keys/issuance` is a
 separate personal page using OwnerKeyIssuanceApi. Its expected tenant/user only
 validate the response; no owner override is sent in a personal request. A root or
-operator label without an administrator membership cannot mount tenant controls.
+operator label without an administrator membership cannot mount the ordinary
+tenant route. The platform tenant page embeds the same metadata console through
+`TenantKeyApi::platform_tenant` with an explicit target and no synthetic membership.
 
 ## Administration
 
