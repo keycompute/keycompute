@@ -6,7 +6,7 @@ use integration_tests::db::{
     cleanup_test_data, create_test_pool, create_test_tenant, create_test_user,
 };
 use keycompute_db::{
-    CreatePaymentOrderRequest, CreateTenantMembershipRequest, CreditPaidOrderError, DbError,
+    CreatePaymentOrderRequest, CreateTenantMembershipFixture, CreditPaidOrderError, DbError,
     PaymentMethod, PaymentOrder, Tenant, TenantMembership, UserBalance,
     purge_expired_payment_security_events,
 };
@@ -462,23 +462,6 @@ async fn pending_payment_keeps_original_tenant_after_membership_changes() {
         .begin()
         .await
         .expect("membership transaction should begin");
-    TenantMembership::create(
-        &membership_tx,
-        &CreateTenantMembershipRequest {
-            tenant_id: target.id,
-            user_id: user.id,
-            tenant_role: TenantRole::Member,
-        },
-        &keycompute_db::AuditContext {
-            actor_user_id: target.owner_user_id,
-            credential_kind: CredentialKind::Jwt,
-            actor_platform_role: PlatformRole::None,
-            actor_tenant_role: Some(TenantRole::Admin),
-            request_id: None,
-        },
-    )
-    .await
-    .expect("target membership should be added");
     TenantMembership::set_status(
         &membership_tx,
         source.id,
@@ -486,7 +469,7 @@ async fn pending_payment_keeps_original_tenant_after_membership_changes() {
         keycompute_types::MembershipStatus::Removed,
         source_membership.authz_version,
         &keycompute_db::AuditContext {
-            actor_user_id: source.owner_user_id,
+            actor_user_id: source.admin_user_id,
             credential_kind: CredentialKind::Jwt,
             actor_platform_role: PlatformRole::None,
             actor_tenant_role: Some(TenantRole::Admin),
@@ -495,6 +478,23 @@ async fn pending_payment_keeps_original_tenant_after_membership_changes() {
     )
     .await
     .expect("source membership should be removed");
+    TenantMembership::create_fixture(
+        &membership_tx,
+        &CreateTenantMembershipFixture {
+            tenant_id: target.id,
+            user_id: user.id,
+            tenant_role: TenantRole::Member,
+        },
+        &keycompute_db::AuditContext {
+            actor_user_id: target.admin_user_id,
+            credential_kind: CredentialKind::Jwt,
+            actor_platform_role: PlatformRole::None,
+            actor_tenant_role: Some(TenantRole::Admin),
+            request_id: None,
+        },
+    )
+    .await
+    .expect("target membership should be added");
     membership_tx
         .commit()
         .await

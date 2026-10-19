@@ -386,7 +386,7 @@ async fn committed_price_revisions_fence_other_process_caches_and_future_boundar
             rust_decimal::Decimal::from_str("0.2").unwrap()
         );
     }
-    let user = User::find_by_id(&db, tenant.owner_user_id)
+    let user = User::find_by_id(&db, tenant.admin_user_id)
         .await
         .unwrap()
         .unwrap();

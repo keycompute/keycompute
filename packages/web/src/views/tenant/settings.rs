@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{
     hooks::use_i18n::use_i18n,
+    router::Route,
     services::api_client::user_error_message,
     stores::{auth_store::AuthStore, ui_store::UiStore, user_store::UserStore},
     utils::resource::{KeyedResourceValue, current_keyed_value},
@@ -213,7 +214,7 @@ fn TenantSettingsPage(
     };
 
     rsx! {
-        div { class: "page-container tenant-workspace tenant-settings",
+        div { class: if embedded { "tenant-workspace tenant-settings embedded-panel" } else { "page-container tenant-workspace tenant-settings" },
             if !embedded {
                 ui::PageHeader { title: i18n.t("tenant.settings").to_string(), description: i18n.t("tenant.settings_hint").to_string() }
                 WorkspaceLinks {}
@@ -227,14 +228,12 @@ fn TenantSettingsPage(
                 section { class: "section", aria_label: i18n.t("tenant.settings"),
                     h2 { class: "section-title", {i18n.t("tenant.general_settings")} }
                     div { class: "section-body tenant-settings-form",
-                        div { class: "tenant-settings-owner",
-                            span { class: "tenant-settings-owner-label", {i18n.t("tenant.owner")} }
-                            if let Some(owner_user_id) = value.owner_user_id {
-                                TechnicalId { value: owner_user_id.to_string() }
-                            } else {
-                                span { class: "text-secondary", {i18n.t("tenant.owner_unassigned")} }
-                            }
+                        dl { class: "detail-grid tenant-settings-metadata",
+                            div { dt { {i18n.t("tenants.tenant_id")} } dd { TechnicalId { value: value.id.to_string() } } }
+                            div { dt { {i18n.t("tenants.slug")} } dd { code { "{value.slug}" } } }
+                            div { dt { {i18n.t("table.status")} } dd { span { class: "badge", "{value.status}" } } }
                         }
+                        if embedded { Link { class: "btn btn-secondary btn-sm", to: Route::PlatformTenantAccess { tenant_id: value.id.to_string() }, {i18n.t("tenants.manage_access")} } }
                         div { class: "form-field",
                             label { class: "form-label", r#for: "tenant-name", {i18n.t("tenants.name")} }
                             input { id: "tenant-name", class: "input-field", value: "{draft().name}", maxlength: "255", disabled: saving(), oninput: move |event| { draft.write().name = event.value(); dirty.set(true); } }

@@ -71,7 +71,7 @@ async fn create_test_user(pool: &DatabaseConnection, suffix: &str) -> (Uuid, Uui
     .await
     .expect("Failed to create test user");
     let tx = pool.begin().await.expect("tenant transaction");
-    let tenant = Tenant::create_owned(
+    let tenant = Tenant::create_with_admin(
         &tx,
         &CreateTenantRequest {
             name: format!("ng-e2e-tenant-{}", suffix),

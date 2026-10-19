@@ -202,7 +202,7 @@ def schema_issues(schema: str, inventory: str) -> tuple[list[str], int]:
     failures: list[str] = []
     required = {
         'users': {'id', 'email', 'name', 'platform_role', 'status', 'token_version', 'created_at', 'updated_at'},
-        'tenants': {'id', 'owner_user_id', 'revision', 'authz_version', 'status'},
+        'tenants': {'id', 'revision', 'authz_version', 'status'},
         'tenant_memberships': {'tenant_id', 'user_id', 'tenant_role', 'status', 'authz_version'},
         'tenant_invitations': {'tenant_id', 'email', 'tenant_role', 'token_hash', 'status', 'expires_at', 'accepted_by'},
         'tenant_audit_events': {'scope_type', 'tenant_id', 'actor_user_id', 'credential_kind', 'platform_role', 'tenant_role', 'request_id', 'action', 'result', 'metadata'},
@@ -213,6 +213,8 @@ def schema_issues(schema: str, inventory: str) -> tuple[list[str], int]:
             failures.append(f'{table}: missing required column {missing}')
     for forbidden in {'tenant_id', 'role'} & columns(tables.get('users', [])).keys():
         failures.append(f'users: retired ownership column {forbidden}')
+    if 'owner_user_id' in columns(tables.get('tenants', [])):
+        failures.append('tenants: retired tenant-owner column owner_user_id')
     for table, field, allowed in [
         ('users', 'platform_role', {'root', 'operator', 'none'}),
         ('tenant_memberships', 'tenant_role', {'admin', 'member'}),
@@ -227,8 +229,6 @@ def schema_issues(schema: str, inventory: str) -> tuple[list[str], int]:
                          ('tenant_invitations', 'token_hash')]:
         if not contains(columns(tables.get(table, [])).get(field, []), ['not', 'null']):
             failures.append(f'{table}.{field}: NOT NULL required')
-    if contains(columns(tables.get('tenants', [])).get('owner_user_id', []), ['not', 'null']):
-        failures.append('tenants.owner_user_id: must allow an unassigned ordinary owner')
     if not contains(words(tables.get('tenant_memberships', [])), ['primary', 'key', '(', 'tenant_id', ',', 'user_id', ')']):
         failures.append('tenant_memberships: composite primary key required')
     pending_index = ['on', 'tenant_invitations', '(', 'tenant_id', ',', 'lower', '(', 'email', ')', ')', 'where', 'status', '=', 'pending']
@@ -239,6 +239,17 @@ def schema_issues(schema: str, inventory: str) -> tuple[list[str], int]:
             unique_pending |= words(tokens[i:end])[-len(pending_index):] == pending_index
     if not unique_pending:
         failures.append('tenant_invitations: unique pending-email index contract missing')
+    current_membership_index = [
+        'on', 'tenant_memberships', '(', 'user_id', ')',
+        'where', 'status', '<', '>', 'removed',
+    ]
+    unique_current_membership = False
+    for i in range(len(tokens)-3):
+        if words(tokens[i:i+3]) == ['create', 'unique', 'index']:
+            end = next((j for j in range(i, len(tokens)) if tokens[j].value == ';' and tokens[j].kind == 'identifier'), len(tokens))
+            unique_current_membership |= words(tokens[i:end])[-len(current_membership_index):] == current_membership_index
+    if not unique_current_membership:
+        failures.append('tenant_memberships: one-current-tenant-per-user index contract missing')
     forbidden = {'token', 'plain_token', 'plaintext_token', 'platform_role'}
     if forbidden & columns(tables.get('tenant_invitations', [])).keys():
         failures.append('tenant_invitations: raw token or platform authority column is forbidden')

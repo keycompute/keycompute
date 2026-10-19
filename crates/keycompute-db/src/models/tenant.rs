@@ -13,9 +13,6 @@ use uuid::Uuid;
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct Tenant {
     pub id: Uuid,
-    /// Assigned ordinary owner. Platform-provisioned tenants may be ownerless
-    /// until access is granted later.
-    pub owner_user_id: Option<Uuid>,
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
@@ -177,53 +174,64 @@ fn valid_create_request(req: &CreateTenantRequest) -> bool {
 }
 
 impl Tenant {
-    /// Create an organization and its ordinary owner membership in one transaction.
-    /// A platform administrator may provision on behalf of that owner, but a
-    /// platform identity is never persisted as the owner or as a tenant member.
+    /// Create an organization and its initial administrator membership in one
+    /// transaction. A platform administrator may provision on behalf of that
+    /// administrator, but a platform identity is never persisted as a member.
     /// Registration and server startup never call this method implicitly.
-    pub async fn create_owned(
+    pub async fn create_with_admin(
         tx: &DatabaseTransaction,
         req: &CreateTenantRequest,
-        owner_user_id: Uuid,
+        admin_user_id: Uuid,
         actor: &AuditContext,
     ) -> Result<Tenant, DbError> {
         lock_identity_admin(tx).await?;
         let slug = req.slug.trim();
-        if owner_user_id.is_nil() || !valid_create_request(req) {
+        if admin_user_id.is_nil() || !valid_create_request(req) {
             return Err(DbError::Other(
-                "invalid tenant owner, name, slug or limits".into(),
+                "invalid tenant administrator, name, slug or limits".into(),
             ));
         }
-        let actor = if actor.actor_user_id == owner_user_id
+        let actor = if actor.actor_user_id == admin_user_id
             && matches!(
                 actor.credential_kind,
                 CredentialKind::System | CredentialKind::Jwt
             ) {
-            let owner = super::user::User::find_by_id(tx, owner_user_id)
+            let admin = super::user::User::find_by_id(tx, admin_user_id)
                 .await?
                 .filter(|user| user.status == "active")
-                .ok_or_else(|| DbError::Other("tenant_owner_not_eligible".into()))?;
+                .ok_or_else(|| DbError::Other("tenant_admin_not_eligible".into()))?;
             AuditContext {
-                actor_platform_role: owner.platform_role()?,
+                actor_platform_role: admin.platform_role()?,
                 actor_tenant_role: None,
                 ..*actor
             }
         } else {
             actor.require_platform_admin(tx).await?
         };
-        super::user::User::find_by_id_for_no_key_update(tx, owner_user_id)
+        super::user::User::find_by_id_for_no_key_update(tx, admin_user_id)
             .await?
             .filter(|user| user.status == "active" && user.platform_role == "none")
-            .ok_or_else(|| DbError::Other("tenant_owner_not_eligible".into()))?;
+            .ok_or_else(|| DbError::Other("tenant_admin_not_eligible".into()))?;
+        if tx
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT 1 FROM tenant_memberships WHERE user_id=$1 AND status<>'removed' LIMIT 1",
+                [admin_user_id.into()],
+            ))
+            .await?
+            .is_some()
+        {
+            return Err(DbError::Other("user_already_belongs_to_tenant".into()));
+        }
         let tenant = Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "INSERT INTO tenants(owner_user_id,name,slug,description,default_rpm_limit,default_tpm_limit) VALUES($1,$2,$3,$4,COALESCE($5,60),COALESCE($6,100000)) RETURNING *",
-            [owner_user_id.into(), req.name.trim().into(), slug.into(),
-                req.description.clone().into(), req.default_rpm_limit.into(), req.default_tpm_limit.into()],
+            "INSERT INTO tenants(name,slug,description,default_rpm_limit,default_tpm_limit) VALUES($1,$2,$3,COALESCE($4,60),COALESCE($5,100000)) RETURNING *",
+            [req.name.trim().into(), slug.into(), req.description.clone().into(),
+                req.default_rpm_limit.into(), req.default_tpm_limit.into()],
         )).one(tx).await?.ok_or_else(|| DbError::Other("tenant insert returned no row".into()))?;
         tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
             "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'admin','active')",
-            [tenant.id.into(), owner_user_id.into()],
+            [tenant.id.into(), admin_user_id.into()],
         )).await?;
         let audit_scope = match actor.credential_kind {
             CredentialKind::System => AuditScopeType::System,
@@ -241,16 +249,16 @@ impl Tenant {
             "tenant",
             Some(&tenant.id.to_string()),
             AuditResult::Success,
-            serde_json::json!({"owner_user_id":owner_user_id,"reason":"tenant created"}),
+            serde_json::json!({"initial_admin_user_id":admin_user_id,"reason":"tenant created with initial administrator"}),
         )
         .await?;
         Ok(tenant)
     }
 
-    /// Provision a tenant without assigning an ordinary owner or membership.
+    /// Provision a tenant without assigning an initial membership.
     /// The platform actor keeps implicit authority through its global role and
     /// can grant tenant access later.
-    pub async fn create_unowned(
+    pub async fn create(
         tx: &DatabaseTransaction,
         req: &CreateTenantRequest,
         actor: &AuditContext,
@@ -262,7 +270,7 @@ impl Tenant {
         let actor = actor.require_platform_admin(tx).await?;
         let tenant = Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "INSERT INTO tenants(owner_user_id,name,slug,description,default_rpm_limit,default_tpm_limit) VALUES(NULL,$1,$2,$3,COALESCE($4,60),COALESCE($5,100000)) RETURNING *",
+            "INSERT INTO tenants(name,slug,description,default_rpm_limit,default_tpm_limit) VALUES($1,$2,$3,COALESCE($4,60),COALESCE($5,100000)) RETURNING *",
             [
                 req.name.trim().into(),
                 req.slug.trim().into(),
@@ -283,45 +291,10 @@ impl Tenant {
             "tenant",
             Some(&tenant.id.to_string()),
             AuditResult::Success,
-            serde_json::json!({"owner_user_id":null,"reason":"ownerless tenant created"}),
+            serde_json::json!({"reason":"tenant created without initial membership"}),
         )
         .await?;
         Ok(tenant)
-    }
-
-    /// The existing owner transfers ownership only to another active admin.
-    pub async fn transfer_ownership(
-        tx: &DatabaseTransaction,
-        tenant_id: Uuid,
-        new_owner: Uuid,
-        actor: &AuditContext,
-    ) -> Result<Tenant, DbError> {
-        lock_identity_admin(tx).await?;
-        let actor = actor.require_tenant_admin(tx, tenant_id).await?;
-        let tenant = Self::find_by_id(tx, tenant_id)
-            .await?
-            .ok_or_else(|| DbError::not_found("Tenant", tenant_id))?;
-        if tenant.owner_user_id != Some(actor.actor_user_id) {
-            return Err(DbError::Other(
-                "only the tenant owner may transfer ownership".into(),
-            ));
-        }
-        super::tenant_membership::TenantMembership::find(tx, tenant_id, new_owner)
-            .await?
-            .filter(|member| member.tenant_role == "admin")
-            .ok_or_else(|| DbError::Other("new owner must be an active administrator".into()))?;
-        let updated = Self::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE tenants SET owner_user_id=$2 WHERE id=$1 RETURNING *",
-            [tenant_id.into(), new_owner.into()],
-        ))
-        .one(tx)
-        .await?
-        .ok_or_else(|| DbError::not_found("Tenant", tenant_id))?;
-        TenantAuditEvent::append(tx, AuditScopeType::Tenant, Some(tenant_id), &actor,
-            "tenant.transfer_owner", "tenant", Some(&tenant_id.to_string()), AuditResult::Success,
-            serde_json::json!({"previous_owner_user_id":tenant.owner_user_id,"owner_user_id":new_owner})).await?;
-        Ok(updated)
     }
 
     /// 根据 ID 查找租户

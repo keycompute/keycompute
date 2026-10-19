@@ -20,8 +20,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     a_token: String,
     b_token: String,
     a_member_token: String,
@@ -35,11 +35,11 @@ impl Fixture {
         let a = create_test_tenant(&db, "provider-http-a", &run).await;
         let b = create_test_tenant(&db, "provider-http-b", &run).await;
         let a_member = create_test_user(&db, a.id, "provider-http-member", &run).await;
-        let a_owner = User::find_by_id(&db, a.owner_user_id)
+        let a_owner = User::find_by_id(&db, a.admin_user_id)
             .await
             .unwrap()
             .unwrap();
-        let b_owner = User::find_by_id(&db, b.owner_user_id)
+        let b_owner = User::find_by_id(&db, b.admin_user_id)
             .await
             .unwrap()
             .unwrap();
@@ -400,7 +400,7 @@ async fn tenant_provider_mutations_preserve_owner_and_audit_server_request_ids()
             "SELECT actor_user_id,tenant_id,credential_kind,metadata FROM tenant_audit_events WHERE action=$1 AND request_id=$2 AND resource_id=$3",
             [action.into(), request_id.into(), id.into()],
         )).await.unwrap().expect("canonical request audit");
-        assert_eq!(row.try_get_by_index::<Uuid>(0).unwrap(), f.a.owner_user_id);
+        assert_eq!(row.try_get_by_index::<Uuid>(0).unwrap(), f.a.admin_user_id);
         assert_eq!(row.try_get_by_index::<Uuid>(1).unwrap(), f.a.id);
         assert_eq!(row.try_get_by_index::<String>(2).unwrap(), "jwt");
         let metadata: Value = row.try_get_by_index(3).unwrap();
@@ -453,7 +453,7 @@ async fn root_platform_and_inference_boundaries_do_not_depend_on_tenant_selectio
         &f.db,
         &keycompute_db::CreateProduceAiKeyRequest {
             tenant_id: f.a.id,
-            user_id: f.a.owner_user_id,
+            user_id: f.a.admin_user_id,
             name: "inference-only".into(),
             produce_ai_key_hash: keycompute_auth::ProduceAiKeyValidator::hash_key(&key),
             produce_ai_key_preview: "test-only".into(),

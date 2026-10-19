@@ -26,7 +26,7 @@ fn money(value: &serde_json::Value, field: &str) -> Decimal {
 struct Fixture {
     pool: DatabaseConnection,
     guard: TestDataGuard,
-    tenant: integration_tests::db::OwnedTenant,
+    tenant: integration_tests::db::TenantFixture,
     user: TenantActor,
     service: BalanceService,
     app: Router,
@@ -250,7 +250,7 @@ async fn display_does_not_reclaim_expired_reservations_but_money_helper_still_do
 async fn snapshot_rejects_wrong_owner_missing_user_and_bounded_batch_without_zero_fallback() {
     let mut f = Fixture::new(false).await;
     let admin_scope =
-        TenantScope::checked(f.tenant.id, f.tenant.owner_user_id, TenantRole::Admin).unwrap();
+        TenantScope::checked(f.tenant.id, f.tenant.admin_user_id, TenantRole::Admin).unwrap();
     assert!(matches!(
         UserBalance::find_owned_display_snapshot(
             &f.pool,

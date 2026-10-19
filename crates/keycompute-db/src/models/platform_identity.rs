@@ -47,6 +47,13 @@ pub struct PlatformPage<T> {
     pub items: Vec<T>,
     pub total: i64,
 }
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlatformUserFilter<'a> {
+    pub role: Option<PlatformRole>,
+    pub status: Option<UserStatus>,
+    pub tenant_unassigned: bool,
+    pub search: Option<&'a str>,
+}
 pub struct PlatformIdentity;
 const USER_COLUMNS: &str = "u.id,u.email,u.name,u.platform_role,u.status,u.created_at,u.updated_at,(SELECT c.last_login_at FROM user_credentials c WHERE c.user_id=u.id) AS last_login_at";
 const TENANT_COLUMNS: &str = "t.id,t.name,t.slug,t.description,t.status,(t.status='active') AS is_active,t.created_at,t.updated_at,(SELECT COUNT(*)::bigint FROM tenant_memberships m WHERE m.tenant_id=t.id AND m.status='active') AS user_count,(SELECT COUNT(*)::bigint FROM accounts a WHERE a.tenant_id=t.id) AS account_count";
@@ -124,24 +131,23 @@ impl PlatformIdentity {
     pub async fn users(
         db: &impl ConnectionTrait,
         scope: FinancialScope,
-        role: Option<PlatformRole>,
-        status: Option<UserStatus>,
-        search: Option<&str>,
+        filter: PlatformUserFilter<'_>,
         limit: i64,
         offset: i64,
     ) -> Result<PlatformPage<PlatformUserInfo>, DbError> {
         scope.require_platform_global()?;
-        let search = page(limit, offset, search)?;
+        let search = page(limit, offset, filter.search)?;
         let mut values = scope.values();
         values.extend([
-            role.map(|r| r.as_str()).into(),
-            status.map(|value| value.as_str()).into(),
+            filter.role.map(|r| r.as_str()).into(),
+            filter.status.map(|value| value.as_str()).into(),
+            filter.tenant_unassigned.into(),
             search.into(),
             limit.into(),
             offset.into(),
         ]);
         let sql = format!(
-            "WITH authority AS MATERIALIZED(SELECT 1 WHERE {}),visible AS MATERIALIZED(SELECT {USER_COLUMNS} FROM users u CROSS JOIN authority WHERE ($10::text IS NULL OR u.platform_role=$10) AND ($11::text IS NULL OR u.status=$11) AND ($12='' OR strpos(lower(u.email||' '||COALESCE(u.name,'')),lower($12))>0)),page AS (SELECT * FROM visible ORDER BY created_at DESC,id DESC LIMIT $13 OFFSET $14) SELECT (SELECT COUNT(*)::bigint FROM visible) AS total,(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY p.created_at DESC,p.id DESC),'[]'::jsonb) FROM page p) AS items FROM authority",
+            "WITH authority AS MATERIALIZED(SELECT 1 WHERE {}),visible AS MATERIALIZED(SELECT {USER_COLUMNS} FROM users u CROSS JOIN authority WHERE ($10::text IS NULL OR u.platform_role=$10) AND ($11::text IS NULL OR u.status=$11) AND (NOT $12 OR NOT EXISTS(SELECT 1 FROM tenant_memberships m WHERE m.user_id=u.id AND m.status<>'removed')) AND ($13='' OR strpos(lower(u.email||' '||COALESCE(u.name,'')),lower($13))>0)),page AS (SELECT * FROM visible ORDER BY created_at DESC,id DESC LIMIT $14 OFFSET $15) SELECT (SELECT COUNT(*)::bigint FROM visible) AS total,(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY p.created_at DESC,p.id DESC),'[]'::jsonb) FROM page p) AS items FROM authority",
             scope.predicate()
         );
         let row = db
@@ -255,8 +261,7 @@ impl PlatformIdentity {
         let tx = begin(db).await?;
         let result=async {
             lock_identity_admin(&tx).await?;scope.current_actor(&tx).await?;
-            let parents=tx.query_all(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT id FROM tenants WHERE owner_user_id=$1 ORDER BY id",[id.into()])).await?.into_iter().map(|r|r.try_get("","id").map_err(DbError::from)).collect::<Result<Vec<Uuid>,_>>()?;
-            let actor=scope.lock_related(&tx,audit,&parents,&[id]).await?;
+            let actor=scope.lock_related(&tx,audit,&[],&[id]).await?;
             let before=Self::user(&tx,scope,id).await?;
             let actor_role=scope.platform_role();
             let target_role: PlatformRole=before.platform_role.parse().map_err(DbError::Other)?;
@@ -317,17 +322,7 @@ impl PlatformIdentity {
         let result = async {
             lock_identity_admin(&tx).await?;
             scope.current_actor(&tx).await?;
-            let parents = tx
-                .query_all(Statement::from_sql_and_values(
-                    DbBackend::Postgres,
-                    "SELECT id FROM tenants WHERE owner_user_id=$1 ORDER BY id",
-                    [id.into()],
-                ))
-                .await?
-                .into_iter()
-                .map(|r| r.try_get("", "id").map_err(DbError::from))
-                .collect::<Result<Vec<Uuid>, _>>()?;
-            let actor = scope.lock_related(&tx, audit, &parents, &[id]).await?;
+            let actor = scope.lock_related(&tx, audit, &[], &[id]).await?;
             let current = Self::user(&tx, scope, id).await?;
             let target_role: PlatformRole = current.platform_role.parse().map_err(DbError::Other)?;
             if target_role == PlatformRole::Root
@@ -372,7 +367,7 @@ impl PlatformIdentity {
         let tx = begin(db).await?;
         let result = async {
             let actor = scope.lock_related(&tx, audit, &[], &[]).await?;
-            let tenant = Tenant::create_unowned(&tx, request, &actor).await?;
+            let tenant = Tenant::create(&tx, request, &actor).await?;
             let result = Self::tenant(&tx, scope, tenant.id).await?;
             scope.check_expiry()?;
             Ok(result)

@@ -333,7 +333,7 @@ async fn canonical_and_retained_root_reads_share_scope_currency_and_server_audit
     isolated(|f|async move {
         let other=create_test_tenant(&f.db,"other","monitoring").await;
         let a=trace(&f,f.tenant,f.user,"RAW_A_MARKER","CNY").await;
-        let b=trace(&f,other.id,other.owner_user_id,"RAW_B_MARKER","USD").await;
+        let b=trace(&f,other.id,other.admin_user_id,"RAW_B_MARKER","USD").await;
         let state=f.state();let root=f.token(&state,f.root,false,3600).await;let app=create_router(state);
         let capacity=ok(call(app.clone(),"GET","/api/v1/admin/monitoring/capacity",&root,Value::Null).await);
         assert_eq!(capacity["scope"],"application_process");
@@ -430,7 +430,7 @@ async fn raw_detail_never_joins_usage_owned_by_a_different_tenant() {
             f.db.execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "UPDATE usage_logs SET tenant_id=$2,user_id=$3 WHERE request_id=$1",
-                [id.into(), other.id.into(), other.owner_user_id.into()]
+                [id.into(), other.id.into(), other.admin_user_id.into()]
             ))
             .await
             .is_err()
@@ -447,7 +447,7 @@ async fn raw_detail_never_joins_usage_owned_by_a_different_tenant() {
             &keycompute_db::CreateUsageLogRequest {
                 request_id: id,
                 tenant_id: other.id,
-                user_id: other.owner_user_id,
+                user_id: other.admin_user_id,
                 produce_ai_key_id: Uuid::new_v4(),
                 model_name: "foreign usage".into(),
                 provider_name: "openai".into(),
@@ -901,7 +901,7 @@ async fn target_health_filter_uses_resource_owner_tenant_instead_of_returning_ev
 }
 
 #[tokio::test]
-async fn console_probe_material_checks_selected_tenant_owner_and_current_config_without_shared_secret_grants()
+async fn console_probe_material_checks_selected_resource_owner_and_current_tenant_config_without_shared_secret_grants()
  {
     isolated(|f| async move {
         use keycompute_db::models::financial_scope::FinancialMembership;

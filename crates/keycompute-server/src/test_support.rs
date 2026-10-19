@@ -62,7 +62,7 @@ impl TestIdentity {
         )
         .await
         .unwrap();
-        let tenant = Tenant::create_owned(
+        let tenant = Tenant::create_with_admin(
             &tx,
             &CreateTenantRequest {
                 name: "Identity fixture".into(),

@@ -29,8 +29,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     member: User,
     root: User,
     run: String,
@@ -133,15 +133,14 @@ impl Fixture {
         (who, audit)
     }
     async fn create(&self, t: Uuid) -> TenantDistributionRule {
-        let tenant = Tenant::find_by_id(&self.db, t).await.unwrap().unwrap();
-        let (who, audit) = self
-            .authority(
-                t,
-                tenant
-                    .owner_user_id
-                    .expect("distribution fixture tenant must have an owner"),
-            )
-            .await;
+        let admin_user_id = if self.a.id == t {
+            self.a.admin_user_id
+        } else if self.b.id == t {
+            self.b.admin_user_id
+        } else {
+            panic!("unknown distribution fixture tenant")
+        };
+        let (who, audit) = self.authority(t, admin_user_id).await;
         dao::create(
             &self.db,
             who,
@@ -197,7 +196,7 @@ fn create_body() -> Value {
 #[tokio::test]
 async fn real_tenant_crud_keeps_identity_revision_audit_and_nullable_fields() {
     let mut f = Fixture::new().await;
-    let token = f.token(f.a.owner_user_id, Some(f.a.id)).await;
+    let token = f.token(f.a.admin_user_id, Some(f.a.id)).await;
     let base = f.path(f.a.id);
     let (s, row, request_id) = request(
         create_router(f.state.clone()),
@@ -277,7 +276,7 @@ async fn real_tenant_crud_keeps_identity_revision_audit_and_nullable_fields() {
 async fn credentials_foreign_ids_and_root_without_membership_follow_distinct_routes() {
     let mut f = Fixture::new().await;
     let row = f.create(f.b.id).await;
-    let admin = f.token(f.a.owner_user_id, Some(f.a.id)).await;
+    let admin = f.token(f.a.admin_user_id, Some(f.a.id)).await;
     let member = f.token(f.member.id, Some(f.a.id)).await;
     let root = f.token(f.root.id, None).await;
     for token in [&member, &root] {
@@ -350,7 +349,7 @@ async fn credentials_foreign_ids_and_root_without_membership_follow_distinct_rou
         &f.db,
         &keycompute_db::CreateProduceAiKeyRequest {
             tenant_id: f.a.id,
-            user_id: f.a.owner_user_id,
+            user_id: f.a.admin_user_id,
             name: "inference only".into(),
             produce_ai_key_hash: keycompute_auth::ProduceAiKeyValidator::hash_key(&raw),
             produce_ai_key_preview: "sk-fixture-****".into(),
@@ -398,7 +397,7 @@ async fn credentials_foreign_ids_and_root_without_membership_follow_distinct_rou
 #[tokio::test]
 async fn direct_dao_rejects_forged_actors_bad_rates_and_foreign_beneficiaries() {
     let mut f = Fixture::new().await;
-    let (who, audit) = f.authority(f.a.id, f.a.owner_user_id).await;
+    let (who, audit) = f.authority(f.a.id, f.a.admin_user_id).await;
     for kind in [
         CredentialKind::ApiKey,
         CredentialKind::Node,
@@ -444,7 +443,7 @@ async fn direct_dao_rejects_forged_actors_bad_rates_and_foreign_beneficiaries() 
     }
     let mut foreign = f.input(f.a.id);
     foreign.beneficiary_scope = BeneficiaryScope::TenantMember;
-    foreign.beneficiary_id = Some(f.b.owner_user_id);
+    foreign.beneficiary_id = Some(f.b.admin_user_id);
     assert!(
         dao::create(&f.db, who, &audit, &foreign, "foreign beneficiary")
             .await
@@ -514,7 +513,7 @@ async fn direct_dao_rejects_forged_actors_bad_rates_and_foreign_beneficiaries() 
 async fn audit_failure_rolls_back_create_update_delete_and_default_inside_outer_transaction() {
     let mut f = Fixture::new().await;
     let row = f.create(f.a.id).await;
-    let (who, audit) = f.authority(f.a.id, f.a.owner_user_id).await;
+    let (who, audit) = f.authority(f.a.id, f.a.admin_user_id).await;
     let tx = f.db.begin().await.unwrap();
     // Identical lock order to production, avoiding DDL/authority lock inversion.
     tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
@@ -581,7 +580,7 @@ async fn audit_failure_rolls_back_create_update_delete_and_default_inside_outer_
 async fn same_revision_race_and_concurrent_defaults_are_atomic() {
     let mut f = Fixture::new().await;
     let row = f.create(f.a.id).await;
-    let (who, audit) = f.authority(f.a.id, f.a.owner_user_id).await;
+    let (who, audit) = f.authority(f.a.id, f.a.admin_user_id).await;
     let mut one = dao::PolicyPatch::empty(row.updated_at);
     one.name = Some("first change".into());
     let mut two = one.clone();
@@ -816,7 +815,7 @@ async fn changing_future_policy_cannot_rewrite_existing_distribution_or_money() 
     )
     .await
     .unwrap();
-    let (who, audit) = f.authority(f.a.id, f.a.owner_user_id).await;
+    let (who, audit) = f.authority(f.a.id, f.a.admin_user_id).await;
     let mut patch = dao::PolicyPatch::empty(row.updated_at);
     patch.commission_rate = Some("0.9".parse().unwrap());
     let changed = dao::update(&f.db, who, &audit, row.id, &patch, "future allocation only")

@@ -37,9 +37,9 @@ async fn user(db: &DatabaseConnection, name: &str, verified: bool) -> User {
     )).await.unwrap();
     user
 }
-async fn tenant(db: &DatabaseConnection, owner: &User, slug: &str) -> Tenant {
+async fn tenant(db: &DatabaseConnection, admin: &User, slug: &str) -> Tenant {
     let tx = db.begin().await.unwrap();
-    let tenant = Tenant::create_owned(
+    let tenant = Tenant::create_with_admin(
         &tx,
         &CreateTenantRequest {
             name: slug.into(),
@@ -48,8 +48,8 @@ async fn tenant(db: &DatabaseConnection, owner: &User, slug: &str) -> Tenant {
             default_rpm_limit: None,
             default_tpm_limit: None,
         },
-        owner.id,
-        &actor(owner, None),
+        admin.id,
+        &actor(admin, None),
     )
     .await
     .unwrap();
@@ -95,13 +95,13 @@ async fn accept(
 }
 fn request(
     tenant: &Tenant,
-    owner: &User,
+    admin: &User,
     target: &User,
     role: TenantRole,
 ) -> CreateTenantInvitationRequest {
     CreateTenantInvitationRequest {
         tenant_id: tenant.id,
-        invited_by: owner.id,
+        invited_by: admin.id,
         email: target.email.to_ascii_uppercase(),
         tenant_role: role,
         expires_at: Utc::now() + Duration::hours(2),
@@ -127,40 +127,38 @@ async fn run(db: DatabaseConnection) {
             .is_err()
     );
     tx.rollback().await.unwrap();
-    let owner = user(&db, "owner", true).await;
-    let organization = tenant(&db, &owner, "tenant-a").await;
-    let admin = actor(&owner, Some(TenantRole::Admin));
-    // A globally suspended identity cannot remain the tenant's usable owner,
-    // even when its retained membership row still says active/admin.
-    let suspended_owner = db.begin().await.unwrap();
-    suspended_owner
+    let primary_admin = user(&db, "primary-admin", true).await;
+    let organization = tenant(&db, &primary_admin, "tenant-a").await;
+    let admin = actor(&primary_admin, Some(TenantRole::Admin));
+    // Tenant administration is membership-based. Suspending the global user
+    // invalidates access without relying on a distinguished administrator.
+    let suspended_admin = db.begin().await.unwrap();
+    suspended_admin
         .execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE users SET status='suspended' WHERE id=$1",
-            [owner.id.into()],
+            [primary_admin.id.into()],
         ))
         .await
         .unwrap();
-    let rejected = suspended_owner
-        .commit()
-        .await
-        .expect_err("owner suspension must fail without ownership transfer");
-    assert!(
-        rejected
-            .to_string()
-            .contains("tenant owner must be an active admin"),
-        "{rejected}"
-    );
+    suspended_admin.commit().await.unwrap();
     assert_eq!(
-        User::find_by_id(&db, owner.id)
+        User::find_by_id(&db, primary_admin.id)
             .await
             .unwrap()
             .unwrap()
             .status,
-        "active"
+        "suspended"
     );
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE users SET status='active' WHERE id=$1",
+        [primary_admin.id.into()],
+    ))
+    .await
+    .unwrap();
     let invitee = user(&db, "invitee", false).await;
-    let req = request(&organization, &owner, &invitee, TenantRole::Admin);
+    let req = request(&organization, &primary_admin, &invitee, TenantRole::Admin);
 
     let (first, second) = tokio::join!(issue(&db, &req, &admin), issue(&db, &req, &admin));
     let first = first.unwrap();
@@ -195,7 +193,9 @@ async fn run(db: DatabaseConnection) {
         "token is bound to tenant"
     );
     assert!(
-        accept(&db, organization.id, &token, &owner).await.is_err(),
+        accept(&db, organization.id, &token, &primary_admin)
+            .await
+            .is_err(),
         "token is bound to verified email"
     );
     let (a, b) = tokio::join!(
@@ -225,7 +225,12 @@ async fn run(db: DatabaseConnection) {
     let second_admin = user(&db, "second-admin", true).await;
     let second_admin_invite = issue(
         &db,
-        &request(&organization, &owner, &second_admin, TenantRole::Admin),
+        &request(
+            &organization,
+            &primary_admin,
+            &second_admin,
+            TenantRole::Admin,
+        ),
         &admin,
     )
     .await
@@ -238,6 +243,39 @@ async fn run(db: DatabaseConnection) {
     )
     .await
     .unwrap();
+    let invitation_race_admin = user(&db, "invitation-race-admin", true).await;
+    let invitation_race = issue(
+        &db,
+        &request(
+            &organization,
+            &primary_admin,
+            &invitation_race_admin,
+            TenantRole::Member,
+        ),
+        &admin,
+    )
+    .await
+    .unwrap();
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status,invited_by) VALUES($1,$2,'admin','active',$3)",
+        [
+            organization.id.into(),
+            invitation_race_admin.id.into(),
+            root.id.into(),
+        ],
+    ))
+    .await
+    .unwrap();
+    let protected = accept(
+        &db,
+        organization.id,
+        invitation_race.token.as_deref().unwrap(),
+        &invitation_race_admin,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(protected.to_string(), "peer_tenant_administrator_protected");
     let pending_target = user(&db, "pending-target", true).await;
     let pending = issue(
         &db,
@@ -252,13 +290,39 @@ async fn run(db: DatabaseConnection) {
     .await
     .unwrap();
     let tx = db.begin().await.unwrap();
-    TenantMembership::set_status(
+    let protected = TenantMembership::set_status(
         &tx,
         organization.id,
         second_admin.id,
         keycompute_types::MembershipStatus::Suspended,
         1,
         &admin,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(protected.to_string(), "peer_tenant_administrator_protected");
+    let protected = TenantMembership::set_role(
+        &tx,
+        organization.id,
+        second_admin.id,
+        TenantRole::Member,
+        1,
+        &admin,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(protected.to_string(), "peer_tenant_administrator_protected");
+    tx.rollback().await.unwrap();
+
+    let platform_admin = actor(&root, None);
+    let tx = db.begin().await.unwrap();
+    TenantMembership::set_status(
+        &tx,
+        organization.id,
+        second_admin.id,
+        keycompute_types::MembershipStatus::Suspended,
+        1,
+        &platform_admin,
     )
     .await
     .unwrap();
@@ -274,29 +338,53 @@ async fn run(db: DatabaseConnection) {
         .is_err(),
         "suspended inviter cannot authorize a pending invitation"
     );
-
-    let tx = db.begin().await.unwrap();
-    TenantMembership::set_role(
-        &tx,
-        organization.id,
-        owner.id,
-        TenantRole::Member,
-        1,
+    let protected = issue(
+        &db,
+        &request(
+            &organization,
+            &primary_admin,
+            &second_admin,
+            TenantRole::Member,
+        ),
         &admin,
     )
     .await
+    .unwrap_err();
+    assert_eq!(protected.to_string(), "peer_tenant_administrator_protected");
+
+    let suspended_peer = TenantMembership::find_any(&db, organization.id, second_admin.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let tx = db.begin().await.unwrap();
+    let restored = TenantMembership::set_status(
+        &tx,
+        organization.id,
+        second_admin.id,
+        keycompute_types::MembershipStatus::Active,
+        suspended_peer.authz_version,
+        &platform_admin,
+    )
+    .await
     .unwrap();
-    assert!(
-        tx.commit().await.is_err(),
-        "owner cannot be demoted even when another admin exists"
-    );
+    TenantMembership::set_role(
+        &tx,
+        organization.id,
+        second_admin.id,
+        TenantRole::Member,
+        restored.authz_version,
+        &platform_admin,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
     assert_eq!(
-        TenantMembership::find(&db, organization.id, owner.id)
+        TenantMembership::find(&db, organization.id, second_admin.id)
             .await
             .unwrap()
             .unwrap()
             .tenant_role,
-        "admin"
+        "member"
     );
     let tx = db.begin().await.unwrap();
     let fake_root = AuditContext {
@@ -328,7 +416,7 @@ async fn run(db: DatabaseConnection) {
         invitee.id,
         keycompute_types::MembershipStatus::Removed,
         1,
-        &admin,
+        &platform_admin,
     )
     .await
     .unwrap();
@@ -341,7 +429,7 @@ async fn run(db: DatabaseConnection) {
     );
     let rejoin = issue(
         &db,
-        &request(&organization, &owner, &invitee, TenantRole::Member),
+        &request(&organization, &primary_admin, &invitee, TenantRole::Member),
         &admin,
     )
     .await
@@ -377,13 +465,33 @@ async fn run(db: DatabaseConnection) {
         "rejoin must not resurrect old credentials"
     );
 
-    let personal = tenant(&db, &invitee, "tenant-b").await;
+    let duplicate_tenant = db.begin().await.unwrap();
+    assert!(
+        Tenant::create_with_admin(
+            &duplicate_tenant,
+            &CreateTenantRequest {
+                name: "duplicate".into(),
+                slug: "tenant-duplicate".into(),
+                description: None,
+                default_rpm_limit: None,
+                default_tpm_limit: None,
+            },
+            invitee.id,
+            &actor(&invitee, None),
+        )
+        .await
+        .is_err(),
+        "a current tenant member cannot become administrator of another tenant"
+    );
+    duplicate_tenant.rollback().await.unwrap();
+    let personal_admin = user(&db, "personal-admin", true).await;
+    let personal = tenant(&db, &personal_admin, "tenant-b").await;
     assert_eq!(
         TenantMembership::list_active_for_user(&db, invitee.id)
             .await
             .unwrap()
             .len(),
-        2
+        1
     );
     UserBalance::recharge(
         &db,
@@ -395,9 +503,16 @@ async fn run(db: DatabaseConnection) {
     )
     .await
     .unwrap();
-    UserBalance::recharge(&db, personal.id, invitee.id, Decimal::from(34), None, None)
-        .await
-        .unwrap();
+    UserBalance::recharge(
+        &db,
+        personal.id,
+        personal_admin.id,
+        Decimal::from(34),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         UserBalance::find_by_user(&db, organization.id, invitee.id)
             .await
@@ -407,7 +522,7 @@ async fn run(db: DatabaseConnection) {
         Decimal::from(12)
     );
     assert_eq!(
-        UserBalance::find_by_user(&db, personal.id, invitee.id)
+        UserBalance::find_by_user(&db, personal.id, personal_admin.id)
             .await
             .unwrap()
             .unwrap()
@@ -482,7 +597,7 @@ async fn run(db: DatabaseConnection) {
     .await
     .unwrap();
 
-    let expires = request(&organization, &owner, &outsider, TenantRole::Member);
+    let expires = request(&organization, &primary_admin, &outsider, TenantRole::Member);
     let old = issue(&db, &expires, &admin).await.unwrap();
     db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
         "UPDATE tenant_invitations SET expires_at=NOW()-INTERVAL '1 second' WHERE tenant_id=$1 AND id=$2",
@@ -526,7 +641,7 @@ async fn run(db: DatabaseConnection) {
     ] {
         let outstanding = issue(
             &db,
-            &request(&organization, &owner, &invitee, TenantRole::Member),
+            &request(&organization, &primary_admin, &invitee, TenantRole::Member),
             &admin,
         )
         .await
@@ -564,12 +679,6 @@ async fn run(db: DatabaseConnection) {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            TenantMembership::find(&db, personal.id, invitee.id)
-                .await
-                .unwrap()
-                .is_some()
-        );
         if status == keycompute_types::MembershipStatus::Removed {
             // An inviter field and a previous acceptance timestamp are not a
             // new grant. Reject both metadata forgery and a suspended detour.
@@ -606,7 +715,7 @@ async fn run(db: DatabaseConnection) {
         }
         let fresh = issue(
             &db,
-            &request(&organization, &owner, &invitee, TenantRole::Member),
+            &request(&organization, &primary_admin, &invitee, TenantRole::Member),
             &admin,
         )
         .await
@@ -622,9 +731,12 @@ async fn run(db: DatabaseConnection) {
         .unwrap();
     }
 
-    let scope =
-        keycompute_types::TenantScope::checked(organization.id, owner.id, TenantRole::Admin)
-            .unwrap();
+    let scope = keycompute_types::TenantScope::checked(
+        organization.id,
+        primary_admin.id,
+        TenantRole::Admin,
+    )
+    .unwrap();
     let audit = TenantAuditEvent::list_in_tenant(&db, scope, 100, 0)
         .await
         .unwrap();
@@ -646,7 +758,7 @@ async fn run(db: DatabaseConnection) {
     );
     tx.rollback().await.unwrap();
     println!(
-        "Global identity, orthogonal membership, owner protection, invitations, permanent key revocation, independent wallets and immutable audit: passed"
+        "Global identity, single-tenant membership, peer administrators, invitations, permanent key revocation, scoped wallets and immutable audit: passed"
     );
 }
 

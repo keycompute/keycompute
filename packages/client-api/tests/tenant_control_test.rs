@@ -1,5 +1,6 @@
 use client_api::api::tenant_control::{
-    self as client, InvitationToken, MemberPatch, TenantAuditQuery, TenantPatch,
+    self as client, CreateInvitation, GrantMember, InvitationToken, MemberPatch, TenantAuditQuery,
+    TenantPatch,
 };
 use client_api::{ClientError, TenantControlApi};
 use keycompute_types::{MembershipStatus, TenantRole};
@@ -183,6 +184,77 @@ async fn member_status_filter_is_typed_and_keeps_the_platform_target() {
 
     assert_eq!(page.total, 7);
     server.verify().await;
+}
+
+#[tokio::test]
+async fn platform_direct_grant_uses_the_control_route() {
+    let (client, server) = common::create_test_client().await;
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let control = TenantControlApi::platform_tenant(&client, tenant).unwrap();
+    let members_path = format!("/api/v1/platform/tenants/{tenant}/control/members");
+    Mock::given(method("POST"))
+        .and(path(&members_path))
+        .and(body_json(json!({
+            "user_id": user
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "user_id": user,
+            "email": "admin@example.com",
+            "name": "Tenant Admin",
+            "user_status": "active",
+            "tenant_role": "admin",
+            "membership_status": "active",
+            "authz_version": 1,
+            "invited_by": Uuid::new_v4(),
+            "joined_at": "2026-10-19T00:00:00Z",
+            "removed_at": null
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let granted = control
+        .grant_member(&GrantMember { user_id: user }, "console")
+        .await
+        .unwrap();
+    assert_eq!(granted.user_id, user);
+
+    let tenant_control = TenantControlApi::new(&client, tenant).unwrap();
+    assert!(
+        tenant_control
+            .grant_member(&GrantMember { user_id: user }, "console",)
+            .await
+            .is_err()
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn platform_target_cannot_use_tenant_invitation_workflows() {
+    let (client, server) = common::create_test_client().await;
+    let control = TenantControlApi::platform_tenant(&client, Uuid::new_v4()).unwrap();
+
+    assert!(control.invitations(1, 20, "console").await.is_err());
+    assert!(
+        control
+            .create_invitation(
+                &CreateInvitation {
+                    email: "member@example.com".into(),
+                    tenant_role: TenantRole::Member,
+                    expires_in_seconds: 3_600,
+                },
+                "console",
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        control
+            .revoke_invitation(Uuid::new_v4(), "console")
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

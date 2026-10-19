@@ -21,7 +21,7 @@ but the server remains authoritative. Recovery sends the exact observed ownershi
 version plus a bounded reason. A future/live reservation, changed version or changed
 financial authority is rejected by the server. The command is single-dispatch: a
 401/409/503 or uncertain transport result is not automatically replayed. A confirmed
-response must preserve tenant owner/request identity, exact decimal fields, reason,
+response must preserve the tenant, member-owner and request identities, exact decimal fields, reason,
 a real releasing actor and the existing late-usage warning.
 
 Recovery does not cancel upstream work. Already accepted usage may settle later and

@@ -127,8 +127,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     member: User,
     root: User,
     admin: String,
@@ -168,7 +168,7 @@ impl Fixture {
         .await
         .unwrap();
         let state = state(db.clone()).await;
-        let admin = jwt(&state, &db, a.owner_user_id, Some(a.id)).await;
+        let admin = jwt(&state, &db, a.admin_user_id, Some(a.id)).await;
         let member_token = jwt(&state, &db, member.id, Some(a.id)).await;
         let root_token = jwt(&state, &db, root.id, None).await;
         let operator_token = jwt(&state, &db, operator.id, None).await;
@@ -241,10 +241,10 @@ impl Fixture {
 async fn metadata_lists_details_counts_and_personal_views_are_tenant_bound() {
     let mut f = Fixture::new().await;
     let n = f.node(f.a.id, f.member.id, "节点_%").await;
-    let own = f.node(f.a.id, f.a.owner_user_id, "other").await;
-    let foreign = f.node(f.b.id, f.b.owner_user_id, "foreign").await;
+    let own = f.node(f.a.id, f.a.admin_user_id, "other").await;
+    let foreign = f.node(f.b.id, f.b.admin_user_id, "foreign").await;
     let task = f.task(f.a.id, f.member.id, "safe-model").await;
-    f.task(f.b.id, f.b.owner_user_id, "foreign-model").await;
+    f.task(f.b.id, f.b.admin_user_id, "foreign-model").await;
     let reg = f.registration(f.a.id, f.member.id).await;
     let (status, page, _) = f.get(&f.admin, &f.path("nodes?page_size=1")).await;
     assert_eq!(status, StatusCode::OK, "{page}");
@@ -284,7 +284,7 @@ async fn metadata_lists_details_counts_and_personal_views_are_tenant_bound() {
     assert!(!tokens.to_string().contains(&reg.token_hash));
     assert!(!tokens.to_string().contains("token_hash"));
     assert!(!page.to_string().contains("never-leak"));
-    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
+    let scope = f.scope(f.a.admin_user_id, f.a.id, false).await;
     let tx = f.db.begin().await.unwrap();
     tx.execute_unprepared("SET TRANSACTION READ ONLY")
         .await
@@ -531,13 +531,13 @@ async fn node_revocation_drains_accepted_lease_without_restoring_credentials_or_
     .await
     .unwrap();
     let token = f.registration(f.a.id, f.member.id).await;
-    token.approve(&f.db, f.a.owner_user_id).await.unwrap();
+    token.approve(&f.db, f.a.admin_user_id).await.unwrap();
     assert!(
         UserNodeGatewayToken::consume(&f.db, token.id, n.id)
             .await
             .unwrap()
     );
-    let task = f.task(f.a.id, f.a.owner_user_id, model).await;
+    let task = f.task(f.a.id, f.a.admin_user_id, model).await;
     let lease = Uuid::new_v4();
     assert!(
         NodeTask::claim(&f.db, task.id, n.id, session.id, lease)
@@ -653,9 +653,9 @@ async fn node_revocation_drains_accepted_lease_without_restoring_credentials_or_
 async fn stale_revisions_foreign_ids_and_audit_failures_leave_nodes_unchanged() {
     let mut f = Fixture::new().await;
     let node = f.node(f.a.id, f.member.id, "before").await;
-    let foreign = f.node(f.b.id, f.b.owner_user_id, "foreign").await;
-    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
-    let a = audit(f.a.owner_user_id, Some(TenantRole::Admin));
+    let foreign = f.node(f.b.id, f.b.admin_user_id, "foreign").await;
+    let scope = f.scope(f.a.admin_user_id, f.a.id, false).await;
+    let a = audit(f.a.admin_user_id, Some(TenantRole::Admin));
     assert!(
         dao::change_node(
             &f.db,
@@ -857,13 +857,13 @@ async fn queued_approval_rechecks_the_exact_administrator_grant_after_lock_wait(
 async fn inference_credentials_foreign_owners_and_stale_versions_cannot_reuse_control_authority() {
     let mut f = Fixture::new().await;
     let n = f.node(f.a.id, f.member.id, "credential-check").await;
-    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
+    let scope = f.scope(f.a.admin_user_id, f.a.id, false).await;
     let raw = keycompute_auth::ProduceAiKeyValidator::generate_key();
     integration_tests::db::create_test_api_key(
         &f.db,
         &keycompute_db::CreateProduceAiKeyRequest {
             tenant_id: f.a.id,
-            user_id: f.a.owner_user_id,
+            user_id: f.a.admin_user_id,
             name: "control denied".into(),
             produce_ai_key_hash: keycompute_auth::ProduceAiKeyValidator::hash_key(&raw),
             produce_ai_key_preview: "test***".into(),
@@ -880,7 +880,7 @@ async fn inference_credentials_foreign_owners_and_stale_versions_cannot_reuse_co
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE users SET token_version=token_version+1 WHERE id=$1",
-        [f.a.owner_user_id.into()],
+        [f.a.admin_user_id.into()],
     ))
     .await
     .unwrap();
@@ -894,7 +894,7 @@ async fn inference_credentials_foreign_owners_and_stale_versions_cannot_reuse_co
         dao::change_node(
             &f.db,
             scope,
-            &audit(f.a.owner_user_id, Some(TenantRole::Admin)),
+            &audit(f.a.admin_user_id, Some(TenantRole::Admin)),
             dao::NodeMutation {
                 id: n.id,
                 expected_updated_at: n.updated_at,
@@ -921,7 +921,7 @@ async fn inference_credentials_foreign_owners_and_stale_versions_cannot_reuse_co
     );
     f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",[f.b.id.into(),f.member.id.into()])).await.unwrap();
     let rejected = f.registration(f.b.id, f.member.id).await;
-    rejected.reject(&f.db, f.b.owner_user_id).await.unwrap();
+    rejected.reject(&f.db, f.b.admin_user_id).await.unwrap();
     // A member can belong to two tenants; the first tenant still cannot erase
     // the other tenant's rejected registration through its personal URL.
     assert_eq!(
@@ -948,7 +948,7 @@ async fn inference_credentials_foreign_owners_and_stale_versions_cannot_reuse_co
 async fn database_rejects_node_credential_reassignment_and_terminal_reactivation() {
     let mut f = Fixture::new().await;
     let n = f.node(f.a.id, f.member.id, "guard").await;
-    let foreign = f.node(f.b.id, f.b.owner_user_id, "foreign").await;
+    let foreign = f.node(f.b.id, f.b.admin_user_id, "foreign").await;
     let reg = f.registration(f.a.id, f.member.id).await;
     assert!(
         f.db.execute(Statement::from_sql_and_values(
@@ -959,7 +959,7 @@ async fn database_rejects_node_credential_reassignment_and_terminal_reactivation
         .await
         .is_err()
     );
-    reg.reject(&f.db, f.a.owner_user_id).await.unwrap();
+    reg.reject(&f.db, f.a.admin_user_id).await.unwrap();
     assert!(
         f.db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -1007,11 +1007,11 @@ async fn database_rejects_node_credential_reassignment_and_terminal_reactivation
         .await
         .is_err()
     );
-    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
+    let scope = f.scope(f.a.admin_user_id, f.a.id, false).await;
     let deleted = dao::change_node(
         &f.db,
         scope,
-        &audit(f.a.owner_user_id, Some(TenantRole::Admin)),
+        &audit(f.a.admin_user_id, Some(TenantRole::Admin)),
         dao::NodeMutation {
             id: n.id,
             expected_updated_at: n.updated_at,
@@ -1037,9 +1037,9 @@ async fn database_rejects_node_credential_reassignment_and_terminal_reactivation
 async fn registration_approval_revocation_and_reveal_audit_failures_roll_back() {
     let mut f = Fixture::new().await;
     let reg = f.registration(f.a.id, f.member.id).await;
-    let admin = f.scope(f.a.owner_user_id, f.a.id, false).await;
+    let admin = f.scope(f.a.admin_user_id, f.a.id, false).await;
     let own = f.scope(f.member.id, f.a.id, true).await;
-    let a = audit(f.a.owner_user_id, Some(TenantRole::Admin));
+    let a = audit(f.a.admin_user_id, Some(TenantRole::Admin));
     let o = audit(f.member.id, Some(TenantRole::Member));
     let tx = f.db.begin().await.unwrap();
     tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
@@ -1070,7 +1070,7 @@ async fn registration_approval_revocation_and_reveal_audit_failures_roll_back() 
     );
     // Prepare approval inside this isolated outer transaction only, then test
     // that an audited administrative revocation leaves it approved on failure.
-    reg.approve(&tx, f.a.owner_user_id).await.unwrap();
+    reg.approve(&tx, f.a.admin_user_id).await.unwrap();
     let approved = UserNodeGatewayToken::find_by_id(&tx, reg.id)
         .await
         .unwrap()
@@ -1131,8 +1131,8 @@ async fn registration_approval_revocation_and_reveal_audit_failures_roll_back() 
 async fn old_runtime_transactions_cannot_regress_node_control_revisions() {
     let mut f = Fixture::new().await;
     let node = f.node(f.a.id, f.member.id, "revision-node").await;
-    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
-    let actor = audit(f.a.owner_user_id, Some(TenantRole::Admin));
+    let scope = f.scope(f.a.admin_user_id, f.a.id, false).await;
+    let actor = audit(f.a.admin_user_id, Some(TenantRole::Admin));
     // Start the runtime transaction before another connection updates the row.
     // PostgreSQL NOW() remains this older time even after it sees a newer row.
     let delayed = f.db.begin().await.unwrap();
@@ -1200,9 +1200,9 @@ async fn old_runtime_transactions_cannot_regress_node_control_revisions() {
 async fn queued_task_commands_preserve_scope_and_archive_instead_of_erasing_evidence() {
     let mut f = Fixture::new().await;
     let task = f.task(f.a.id, f.member.id, "queued-control").await;
-    let peer = f.task(f.a.id, f.a.owner_user_id, "peer-control").await;
-    let foreign = f.task(f.b.id, f.b.owner_user_id, "foreign-control").await;
-    let operator_task = f.task(f.a.id, f.a.owner_user_id, "operator-control").await;
+    let peer = f.task(f.a.id, f.a.admin_user_id, "peer-control").await;
+    let foreign = f.task(f.b.id, f.b.admin_user_id, "foreign-control").await;
+    let operator_task = f.task(f.a.id, f.a.admin_user_id, "operator-control").await;
     let command = json!({"expected_updated_at":task.updated_at,"reason":"cancel unused fixture"});
     assert_eq!(
         call(
@@ -1475,8 +1475,8 @@ async fn cancellation_cannot_override_an_uncancellable_lease_or_a_durable_termin
 async fn task_command_audit_failure_rolls_back_cancellation_and_archive() {
     let mut f = Fixture::new().await;
     let task = f.task(f.a.id, f.member.id, "audit-task").await;
-    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
-    let actor = audit(f.a.owner_user_id, Some(TenantRole::Admin));
+    let scope = f.scope(f.a.admin_user_id, f.a.id, false).await;
+    let actor = audit(f.a.admin_user_id, Some(TenantRole::Admin));
     let suffix = Uuid::new_v4().simple().to_string();
     let function = format!("task_audit_{suffix}");
     let trigger = format!("task_trigger_{suffix}");
@@ -1543,9 +1543,9 @@ async fn task_command_audit_failure_rolls_back_cancellation_and_archive() {
 async fn task_commands_compare_exact_revisions_and_current_authority() {
     let mut f = Fixture::new().await;
     let task = f.task(f.a.id, f.member.id, "concurrent-task").await;
-    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
-    let a = audit(f.a.owner_user_id, Some(TenantRole::Admin));
-    let b = audit(f.a.owner_user_id, Some(TenantRole::Admin));
+    let scope = f.scope(f.a.admin_user_id, f.a.id, false).await;
+    let a = audit(f.a.admin_user_id, Some(TenantRole::Admin));
+    let b = audit(f.a.admin_user_id, Some(TenantRole::Admin));
     let cmd = dao::TaskMutation {
         id: task.id,
         expected_updated_at: task.updated_at,
@@ -1647,8 +1647,8 @@ async fn task_commands_compare_exact_revisions_and_current_authority() {
 async fn database_keeps_task_control_markers_and_original_request_immutable() {
     let mut f = Fixture::new().await;
     let task = f.task(f.a.id, f.member.id, "immutable-task").await;
-    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
-    let actor = audit(f.a.owner_user_id, Some(TenantRole::Admin));
+    let scope = f.scope(f.a.admin_user_id, f.a.id, false).await;
+    let actor = audit(f.a.admin_user_id, Some(TenantRole::Admin));
     let cancelled = dao::change_task(
         &f.db,
         scope,
@@ -1722,7 +1722,7 @@ async fn database_keeps_task_control_markers_and_original_request_immutable() {
 async fn session_scope_rejects_foreign_owners_at_dao_and_database_layers() {
     let mut f = Fixture::new().await;
     let node = f.node(f.a.id, f.member.id, "session-owner").await;
-    let foreign = f.node(f.b.id, f.b.owner_user_id, "session-foreign").await;
+    let foreign = f.node(f.b.id, f.b.admin_user_id, "session-foreign").await;
     let scope = keycompute_db::NodeSessionScope::for_node(&node);
     let secret_hash = format!("must-not-appear-in-debug-{}", Uuid::new_v4());
     let request = CreateNodeSessionRequest {
@@ -1754,7 +1754,7 @@ async fn session_scope_rejects_foreign_owners_at_dao_and_database_layers() {
     let wrong_tenant =
         keycompute_db::NodeSessionScope::checked(f.b.id, node.id, f.member.id).unwrap();
     let wrong_owner =
-        keycompute_db::NodeSessionScope::checked(f.a.id, node.id, f.a.owner_user_id).unwrap();
+        keycompute_db::NodeSessionScope::checked(f.a.id, node.id, f.a.admin_user_id).unwrap();
     for denied in [
         wrong_tenant,
         wrong_owner,
@@ -1782,7 +1782,7 @@ async fn session_scope_rejects_foreign_owners_at_dao_and_database_layers() {
     }
     // A raw INSERT cannot evade the composite node identity, even when all
     // individual UUIDs and memberships are real.
-    for (tenant, owner) in [(f.b.id, f.b.owner_user_id), (f.a.id, f.a.owner_user_id)] {
+    for (tenant, owner) in [(f.b.id, f.b.admin_user_id), (f.a.id, f.a.admin_user_id)] {
         let error = f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
             "INSERT INTO node_sessions(tenant_id,owner_user_id,node_id,session_token_hash,expires_at) VALUES($1,$2,$3,$4,clock_timestamp()+interval '1 hour')",
             [tenant.into(),owner.into(),node.id.into(),Uuid::new_v4().to_string().into()]))
@@ -1832,7 +1832,7 @@ async fn node_http_identity_comes_from_session_and_not_caller_scope_fields() {
     let mut f = Fixture::new().await;
     let node = f.node(f.a.id, f.member.id, "session-http-owner").await;
     let foreign = f
-        .node(f.b.id, f.b.owner_user_id, "session-http-foreign")
+        .node(f.b.id, f.b.admin_user_id, "session-http-foreign")
         .await;
     let secret = format!("isolated-http-session-{}", Uuid::new_v4());
     let session = NodeSession::create(

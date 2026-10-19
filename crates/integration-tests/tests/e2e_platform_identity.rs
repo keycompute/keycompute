@@ -15,7 +15,7 @@ use keycompute_db::{
     UpdateTenantRequest, User,
     models::{
         financial_scope::{FinancialScope, FinancialSession},
-        platform_identity::{PlatformIdentity, PlatformUserPatch},
+        platform_identity::{PlatformIdentity, PlatformUserFilter, PlatformUserPatch},
     },
 };
 use keycompute_server::{AppState, create_router};
@@ -256,6 +256,15 @@ async fn canonical_root_identity_reads_are_current_scoped_and_never_load_credent
 async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
     isolated(|f| async move {
         let scope = f.scope(f.root).await;
+        let unassigned = User::create(
+            &f.db,
+            &CreateUserRequest {
+                email: "tenant-admin-candidate@fixture.invalid".into(),
+                name: Some("tenant-admin-candidate".into()),
+            },
+        )
+        .await
+        .unwrap();
         f.db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE users SET name='literal%_operator' WHERE id=$1",
@@ -266,9 +275,12 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
         let filtered = PlatformIdentity::users(
             &f.db,
             scope,
-            Some(PlatformRole::Operator),
-            Some(UserStatus::Active),
-            Some("%_"),
+            PlatformUserFilter {
+                role: Some(PlatformRole::Operator),
+                status: Some(UserStatus::Active),
+                search: Some("%_"),
+                ..Default::default()
+            },
             1,
             0,
         )
@@ -276,11 +288,51 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
         .unwrap();
         assert_eq!(filtered.total, 1);
         assert_eq!(filtered.items[0].id, f.operator);
-        let out = PlatformIdentity::users(&f.db, scope, None, None, Some("%_"), 1, 1)
-            .await
-            .unwrap();
+        let out = PlatformIdentity::users(
+            &f.db,
+            scope,
+            PlatformUserFilter {
+                search: Some("%_"),
+                ..Default::default()
+            },
+            1,
+            1,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.total, 1);
         assert!(out.items.is_empty());
+        let eligible = PlatformIdentity::users(
+            &f.db,
+            scope,
+            PlatformUserFilter {
+                role: Some(PlatformRole::None),
+                status: Some(UserStatus::Active),
+                tenant_unassigned: true,
+                search: Some("tenant-admin-candidate"),
+            },
+            20,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(eligible.total, 1);
+        assert_eq!(eligible.items[0].id, unassigned.id);
+        let assigned = PlatformIdentity::users(
+            &f.db,
+            scope,
+            PlatformUserFilter {
+                role: Some(PlatformRole::None),
+                status: Some(UserStatus::Active),
+                tenant_unassigned: true,
+                search: Some("settings-user"),
+            },
+            20,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(assigned.total, 0);
         let tenants = PlatformIdentity::tenants(&f.db, scope, Some("settings"), 1, 0)
             .await
             .unwrap();
@@ -290,7 +342,7 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
         for id in [f.user, f.admin, f.operator] {
             let forged = f.scope(id).await;
             assert!(
-                PlatformIdentity::users(&f.db, forged, None, None, None, 20, 0)
+                PlatformIdentity::users(&f.db, forged, PlatformUserFilter::default(), 20, 0,)
                     .await
                     .is_err()
             );
@@ -301,7 +353,7 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
             );
         }
         assert!(
-            PlatformIdentity::users(&f.db, scope, None, None, None, 0, 0)
+            PlatformIdentity::users(&f.db, scope, PlatformUserFilter::default(), 0, 0)
                 .await
                 .is_err()
         );
@@ -314,7 +366,7 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
     .await;
 }
 #[tokio::test]
-async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owner_invariants() {
+async fn root_mutations_are_audited_and_do_not_create_tenant_memberships() {
     isolated(|f| async move {
         let state = f.state();
         let root = f.token(&state, f.root, false, 3600).await;
@@ -394,7 +446,7 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
             "POST",
             "/api/v1/platform/tenants",
             &root,
-            json!({"name":"Ownerless business","slug":"ownerless-business"}),
+            json!({"name":"Empty business","slug":"empty-business"}),
         )
         .await;
         let create_request: Uuid = create_response.2["x-request-id"]
@@ -405,7 +457,7 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
         let created = ok(create_response);
         let tenant = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
         assert_eq!(created["user_count"], 0);
-        assert!(created["owner_user_id"].is_null());
+        assert!(created.get("owner_user_id").is_none());
         let rows = f.db.query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT scope_type,tenant_id,action,metadata FROM tenant_audit_events WHERE request_id=$1 ORDER BY id",
@@ -422,24 +474,6 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
             0
         );
 
-        let assigned_owner = keycompute_db::Tenant::find_by_id(&f.db, f.tenant)
-            .await
-            .unwrap()
-            .unwrap()
-            .owner_user_id
-            .expect("owned fixture tenant must retain its owner");
-        assert_eq!(
-            call(
-                app.clone(),
-                "PATCH",
-                &format!("/api/v1/platform/users/{assigned_owner}"),
-                &root,
-                json!({"status":"suspended","reason":"invalid owner suspension"}),
-            )
-            .await
-            .0,
-            StatusCode::CONFLICT
-        );
         let deactivated = ok(call(
             app.clone(),
             "PATCH",
@@ -629,11 +663,6 @@ async fn operator_can_manage_tenants_without_acquiring_tenant_membership() {
         .await);
         let tenant_id = created["id"].as_str().unwrap();
         let tenant_id = Uuid::parse_str(tenant_id).unwrap();
-        let stored = keycompute_db::Tenant::find_by_id(&f.db, tenant_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.owner_user_id, None);
         assert_eq!(
             keycompute_db::Tenant::count_users(&f.db, tenant_id)
                 .await
@@ -657,58 +686,35 @@ async fn operator_can_manage_tenants_without_acquiring_tenant_membership() {
             Value::Null,
         )
         .await);
-        assert!(context["owner_user_id"].is_null());
+        assert!(context.get("owner_user_id").is_none());
         assert_eq!(context["tenant_role"], "admin");
 
-        let invitee = User::find_by_id(&f.db, f.user).await.unwrap().unwrap();
-        f.db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "INSERT INTO user_credentials(user_id,password_hash,email_verified,email_verified_at) VALUES($1,'fixture',TRUE,clock_timestamp()) ON CONFLICT(user_id) DO UPDATE SET email_verified=TRUE,email_verified_at=clock_timestamp()",
-            [invitee.id.into()],
-        ))
+        let granted_admin = User::create(
+            &f.db,
+            &CreateUserRequest {
+                email: "operator-granted-admin@fixture.invalid".into(),
+                name: Some("Operator granted admin".into()),
+            },
+        )
         .await
         .unwrap();
-        let invitation_response = call(
+        let grant_response = call(
             app.clone(),
             "POST",
-            &format!("/api/v1/platform/tenants/{tenant_id}/control/invitations"),
+            &format!("/api/v1/platform/tenants/{tenant_id}/control/members"),
             &operator,
             json!({
-                "email": invitee.email,
-                "tenant_role": "admin",
-                "expires_in_seconds": 3600
+                "user_id": granted_admin.id
             }),
         )
         .await;
         assert_eq!(
-            invitation_response.0,
+            grant_response.0,
             StatusCode::CREATED,
             "{}",
-            invitation_response.1
+            grant_response.1
         );
-        let invitation = invitation_response.1;
-        let invitation_token = invitation["acceptance_link"]
-            .as_str()
-            .unwrap()
-            .split_once("#token=")
-            .unwrap()
-            .1;
-        let invitee_token = f.token(&state, f.user, false, 3600).await;
-        let accepted = ok(call(
-            app.clone(),
-            "POST",
-            &format!("/api/v1/invitations/{invitation_token}/accept"),
-            &invitee_token,
-            json!({}),
-        )
-        .await);
-        assert_eq!(accepted["tenant"]["owner_user_id"], f.user.to_string());
-        assert_eq!(accepted["membership"]["tenant_role"], "admin");
-        let stored = keycompute_db::Tenant::find_by_id(&f.db, tenant_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.owner_user_id, Some(f.user));
+        assert_eq!(grant_response.1["tenant_role"], "admin");
 
         // Platform authority also reaches tenant resources without acquiring a
         // membership. The owner still performs the one-time secret claim.
@@ -790,9 +796,15 @@ async fn operator_can_manage_tenants_without_acquiring_tenant_membership() {
             Value::Null,
         )
         .await);
-        assert!(platform_audit["items"].as_array().unwrap().iter().any(|event| {
-            event["scope_type"] == "platform" && event["action"] == "key_issuance.request"
-        }));
+        assert!(
+            platform_audit["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| {
+                    event["scope_type"] == "platform" && event["action"] == "key_issuance.request"
+                })
+        );
         assert!(platform_audit["total"].as_u64() > tenant_audit["total"].as_u64());
 
         for path in [
@@ -822,7 +834,7 @@ async fn operator_can_manage_tenants_without_acquiring_tenant_membership() {
             "{}",
             blocked_delete.1
         );
-        let membership = keycompute_db::TenantMembership::find(&f.db, tenant_id, f.user)
+        let membership = keycompute_db::TenantMembership::find(&f.db, tenant_id, granted_admin.id)
             .await
             .unwrap()
             .unwrap();
@@ -831,7 +843,7 @@ async fn operator_can_manage_tenants_without_acquiring_tenant_membership() {
             "DELETE",
             &format!(
                 "/api/v1/platform/tenants/{tenant_id}/control/members/{}",
-                f.user
+                granted_admin.id
             ),
             &operator,
             json!({"expected_authz_version":membership.authz_version}),
@@ -839,7 +851,7 @@ async fn operator_can_manage_tenants_without_acquiring_tenant_membership() {
         .await);
         assert_eq!(removed["membership_status"], "removed");
 
-        let retained_history_delete = call(
+        let deleted_after_member_removal = call(
             app.clone(),
             "DELETE",
             &format!("/api/v1/platform/tenants/{tenant_id}"),
@@ -848,10 +860,10 @@ async fn operator_can_manage_tenants_without_acquiring_tenant_membership() {
         )
         .await;
         assert_eq!(
-            retained_history_delete.0,
-            StatusCode::CONFLICT,
+            deleted_after_member_removal.0,
+            StatusCode::OK,
             "{}",
-            retained_history_delete.1
+            deleted_after_member_removal.1
         );
 
         let empty = ok(call(
@@ -880,6 +892,44 @@ async fn operator_can_manage_tenants_without_acquiring_tenant_membership() {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn payment_provider_verification_never_borrows_an_ordinary_member() {
+    isolated(|f| async move {
+        let state = f.state();
+        let operator = f.token(&state, f.operator, false, 3600).await;
+        let app = create_router(state);
+        let created = ok(call(
+            app.clone(),
+            "POST",
+            "/api/v1/platform/tenants",
+            &operator,
+            json!({
+                "name": "Verification tenant without administrator",
+                "slug": "verification-without-administrator"
+            }),
+        )
+        .await);
+        let tenant_id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        create_test_user(&f.db, tenant_id, "verification-ordinary-member", "isolated").await;
+
+        let response = call(
+            app,
+            "POST",
+            "/api/v1/admin/payments/providers/alipay/verify",
+            &operator,
+            json!({"tenant_id": tenant_id}),
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::NOT_FOUND, "{}", response.1);
+        assert!(
+            response.1.to_string().contains("active administrator"),
+            "{}",
+            response.1
         );
     })
     .await;
@@ -959,13 +1009,13 @@ async fn promoted_removed_member_keeps_implicit_platform_key_authority() {
 }
 
 #[tokio::test]
-async fn root_and_operator_create_ownerless_tenants_without_memberships() {
+async fn root_and_operator_create_empty_tenants_and_directly_grant_administrators() {
     isolated(|f| async move {
         let state = f.state();
         let app = create_router(state.clone());
         for (actor, slug) in [
-            (f.root, "root-created-ownerless"),
-            (f.operator, "operator-created-ownerless"),
+            (f.root, "root-created-empty"),
+            (f.operator, "operator-created-empty"),
         ] {
             let token = f.token(&state, actor, false, 3600).await;
             let created = ok(call(
@@ -974,17 +1024,12 @@ async fn root_and_operator_create_ownerless_tenants_without_memberships() {
                 "/api/v1/platform/tenants",
                 &token,
                 json!({
-                    "name": "Ownerless platform tenant",
+                    "name": "Empty platform tenant",
                     "slug": slug
                 }),
             )
             .await);
             let tenant_id = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
-            let tenant = keycompute_db::Tenant::find_by_id(&f.db, tenant_id)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(tenant.owner_user_id, None);
             assert_eq!(
                 keycompute_db::Tenant::count_users(&f.db, tenant_id)
                     .await
@@ -997,6 +1042,53 @@ async fn root_and_operator_create_ownerless_tenants_without_memberships() {
                     .unwrap()
                     .is_empty()
             );
+            let target = User::create(
+                &f.db,
+                &CreateUserRequest {
+                    email: format!("{slug}-admin@fixture.invalid"),
+                    name: Some(format!("{slug} admin")),
+                },
+            )
+            .await
+            .unwrap();
+            let granted = call(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/platform/tenants/{tenant_id}/control/members"),
+                &token,
+                json!({
+                    "user_id": target.id
+                }),
+            )
+            .await;
+            assert_eq!(granted.0, StatusCode::CREATED, "{}", granted.1);
+            assert_eq!(granted.1["user_id"], target.id.to_string());
+            assert_eq!(granted.1["tenant_role"], "admin");
+            let membership = keycompute_db::TenantMembership::find(&f.db, tenant_id, target.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(membership.tenant_role, "admin");
+            for (method, path) in [
+                (
+                    "GET",
+                    format!("/api/v1/platform/tenants/{tenant_id}/control/invitations"),
+                ),
+                (
+                    "POST",
+                    format!("/api/v1/platform/tenants/{tenant_id}/control/transfer-ownership"),
+                ),
+                (
+                    "POST",
+                    format!("/api/v1/tenants/{tenant_id}/transfer-ownership"),
+                ),
+            ] {
+                assert_eq!(
+                    call(app.clone(), method, &path, &token, json!({})).await.0,
+                    StatusCode::NOT_FOUND,
+                    "retired tenant-owner or platform-invitation route remained mounted: {path}"
+                );
+            }
         }
     })
     .await;
@@ -1235,7 +1327,7 @@ async fn identity_and_empty_tenant_deletion_roll_back_if_their_final_audit_fails
     isolated(|f|async move {
         let scope=f.scope(f.root).await;
         let target=User::create(&f.db,&CreateUserRequest {email:"unowned@fixture.invalid".into(),name:Some("retain on audit failure".into())}).await.unwrap();
-        let request=CreateTenantRequest {name:"empty ownerless tenant".into(),slug:"empty-ownerless".into(),description:None,default_rpm_limit:None,default_tpm_limit:None};
+        let request=CreateTenantRequest {name:"empty tenant".into(),slug:"empty-tenant".into(),description:None,default_rpm_limit:None,default_tpm_limit:None};
         let created=PlatformIdentity::create_tenant(&f.db,scope,&audit(f.root),&request).await.unwrap();
         let tx=f.db.begin().await.unwrap();tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE").await.unwrap();
         tx.execute_unprepared("CREATE FUNCTION delete_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action IN ('user.delete','tenant.delete') THEN RAISE EXCEPTION 'isolated deletion audit failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER delete_fault BEFORE INSERT ON tenant_audit_events FOR EACH ROW EXECUTE FUNCTION delete_fault();").await.unwrap();

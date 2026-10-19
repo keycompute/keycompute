@@ -43,10 +43,10 @@ async fn real_key_clients_keep_admin_metadata_and_owner_claims_in_separate_scope
     let owner = create_test_user(&db, a.id, "key-client-owner", &run).await;
     let peer = create_test_user(&db, a.id, "key-client-peer", &run).await;
     let state = AppState::with_pool(DbRouter::single(db.clone()));
-    let admin = token(&state, &db, a.id, a.owner_user_id).await;
+    let admin = token(&state, &db, a.id, a.admin_user_id).await;
     let own = token(&state, &db, a.id, owner.id).await;
     let other = token(&state, &db, a.id, peer.id).await;
-    let foreign = token(&state, &db, b.id, b.owner_user_id).await;
+    let foreign = token(&state, &db, b.id, b.admin_user_id).await;
     let inference = ProduceAiKeyValidator::generate_key();
     create_test_api_key(
         &db,

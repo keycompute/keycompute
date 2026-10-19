@@ -63,7 +63,7 @@ fn is_selected_tenant(user_store: UserStore, tenant_id: &str) -> bool {
 }
 
 /// Keep the button state aligned with the server's membership/account guard.
-/// An ownerless tenant remains deletable only while it has no active member or account.
+/// An empty tenant remains deletable only while it has no active member or account.
 fn can_delete_tenant(tenant: &TenantInfo) -> bool {
     tenant.user_count == 0 && tenant.account_count == 0
 }

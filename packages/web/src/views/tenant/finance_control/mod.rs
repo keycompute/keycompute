@@ -22,6 +22,7 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 const PAGE: u32 = 20;
+const EARNINGS_CURRENCY: &str = "CNY";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -67,9 +68,9 @@ fn EarningsPanel(scope: WorkspaceScope) -> Element {
         async move {
             let result = common::read(auth, users, scope, move |token| async move {
                 let api = scope.financial_api()?;
-                let summary = api.earnings("CNY", &token).await?;
+                let summary = api.earnings(EARNINGS_CURRENCY, &token).await?;
                 let history = api
-                    .earnings_history("CNY", PAGE, (key.1 - 1) * PAGE, &token)
+                    .earnings_history(EARNINGS_CURRENCY, PAGE, (key.1 - 1) * PAGE, &token)
                     .await?;
                 Ok((summary, history))
             })
@@ -93,6 +94,7 @@ fn EarningsPanel(scope: WorkspaceScope) -> Element {
                     div { class: "finance-currency-totals",
                         article { class: "card",
                             h3 { "{summary.currency}" }
+                            p { class: "text-secondary", {i18n.t("tenant_financial_controls.currency_scope")} }
                             p { {i18n.t("tenant_financial_controls.earnings_pending")} ": {summary.summary.pending_amount}" }
                             p { {i18n.t("tenant_financial_controls.earnings_reserved")} ": {summary.summary.reserved_amount}" }
                             p { {i18n.t("tenant_financial_controls.earnings_withdrawn")} ": {summary.summary.withdrawn_amount}" }
@@ -187,7 +189,7 @@ fn Workspace(scope: WorkspaceScope, embedded: bool) -> Element {
     let mut tab = use_signal(|| Tab::Earnings);
 
     rsx! {
-        div { class: "page-container tenant-financial-controls",
+        div { class: if embedded { "tenant-financial-controls embedded-panel" } else { "page-container tenant-financial-controls" },
             if !embedded {
                 ui::PageHeader {
                     title: i18n.t("tenant_financial_controls.title").to_string(),

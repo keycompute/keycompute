@@ -32,8 +32,8 @@ struct Fixture {
     state: AppState,
     guard: TestDataGuard,
     run: String,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     owner: TenantActor,
     peer: TenantActor,
     foreign: TenantActor,
@@ -107,7 +107,7 @@ impl Fixture {
         )
     }
     async fn issue(&self) -> KeyIssuanceIntent {
-        let (scope, snapshot, actor) = self.authority(self.a.id, self.a.owner_user_id).await;
+        let (scope, snapshot, actor) = self.authority(self.a.id, self.a.admin_user_id).await;
         key_issuance::request_new(
             &self.db,
             scope,
@@ -189,7 +189,7 @@ fn no_secrets(value: &Value) {
 #[tokio::test]
 async fn administrator_requests_but_only_the_owner_receives_a_noncacheable_one_time_key() {
     let mut f = Fixture::new().await;
-    let admin = f.token(f.a.id, f.a.owner_user_id).await;
+    let admin = f.token(f.a.id, f.a.admin_user_id).await;
     let owner = f.token(f.a.id, f.owner.id).await;
     let base = format!("/api/v1/tenants/{}/keys", f.a.id);
     let (status, body, _) = request(
@@ -351,7 +351,7 @@ async fn tenant_key_metadata_enforces_scope_strict_payloads_and_optimistic_revis
     let mut f = Fixture::new().await;
     let (key, _) = f.key(f.a.id, f.owner.id).await;
     let (foreign, _) = f.key(f.b.id, f.foreign.id).await;
-    let admin = f.token(f.a.id, f.a.owner_user_id).await;
+    let admin = f.token(f.a.id, f.a.admin_user_id).await;
     let member = f.token(f.a.id, f.owner.id).await;
     let path = format!("/api/v1/tenants/{}/keys/{}", f.a.id, key.id);
     assert_eq!(
@@ -444,7 +444,7 @@ async fn tenant_key_metadata_enforces_scope_strict_payloads_and_optimistic_revis
 async fn rotation_request_is_inert_until_its_owner_claims() {
     let mut f = Fixture::new().await;
     let (old, old_raw) = f.key(f.a.id, f.owner.id).await;
-    let admin = f.token(f.a.id, f.a.owner_user_id).await;
+    let admin = f.token(f.a.id, f.a.admin_user_id).await;
     let owner = f.token(f.a.id, f.owner.id).await;
     let rotate = format!("/api/v1/tenants/{}/keys/{}/rotate", f.a.id, old.id);
     let (status, created, _) = request(
@@ -584,7 +584,7 @@ async fn regranted_administrator_or_owner_role_does_not_reanimate_old_issuance()
 #[tokio::test]
 async fn credential_and_snapshot_checks_cannot_be_supplied_by_request_payloads() {
     let mut f = Fixture::new().await;
-    let (scope, snapshot, actor) = f.authority(f.a.id, f.a.owner_user_id).await;
+    let (scope, snapshot, actor) = f.authority(f.a.id, f.a.admin_user_id).await;
     for kind in [
         CredentialKind::ApiKey,
         CredentialKind::Node,
@@ -690,7 +690,7 @@ async fn credential_and_snapshot_checks_cannot_be_supplied_by_request_payloads()
 async fn failed_claim_audit_rolls_back_the_entire_rotation_savepoint() {
     let mut f = Fixture::new().await;
     let (old, old_raw) = f.key(f.a.id, f.owner.id).await;
-    let (admin, admin_version, admin_actor) = f.authority(f.a.id, f.a.owner_user_id).await;
+    let (admin, admin_version, admin_actor) = f.authority(f.a.id, f.a.admin_user_id).await;
     let intent = key_issuance::request_rotation(
         &f.db,
         admin,
@@ -832,7 +832,7 @@ async fn committed_key_claim_and_admin_revocation_refresh_cached_owner_dashboard
     let mut f = Fixture::new().await;
     let intent = f.issue().await;
     let owner = f.token(f.a.id, f.owner.id).await;
-    let admin = f.token(f.a.id, f.a.owner_user_id).await;
+    let admin = f.token(f.a.id, f.a.admin_user_id).await;
     let dashboard = "/api/v1/dashboard/overview";
     let (status, initial, _) = request(&f.state, "GET", dashboard, &owner, Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{initial}");

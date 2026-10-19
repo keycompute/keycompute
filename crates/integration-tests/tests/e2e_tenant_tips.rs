@@ -90,9 +90,10 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     user: TenantActor,
+    b_user: TenantActor,
     admin: TenantActor,
     root: User,
     operator: User,
@@ -111,9 +112,7 @@ impl Fixture {
         let a = create_test_tenant(&db, "tip-a", &run).await;
         let b = create_test_tenant(&db, "tip-b", &run).await;
         let user = create_test_user(&db, a.id, "tip-owner", &run).await;
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-            "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
-            [b.id.into(),user.id.into()])).await.unwrap();
+        let b_user = create_test_user(&db, b.id, "tip-owner-b", &run).await;
         let admin = create_test_user(&db, a.id, "tip-admin", &run).await;
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -167,6 +166,7 @@ impl Fixture {
             a,
             b,
             user,
+            b_user,
             admin,
             root,
             operator,
@@ -232,15 +232,23 @@ impl Fixture {
             FinancialScope::personal(scope, session).unwrap()
         }
     }
-    async fn seed(&self, tenant: &Tenant, money: &str, bill: i64) -> NodeTip {
-        let consumer = tenant
-            .owner_user_id
-            .expect("tip fixture tenant must have an owner");
+    async fn seed(
+        &self,
+        tenant: &integration_tests::db::TenantFixture,
+        money: &str,
+        bill: i64,
+    ) -> NodeTip {
+        let consumer = tenant.admin_user_id;
+        let resource_owner = if tenant.id == self.a.id {
+            self.user.id
+        } else {
+            self.b_user.id
+        };
         let node = Node::create(
             &self.db,
             &CreateNodeRequest {
                 tenant_id: tenant.id,
-                owner_user_id: self.user.id,
+                owner_user_id: resource_owner,
                 client_instance_id: Uuid::new_v4().to_string(),
                 display_name: "financial fixture".into(),
                 capabilities_json: json!({}),
@@ -334,7 +342,7 @@ async fn personal_earnings_and_conversion_are_fixed_to_selected_tenant_and_curre
     let b = f.seed(&f.b, "CNY", 200).await;
     f.seed(&f.a, "USD", 300).await;
     let ta = f.token(f.user.id, Some(f.a.id)).await;
-    let tb = f.token(f.user.id, Some(f.b.id)).await;
+    let tb = f.token(f.b_user.id, Some(f.b.id)).await;
     let app = create_router(f.state.clone());
     let sa = ok(call(app.clone(), "GET", "/api/v1/me/tips", &ta, Value::Null).await);
     let sb = ok(call(app.clone(), "GET", "/api/v1/me/tips", &tb, Value::Null).await);
@@ -443,7 +451,7 @@ async fn tenant_review_is_metadata_only_and_platform_payout_requires_audited_acc
     let app = create_router(f.state.clone());
     let owner = f.token(f.user.id, Some(f.a.id)).await;
     let admin = f.token(f.admin.id, Some(f.a.id)).await;
-    let foreign = f.token(f.b.owner_user_id, Some(f.b.id)).await;
+    let foreign = f.token(f.b.admin_user_id, Some(f.b.id)).await;
     let root = f.token(f.root.id, None).await;
     let operator = f.token(f.operator.id, None).await;
     let created = ok(call(

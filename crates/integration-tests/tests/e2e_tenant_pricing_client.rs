@@ -53,15 +53,15 @@ async fn real_tenant_pricing_client_retains_exact_scope_revisions_and_backend_au
     let foreign = create_test_tenant(&db, "pricing-client-b", &run).await;
     let member = create_test_user(&db, tenant.id, "pricing-client-member", &run).await;
     let state = AppState::with_pool(DbRouter::single(db.clone()));
-    let admin = console(&state, &db, &tenant, tenant.owner_user_id).await;
+    let admin = console(&state, &db, &tenant, tenant.admin_user_id).await;
     let peer = console(&state, &db, &tenant, member.id).await;
-    let outsider = console(&state, &db, &foreign, foreign.owner_user_id).await;
+    let outsider = console(&state, &db, &foreign, foreign.admin_user_id).await;
     let raw_key = ProduceAiKeyValidator::generate_key();
     create_test_api_key(
         &db,
         &CreateProduceAiKeyRequest {
             tenant_id: tenant.id,
-            user_id: tenant.owner_user_id,
+            user_id: tenant.admin_user_id,
             name: "pricing-client".into(),
             produce_ai_key_hash: ProduceAiKeyValidator::hash_key(&raw_key),
             produce_ai_key_preview: "test-only".into(),
@@ -142,7 +142,7 @@ async fn real_tenant_pricing_client_retains_exact_scope_revisions_and_backend_au
             .pricing
             .is_empty()
     );
-    let rows=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT COUNT(*)::bigint AS n FROM tenant_audit_events WHERE tenant_id=$1 AND actor_user_id=$2 AND resource_id=$3",[tenant.id.into(),tenant.owner_user_id.into(),created.id.to_string().into()])).await.unwrap().unwrap();
+    let rows=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT COUNT(*)::bigint AS n FROM tenant_audit_events WHERE tenant_id=$1 AND actor_user_id=$2 AND resource_id=$3",[tenant.id.into(),tenant.admin_user_id.into(),created.id.to_string().into()])).await.unwrap().unwrap();
     assert!(
         rows.try_get::<i64>("", "n").unwrap() >= 4,
         "successful pricing changes must be audited"

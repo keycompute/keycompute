@@ -20,8 +20,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     run: String,
 }
 impl Fixture {
@@ -117,8 +117,8 @@ async fn request(
 #[tokio::test]
 async fn tenant_pricing_crud_never_widens_the_verified_tenant_or_payload_scope() {
     let mut f = Fixture::new().await;
-    let at = f.token(Some(&f.a), f.a.owner_user_id).await;
-    let bt = f.token(Some(&f.b), f.b.owner_user_id).await;
+    let at = f.token(Some(&f.a), f.a.admin_user_id).await;
+    let bt = f.token(Some(&f.b), f.b.admin_user_id).await;
     let member = create_test_user(&f.db, f.a.id, "price-member", &f.run).await;
     let mt = f.token(Some(&f.a), member.id).await;
     let a = f.base(&f.a);
@@ -282,7 +282,7 @@ async fn tenant_pricing_crud_never_widens_the_verified_tenant_or_payload_scope()
 #[tokio::test]
 async fn platform_and_inference_credentials_do_not_inherit_tenant_pricing_management() {
     let mut f = Fixture::new().await;
-    let at = f.token(Some(&f.a), f.a.owner_user_id).await;
+    let at = f.token(Some(&f.a), f.a.admin_user_id).await;
     let root = User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
         .await
         .unwrap()
@@ -322,7 +322,7 @@ async fn platform_and_inference_credentials_do_not_inherit_tenant_pricing_manage
         &f.db,
         &CreateProduceAiKeyRequest {
             tenant_id: f.a.id,
-            user_id: f.a.owner_user_id,
+            user_id: f.a.admin_user_id,
             name: "inference only".into(),
             produce_ai_key_hash: ProduceAiKeyValidator::hash_key(&raw),
             produce_ai_key_preview: "test-only".into(),

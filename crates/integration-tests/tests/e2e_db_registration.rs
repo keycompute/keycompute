@@ -173,20 +173,6 @@ mod tests {
             .await
             .expect("registration should succeed without tenant provisioning");
 
-        let tenant_row = pool
-            .query_one(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "SELECT COUNT(*) FROM tenants WHERE owner_user_id = $1",
-                [response.user_id.into()],
-            ))
-            .await
-            .expect("tenant count query should succeed")
-            .expect("tenant count query should return a row");
-        let tenant_count = tenant_row
-            .try_get_by_index::<i64>(0)
-            .expect("tenant count should decode");
-        assert_eq!(tenant_count, 0);
-
         let membership_row = pool
             .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,

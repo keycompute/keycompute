@@ -540,22 +540,22 @@ async fn binding_for_update(
     .ok_or_else(|| DbError::not_found("passthrough binding", id))
 }
 
-fn check_tenant_owner(
+fn check_tenant_assignment(
     scope: Scope,
     binding_tenant: Uuid,
-    owner_tenant: Option<Uuid>,
+    account_tenant: Option<Uuid>,
     is_global: bool,
 ) -> Result<(), DbError> {
     if let Some(tenant) = tenant_scope(scope)
-        && (tenant != binding_tenant || Some(tenant) != owner_tenant || is_global)
+        && (tenant != binding_tenant || Some(tenant) != account_tenant || is_global)
     {
         return Err(denied());
     }
-    if let Some(owner_tenant) = owner_tenant
-        && (owner_tenant != binding_tenant || is_global)
+    if let Some(account_tenant) = account_tenant
+        && (account_tenant != binding_tenant || is_global)
     {
         return Err(DbError::Other(
-            "tenant-owned accounts cannot be shared outside their owner tenant".into(),
+            "tenant-scoped accounts cannot be shared outside their tenant".into(),
         ));
     }
     Ok(())
@@ -579,7 +579,7 @@ async fn validate_target(
     binding_tenant: Uuid,
     is_global: bool,
 ) -> Result<Account, DbError> {
-    check_tenant_owner(scope, binding_tenant, account.tenant_id, is_global)?;
+    check_tenant_assignment(scope, binding_tenant, account.tenant_id, is_global)?;
     let active = tx
         .query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -862,7 +862,7 @@ impl PassthroughBinding {
             let binding =
                 binding_for_update(&tx, id, metadata.binding_tenant_id, metadata.account_id)
                     .await?;
-            check_tenant_owner(
+            check_tenant_assignment(
                 scope,
                 binding.tenant_id,
                 account.tenant_id,
@@ -966,7 +966,7 @@ impl PassthroughBinding {
                 metadata.account_id,
             )
             .await?;
-            check_tenant_owner(
+            check_tenant_assignment(
                 scope,
                 current.tenant_id,
                 account.tenant_id,
@@ -1225,7 +1225,7 @@ async fn update_scoped(
             .await?
             .ok_or_else(|| DbError::not_found("account", requested_account))?
         };
-        check_tenant_owner(
+        check_tenant_assignment(
             scope,
             current.tenant_id,
             current_account.tenant_id,
@@ -1253,7 +1253,7 @@ async fn update_scoped(
             )
             .await?;
         } else {
-            check_tenant_owner(
+            check_tenant_assignment(
                 scope,
                 requested_tenant,
                 current_account.tenant_id,
@@ -1358,7 +1358,7 @@ async fn delete_scoped(
             metadata.account_id,
         )
         .await?;
-        check_tenant_owner(
+        check_tenant_assignment(
             scope,
             current.tenant_id,
             account.tenant_id,

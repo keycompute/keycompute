@@ -95,13 +95,7 @@ fn TenantWorkspacePage() -> Element {
     let role_label = current
         .as_ref()
         .map(|value| {
-            if user.as_ref().is_some_and(|user| {
-                value
-                    .owner_user_id
-                    .is_some_and(|owner_user_id| user.id == owner_user_id.to_string())
-            }) {
-                i18n.t("tenant.role_owner")
-            } else if value.tenant_role == client_api::TenantRole::Admin {
+            if value.tenant_role == client_api::TenantRole::Admin {
                 i18n.t("tenant.role_admin")
             } else {
                 i18n.t("tenant.role_member")

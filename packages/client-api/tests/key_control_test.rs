@@ -57,7 +57,7 @@ async fn platform_key_administration_keeps_an_explicit_tenant_route() {
     assert!(TenantKeyApi::platform_tenant(&client(&server), Uuid::nil()).is_err());
 }
 #[tokio::test]
-async fn fresh_metadata_and_personal_lists_keep_fixed_tenant_owner_boundaries() {
+async fn fresh_metadata_and_personal_lists_keep_fixed_tenant_and_resource_owner_boundaries() {
     let server = MockServer::start().await;
     let client = client(&server);
     let tenant = Uuid::new_v4();

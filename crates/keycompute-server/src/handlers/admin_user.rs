@@ -20,7 +20,7 @@ use keycompute_billing::balance::{
 };
 use keycompute_db::models::api_key::ProduceAiKey;
 use keycompute_db::models::platform_identity::{
-    PlatformIdentity, PlatformTenantInfo, PlatformUserInfo, PlatformUserPatch,
+    PlatformIdentity, PlatformTenantInfo, PlatformUserFilter, PlatformUserInfo, PlatformUserPatch,
 };
 use keycompute_db::models::tenant::{
     CreateTenantRequest as DbCreateTenantRequest, UpdateTenantRequest as DbUpdateTenantRequest,
@@ -50,6 +50,8 @@ pub struct AdminUserInfo {
 pub struct UserListQueryParams {
     pub platform_role: Option<PlatformRole>,
     pub status: Option<UserStatus>,
+    #[serde(default)]
+    pub tenant_unassigned: bool,
     pub search: Option<String>,
     #[serde(default = "default_page")]
     pub page: i64,
@@ -146,9 +148,12 @@ pub async fn list_all_users(
     let rows = PlatformIdentity::users(
         identity_pool(&state)?.write_conn(),
         scope,
-        query.platform_role,
-        query.status,
-        query.search.as_deref(),
+        PlatformUserFilter {
+            role: query.platform_role,
+            status: query.status,
+            tenant_unassigned: query.tenant_unassigned,
+            search: query.search.as_deref(),
+        },
         page_size,
         offset,
     )
@@ -1217,10 +1222,10 @@ mod tests {
     }
 
     #[test]
-    fn platform_tenant_creation_rejects_an_initial_owner() {
+    fn platform_tenant_creation_rejects_retired_owner_fields() {
         assert!(
             serde_json::from_value::<CreateTenantRequest>(serde_json::json!({
-                "name": "Ownerless tenant",
+                "name": "Empty tenant",
                 "owner_user_id": Uuid::new_v4()
             }))
             .is_err()

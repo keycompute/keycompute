@@ -4,9 +4,9 @@ The matrix is the source of truth for the hard-cutover authorization implementat
 
 | Resource | Scope | Tenant admin | Member | Platform |
 |---|---|---|---|---|
-| users | platform identity | manage membership state in own tenant, not global users | self only | root/operator platform administration; only root may manage an operator and neither may modify a root |
+| users | platform identity | manage ordinary membership state in own tenant, not global users or peer administrators | self only | root/operator platform administration; only root may manage an operator and neither may modify a root |
 | tenants | tenant control plane | settings in own tenant | read active context | root/operator implicit administration through explicit platform-target APIs |
-| tenant_memberships | tenant | member management except platform role | read own selected context | root/operator are never membership rows; platform administration uses an explicit tenant target |
+| tenant_memberships | tenant | manage ordinary members and promote them; existing administrators cannot be changed | read own selected context | root/operator are never membership rows; explicit platform-target administration may change administrator memberships |
 | tenant_invitations | tenant | create/revoke in own tenant | accept an invitation addressed to the verified user | platform authority never turns root/operator into an invitee or member |
 | produce_ai_keys | tenant + user owner | manage all own-tenant keys; secrets never read | own keys | root/operator audited administration with explicit tenant target |
 | accounts | tenant-owned | full CRUD in own tenant | use only | root/operator platform management with explicit ownership scope |
@@ -37,17 +37,23 @@ The matrix is the source of truth for the hard-cutover authorization implementat
    independent; platform operations never become tenant operations merely
    because they target a tenant.
 8. Root and operator identities have implicit administrative authority over
-   every tenant, but they never acquire a tenant membership, tenant role, or
-   ownership row. The ordinary tenant URL remains membership-bound; a platform
+   every tenant, but they never acquire a tenant membership or tenant role. The ordinary tenant URL remains membership-bound; a platform
    operation must carry the target tenant explicitly through a platform route.
-9. Tenant ownership is optional. When assigned, the owner and every persisted
-   tenant member must be an active non-platform user and the owner must have an
-   active administrator membership. A platform-created tenant begins with no
-   owner or members; the first ordinary user to accept an administrator
-   invitation becomes owner atomically.
+9. Tenants have no owner. They may have multiple peer administrators, and every
+   persisted member is an ordinary non-platform user. A platform-created tenant
+   begins with no members; root/operator may directly grant an eligible ordinary
+   user an administrator membership without an invitation.
 10. Creating a tenant never creates a membership for the root/operator actor.
-    Later access is granted explicitly through invitations or membership
-    administration, while platform authority remains implicit and global.
+    Each ordinary user may have at most one non-removed tenant membership.
+    Tenant administrators use invitations; platform administrators may use
+    explicit direct membership administration, while their own authority remains
+    implicit and global.
+11. Tenant administrators are peers. A tenant-scoped command cannot demote,
+    suspend, restore, or remove any administrator membership, including the
+    caller's own. Only an audited root/operator platform-target command may
+    change a non-removed administrator membership. A removed row is historical;
+    re-entry requires a fresh invitation (or an explicit platform grant) and may
+    assign the newly granted role.
 
 ## Required query families
 
@@ -139,7 +145,7 @@ by another actor.
 ### Current platform-parity audit
 
 Explicit platform targeting is implemented for tenant lifecycle and control,
-members, invitations, ownership transfer, tenant audit, API-key metadata and
+members, invitations, tenant audit, API-key metadata and
 issuance, detailed usage/billing/payment reporting, tip earnings and withdrawal
 administration, provider and passthrough management, pricing, nodes and tasks,
 distribution, wallet commands, Responses and conversations, and routing

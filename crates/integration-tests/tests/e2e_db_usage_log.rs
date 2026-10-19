@@ -104,7 +104,7 @@ mod tests {
         let tenant_logs = keycompute_db::models::usage_log::TenantUsageScope::new(
             keycompute_types::TenantScope::checked(
                 tenant.id,
-                tenant.owner_user_id,
+                tenant.admin_user_id,
                 keycompute_types::TenantRole::Admin,
             )
             .unwrap(),
@@ -126,7 +126,7 @@ mod tests {
         let stats = keycompute_db::models::usage_log::TenantUsageScope::new(
             keycompute_types::TenantScope::checked(
                 tenant.id,
-                tenant.owner_user_id,
+                tenant.admin_user_id,
                 keycompute_types::TenantRole::Admin,
             )
             .unwrap(),
@@ -229,8 +229,8 @@ mod tests {
                     .unwrap_or(false),
         );
 
-        let expected1 = std::collections::HashSet::from([tenant1.owner_user_id, user1.id]);
-        let expected2 = std::collections::HashSet::from([tenant2.owner_user_id, user2.id]);
+        let expected1 = std::collections::HashSet::from([tenant1.admin_user_id, user1.id]);
+        let expected2 = std::collections::HashSet::from([tenant2.admin_user_id, user2.id]);
         assert_eq!(
             tenant1_users
                 .as_ref()

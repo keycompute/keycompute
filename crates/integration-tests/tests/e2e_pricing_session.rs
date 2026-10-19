@@ -17,7 +17,7 @@ use uuid::Uuid;
 struct Fixture {
     db: DatabaseConnection,
     state: AppState,
-    target: integration_tests::db::OwnedTenant,
+    target: integration_tests::db::TenantFixture,
     root: Uuid,
     database_url: String,
 }
@@ -106,7 +106,7 @@ impl Fixture {
     }
     fn actor(&self, scope: Scope) -> (Uuid, Option<Uuid>) {
         match scope {
-            Scope::Tenant => (self.target.owner_user_id, Some(self.target.id)),
+            Scope::Tenant => (self.target.admin_user_id, Some(self.target.id)),
             Scope::PlatformTenant => (self.root, None),
             Scope::PlatformGlobal => (self.root, None),
         }

@@ -19,7 +19,7 @@ mod tests {
     use keycompute_db::models::pricing_model::{BillingDimension, PricingScopeType};
     use keycompute_db::{
         Account, CreateAccountRequest, CreateDistributionRuleRequest, CreatePaymentOrderRequest,
-        CreatePricingRequest, CreateTenantMembershipRequest, PaymentMethod, PaymentOrder,
+        CreatePricingRequest, CreateTenantMembershipFixture, PaymentMethod, PaymentOrder,
         ResponseAffinity, ResponsesIdempotencyClaim, TenantDistributionRule, TenantMembership,
         UserBalance,
     };
@@ -287,23 +287,6 @@ mod tests {
             .expect("source membership lookup should succeed")
             .expect("source membership should exist");
         let move_tx = pool.begin().await.expect("transaction should begin");
-        TenantMembership::create(
-            &move_tx,
-            &CreateTenantMembershipRequest {
-                tenant_id: target.id,
-                user_id: user.id,
-                tenant_role: TenantRole::Member,
-            },
-            &keycompute_db::AuditContext {
-                actor_user_id: target.owner_user_id,
-                credential_kind: CredentialKind::Jwt,
-                actor_platform_role: PlatformRole::None,
-                actor_tenant_role: Some(TenantRole::Admin),
-                request_id: None,
-            },
-        )
-        .await
-        .expect("target membership should be added");
         TenantMembership::set_status(
             &move_tx,
             source.id,
@@ -311,7 +294,7 @@ mod tests {
             keycompute_types::MembershipStatus::Removed,
             source_membership.authz_version,
             &keycompute_db::AuditContext {
-                actor_user_id: source.owner_user_id,
+                actor_user_id: source.admin_user_id,
                 credential_kind: CredentialKind::Jwt,
                 actor_platform_role: PlatformRole::None,
                 actor_tenant_role: Some(TenantRole::Admin),
@@ -320,6 +303,23 @@ mod tests {
         )
         .await
         .expect("source membership should be removed");
+        TenantMembership::create_fixture(
+            &move_tx,
+            &CreateTenantMembershipFixture {
+                tenant_id: target.id,
+                user_id: user.id,
+                tenant_role: TenantRole::Member,
+            },
+            &keycompute_db::AuditContext {
+                actor_user_id: target.admin_user_id,
+                credential_kind: CredentialKind::Jwt,
+                actor_platform_role: PlatformRole::None,
+                actor_tenant_role: Some(TenantRole::Admin),
+                request_id: None,
+            },
+        )
+        .await
+        .expect("target membership should be added");
         move_tx
             .commit()
             .await
@@ -436,7 +436,7 @@ mod tests {
             &binding_id,
             "delete-guard-fingerprint",
             Uuid::new_v4(),
-            tenant.owner_user_id,
+            tenant.admin_user_id,
             Uuid::new_v4(),
             "openai",
             Some("gpt-test"),
@@ -878,12 +878,9 @@ mod tests {
             .expect("cleanup should succeed");
     }
 
-    /// A tenant delete takes the parent lock before it reaches cascading child
-    /// rows. A concurrent user move must acquire the source tenant's
-    /// compatible key-share lock before it owns pending orders/balance rows;
-    /// otherwise the FK update can wait on the parent while the delete waits
-    /// on the child. This test keeps the delete's child lock wait open while
-    /// the complete reassignment transaction runs.
+    /// A direct grant into a second tenant must fail before touching the
+    /// existing tenant's payment rows. Membership reassignment is an explicit
+    /// remove-then-grant workflow, never an implicit multi-tenant join.
     #[tokio::test]
     async fn joining_another_tenant_never_locks_or_moves_existing_payment() {
         let pool = create_test_pool().await;
@@ -929,24 +926,24 @@ mod tests {
             .unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
             let tx = pool.begin().await.unwrap();
-            TenantMembership::create(
+            let result = TenantMembership::create_fixture(
                 &tx,
-                &keycompute_db::CreateTenantMembershipRequest {
+                &keycompute_db::CreateTenantMembershipFixture {
                     tenant_id: target.id,
                     user_id: user.id,
                     tenant_role: TenantRole::Member,
                 },
                 &keycompute_db::AuditContext {
-                    actor_user_id: target.owner_user_id,
+                    actor_user_id: target.admin_user_id,
                     credential_kind: CredentialKind::Jwt,
                     actor_platform_role: PlatformRole::None,
                     actor_tenant_role: Some(TenantRole::Admin),
                     request_id: None,
                 },
             )
-            .await
-            .unwrap();
-            tx.commit().await.unwrap();
+            .await;
+            assert!(matches!(result, Err(keycompute_db::DbError::Other(code)) if code == "user_already_belongs_to_tenant"));
+            tx.rollback().await.unwrap();
         })
         .await
         .expect("joining another tenant must not wait on or move an existing payment order");
@@ -969,7 +966,7 @@ mod tests {
             TenantMembership::find(&pool, target.id, user.id)
                 .await
                 .unwrap()
-                .is_some()
+                .is_none()
         );
         assert!(
             UserBalance::find_by_user(&pool, target.id, user.id)

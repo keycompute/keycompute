@@ -8429,8 +8429,121 @@ select.form-input:focus {
   font-size: 16px;
 }
 
+.finance-currency-totals > .card,
 .finance-currency-totals > div > .card {
   padding: 16px;
+}
+
+.embedded-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.tenant-owner-identity,
+.selected-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.tenant-user-search {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+}
+
+.member-id-field {
+  display: grid;
+  gap: 8px;
+}
+
+.member-picker-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.form-label-secondary {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.tenant-user-results {
+  display: grid;
+  gap: 8px;
+  max-height: 280px;
+  padding: 8px;
+  margin-top: 14px;
+  overflow: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.tenant-user-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  color: var(--text-primary);
+  text-align: left;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.tenant-user-option > span:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tenant-user-option.selected {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 14%, transparent);
+}
+
+.tenant-grant-editor {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(160px, 0.5fr) minmax(230px, auto) auto;
+  gap: 14px;
+  align-items: end;
+  padding-top: 16px;
+}
+
+.audit-filter-disclosure {
+  padding: 14px 18px;
+}
+
+.audit-filter-disclosure > summary,
+.audit-technical-row summary {
+  color: var(--text-secondary);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.audit-filter-disclosure .filter-panel {
+  padding: 16px 0 0;
+  margin: 0;
+  border: 0;
+  box-shadow: none;
+}
+
+.audit-technical-row > td {
+  padding-top: 0;
+  background: var(--bg-secondary);
+  border-top: 0;
+}
+
+.audit-technical-row details {
+  max-width: 100%;
 }
 
 .tenant-invite-form {
@@ -8476,6 +8589,10 @@ select.form-input:focus {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .tenant-grant-editor {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .tenant-invite-form > .btn {
     width: 100%;
   }
@@ -8506,6 +8623,21 @@ select.form-input:focus {
 
   .filter-actions,
   .filter-actions .btn {
+    width: 100%;
+  }
+
+  .tenant-user-search,
+  .tenant-grant-editor {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .member-picker-search {
+    grid-template-columns: 1fr;
+  }
+
+  .tenant-user-search .btn,
+  .tenant-grant-editor .btn {
     width: 100%;
   }
 

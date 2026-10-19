@@ -197,7 +197,7 @@ async fn payment_dao_lists_counts_and_details_share_the_same_explicit_scope() {
     let other = order(&db, a.id, peer.id).await;
     let same_user_foreign = order(&db, b.id, user.id).await;
     let self_scope = TenantScope::checked(a.id, user.id, TenantRole::Member).unwrap();
-    let admin_scope = TenantScope::checked(a.id, a.owner_user_id, TenantRole::Admin).unwrap();
+    let admin_scope = TenantScope::checked(a.id, a.admin_user_id, TenantRole::Admin).unwrap();
     assert_eq!(
         PaymentOrder::list_owned(&db, self_scope, None, 100, 0)
             .await

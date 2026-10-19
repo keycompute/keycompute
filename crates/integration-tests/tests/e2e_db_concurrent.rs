@@ -102,7 +102,7 @@ mod tests {
                         .iter()
                         .filter_map(|r| r.as_ref().ok().and_then(|r| r.as_ref().ok()).map(|u| u.id))
                         .collect::<std::collections::HashSet<_>>();
-                    expected.insert(tenant.owner_user_id);
+                    expected.insert(tenant.admin_user_id);
                     v.iter()
                         .map(|u| u.user_id)
                         .collect::<std::collections::HashSet<_>>()

@@ -22,6 +22,10 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
             "可选：填写成员 ID",
         ),
         ("tenant_finance.from", "From (UTC)", "起始时间（UTC）"),
+        ("tenant_finance.quick_range", "Quick range", "快捷时间范围"),
+        ("tenant_finance.last_24h", "Last 24 hours", "最近 24 小时"),
+        ("tenant_finance.last_7d", "Last 7 days", "最近 7 天"),
+        ("tenant_finance.last_30d", "Last 30 days", "最近 30 天"),
         (
             "tenant_finance.to",
             "Until, exclusive (UTC)",

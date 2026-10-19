@@ -20,8 +20,8 @@ use uuid::Uuid;
 struct Fixture {
     db: DatabaseConnection,
     run_id: String,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     member_a: integration_tests::db::TenantActor,
     root: Uuid,
     second_root: Uuid,
@@ -202,7 +202,7 @@ async fn tenant_pricing_reads_bind_current_admin_and_tenant() {
     let a_one = create_tenant_price(
         &fixture,
         fixture.a.id,
-        fixture.a.owner_user_id,
+        fixture.a.admin_user_id,
         &fixture.tenant_request(
             fixture.a.id,
             &format!("pricing-test-{}-alpha", fixture.run_id),
@@ -213,7 +213,7 @@ async fn tenant_pricing_reads_bind_current_admin_and_tenant() {
     let a_two = create_tenant_price(
         &fixture,
         fixture.a.id,
-        fixture.a.owner_user_id,
+        fixture.a.admin_user_id,
         &fixture.tenant_request(
             fixture.a.id,
             &format!("pricing-test-{}-beta", fixture.run_id),
@@ -224,7 +224,7 @@ async fn tenant_pricing_reads_bind_current_admin_and_tenant() {
     let b_one = create_tenant_price(
         &fixture,
         fixture.b.id,
-        fixture.b.owner_user_id,
+        fixture.b.admin_user_id,
         &fixture.tenant_request(
             fixture.b.id,
             &format!("pricing-test-{}-foreign", fixture.run_id),
@@ -232,7 +232,7 @@ async fn tenant_pricing_reads_bind_current_admin_and_tenant() {
         ),
     )
     .await;
-    let admin = fixture.tenant_scope(fixture.a.id, fixture.a.owner_user_id, TenantRole::Admin);
+    let admin = fixture.tenant_scope(fixture.a.id, fixture.a.admin_user_id, TenantRole::Admin);
     let rows = PricingModel::find_in_tenant(&fixture.db, admin, Some("alpha"), 1, 0)
         .await
         .unwrap();
@@ -305,7 +305,7 @@ async fn tenant_delete_requires_an_active_tenant() {
     let row = create_tenant_price(
         &fixture,
         fixture.a.id,
-        fixture.a.owner_user_id,
+        fixture.a.admin_user_id,
         &fixture.tenant_request(
             fixture.a.id,
             &format!("pricing-test-{}-inactive-delete", fixture.run_id),
@@ -325,7 +325,7 @@ async fn tenant_delete_requires_an_active_tenant() {
     let tx = fixture.db.begin().await.unwrap();
     let scope = TenantPricingScope::checked(
         fixture.a.id,
-        fixture.a.owner_user_id,
+        fixture.a.admin_user_id,
         CredentialKind::Jwt,
         0,
         2,
@@ -338,7 +338,7 @@ async fn tenant_delete_requires_an_active_tenant() {
             scope,
             row.id,
             &fixture.audit(
-                fixture.a.owner_user_id,
+                fixture.a.admin_user_id,
                 PlatformRole::None,
                 Some(TenantRole::Admin)
             ),
@@ -367,7 +367,7 @@ async fn forged_scope_actor_and_non_jwt_credentials_fail_before_mutation() {
     let row = create_tenant_price(
         &fixture,
         fixture.a.id,
-        fixture.a.owner_user_id,
+        fixture.a.admin_user_id,
         &fixture.tenant_request(
             fixture.a.id,
             &format!("pricing-test-{}-forged", fixture.run_id),
@@ -398,7 +398,7 @@ async fn forged_scope_actor_and_non_jwt_credentials_fail_before_mutation() {
     tx.commit().await.unwrap();
     let unchanged = PricingModel::find_in_tenant_by_id(
         &fixture.db,
-        fixture.tenant_scope(fixture.a.id, fixture.a.owner_user_id, TenantRole::Admin),
+        fixture.tenant_scope(fixture.a.id, fixture.a.admin_user_id, TenantRole::Admin),
         row.id,
     )
     .await
@@ -408,7 +408,7 @@ async fn forged_scope_actor_and_non_jwt_credentials_fail_before_mutation() {
 
     let stale_scope = TenantPricingScope::checked(
         fixture.a.id,
-        fixture.a.owner_user_id,
+        fixture.a.admin_user_id,
         CredentialKind::Jwt,
         1,
         1,
@@ -428,7 +428,7 @@ async fn forged_scope_actor_and_non_jwt_credentials_fail_before_mutation() {
                 expected_version: row.version,
             },
             &fixture.audit(
-                fixture.a.owner_user_id,
+                fixture.a.admin_user_id,
                 PlatformRole::None,
                 Some(TenantRole::Admin)
             ),
@@ -444,7 +444,7 @@ async fn forged_scope_actor_and_non_jwt_credentials_fail_before_mutation() {
         CredentialKind::System,
     ] {
         let scope =
-            TenantPricingScope::checked(fixture.a.id, fixture.a.owner_user_id, credential, 0, 1, 1)
+            TenantPricingScope::checked(fixture.a.id, fixture.a.admin_user_id, credential, 0, 1, 1)
                 .unwrap();
         assert!(
             PricingModel::find_in_tenant(&fixture.db, scope, None, 10, 0)
@@ -641,7 +641,7 @@ async fn batch_defaults_reject_missing_or_foreign_ids_atomically() {
     let foreign = create_tenant_price(
         &fixture,
         fixture.b.id,
-        fixture.b.owner_user_id,
+        fixture.b.admin_user_id,
         &fixture.tenant_request(
             fixture.b.id,
             &format!("pricing-test-{}-foreign-batch", fixture.run_id),
@@ -1062,7 +1062,7 @@ async fn platform_price_reads_use_real_global_authority_without_tenant_role_inhe
     for (user_id, selected, expected) in [
         (fixture.root, None, StatusCode::OK),
         (
-            fixture.a.owner_user_id,
+            fixture.a.admin_user_id,
             Some(fixture.a.id),
             StatusCode::FORBIDDEN,
         ),

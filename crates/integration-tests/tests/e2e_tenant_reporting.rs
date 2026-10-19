@@ -25,8 +25,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     member: User,
     admin_token: String,
     member_token: String,
@@ -81,7 +81,7 @@ impl Fixture {
             .await
             .user;
         let state = AppState::with_pool(DbRouter::single(db.clone()));
-        let admin_token = token(&state, &db, a.owner_user_id, Some(a.id)).await;
+        let admin_token = token(&state, &db, a.admin_user_id, Some(a.id)).await;
         let member_token = token(&state, &db, member.id, Some(a.id)).await;
         Self {
             db,
@@ -148,8 +148,8 @@ impl Fixture {
 async fn tenant_usage_lists_details_and_currency_totals_have_identical_boundaries() {
     let mut f = Fixture::new().await;
     let cny = f.usage(f.a.id, f.member.id, "CNY", 7).await;
-    let usd = f.usage(f.a.id, f.a.owner_user_id, "USD", 11).await;
-    let foreign = f.usage(f.b.id, f.b.owner_user_id, "CNY", 999).await;
+    let usd = f.usage(f.a.id, f.a.admin_user_id, "USD", 11).await;
+    let foreign = f.usage(f.b.id, f.b.admin_user_id, "CNY", 999).await;
     let (status, list) = get(&f.state, &f.admin_token, &f.path("usage?page_size=1")).await;
     assert_eq!(status, StatusCode::OK, "{list}");
     assert_eq!(list["total"], 2);
@@ -223,7 +223,7 @@ async fn tenant_usage_lists_details_and_currency_totals_have_identical_boundarie
 async fn tenant_payment_reports_are_scoped_and_metadata_only() {
     let mut f = Fixture::new().await;
     let own = f.order(f.a.id, f.member.id).await;
-    let _foreign = f.order(f.b.id, f.b.owner_user_id).await;
+    let _foreign = f.order(f.b.id, f.b.admin_user_id).await;
     let (status, list) = get(
         &f.state,
         &f.admin_token,
@@ -299,7 +299,7 @@ async fn ordinary_member_reports_are_denied_and_wallet_views_stay_read_only() {
         get(
             &f.state,
             &f.admin_token,
-            &f.path(&format!("balances/{}", f.b.owner_user_id))
+            &f.path(&format!("balances/{}", f.b.admin_user_id))
         )
         .await
         .0,
@@ -341,16 +341,16 @@ async fn real_reporting_client_preserves_tenant_member_decimal_and_metadata_cont
     }
     let mut f = Fixture::new().await;
     let cny = f.usage(f.a.id, f.member.id, "CNY", 7).await;
-    let usd = f.usage(f.a.id, f.a.owner_user_id, "USD", 11).await;
-    let foreign = f.usage(f.b.id, f.b.owner_user_id, "CNY", 999).await;
+    let usd = f.usage(f.a.id, f.a.admin_user_id, "USD", 11).await;
+    let foreign = f.usage(f.b.id, f.b.admin_user_id, "CNY", 999).await;
     let order = f.order(f.a.id, f.member.id).await;
-    let foreign_order = f.order(f.b.id, f.b.owner_user_id).await;
+    let foreign_order = f.order(f.b.id, f.b.admin_user_id).await;
     let raw = ProduceAiKeyValidator::generate_key();
     integration_tests::db::create_test_api_key(
         &f.db,
         &CreateProduceAiKeyRequest {
             tenant_id: f.a.id,
-            user_id: f.a.owner_user_id,
+            user_id: f.a.admin_user_id,
             name: "report-client".into(),
             produce_ai_key_hash: ProduceAiKeyValidator::hash_key(&raw),
             produce_ai_key_preview: "fixture****".into(),
@@ -359,7 +359,7 @@ async fn real_reporting_client_preserves_tenant_member_decimal_and_metadata_cont
     )
     .await
     .unwrap();
-    let other_token = token(&f.state, &f.db, f.b.owner_user_id, Some(f.b.id)).await;
+    let other_token = token(&f.state, &f.db, f.b.admin_user_id, Some(f.b.id)).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let app = create_router(f.state.clone());
@@ -399,7 +399,7 @@ async fn real_reporting_client_preserves_tenant_member_decimal_and_metadata_cont
         BigDecimal::from(7)
     );
     assert_eq!(
-        api.usage_detail(usd.id, f.a.owner_user_id, &f.admin_token)
+        api.usage_detail(usd.id, f.a.admin_user_id, &f.admin_token)
             .await
             .unwrap()
             .currency,
@@ -451,16 +451,16 @@ async fn real_reporting_client_preserves_tenant_member_decimal_and_metadata_cont
         assert!(api.wallet(f.member.id, denied).await.is_err());
     }
     assert!(
-        api.usage_detail(foreign.id, f.b.owner_user_id, &f.admin_token)
+        api.usage_detail(foreign.id, f.b.admin_user_id, &f.admin_token)
             .await
             .is_err()
     );
     assert!(
-        api.payment(foreign_order.id, f.b.owner_user_id, &f.admin_token)
+        api.payment(foreign_order.id, f.b.admin_user_id, &f.admin_token)
             .await
             .is_err()
     );
-    assert!(api.wallet(f.b.owner_user_id, &f.admin_token).await.is_err());
+    assert!(api.wallet(f.b.admin_user_id, &f.admin_token).await.is_err());
     let other_api = TenantReportingApi::new(&client, f.b.id).unwrap();
     assert!(other_api.usage(&q, &w, &f.admin_token).await.is_err());
     assert_eq!(

@@ -16,6 +16,7 @@ use crate::{
         time::{format_time, rfc3339_to_datetime_local},
     },
 };
+use chrono::{Duration, SecondsFormat, Utc};
 use client_api::api::tenant_reporting::{
     MemberWallet, ReportPage, TenantPaymentRecord, TenantUsageRecord,
 };
@@ -153,7 +154,17 @@ fn FinanceWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
             Err(e) => error.set(user_error_message(i18n, &e)),
         }
     };
-    rsx! {div{class:"page-container tenant-finance",
+    let mut set_recent_window = move |days: i64| {
+        let end = Utc::now();
+        let start = end - Duration::days(days);
+        from.set(rfc3339_to_datetime_local(
+            &start.to_rfc3339_opts(SecondsFormat::Secs, true),
+        ));
+        to.set(rfc3339_to_datetime_local(
+            &end.to_rfc3339_opts(SecondsFormat::Secs, true),
+        ));
+    };
+    rsx! {div{class:if embedded{"tenant-finance embedded-panel"}else{"page-container tenant-finance"},
         if !embedded {
             ui::PageHeader{title:i18n.t("tenant_finance.title").to_string(),description:i18n.t("tenant_finance.hint").to_string()}
             WorkspaceLinks{}
@@ -171,6 +182,7 @@ fn FinanceWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
             div{class:"filter-grid tenant-finance-filter-grid",
                 MemberIdField{scope,input_id:"finance-owner".to_string(),label:i18n.t("tenant_finance.owner").to_string(),value:owner(),on_input:move|value|owner.set(value)}
                 if query().tab==Tab::Usage{
+                    div{class:"form-field",span{class:"form-label",{i18n.t("tenant_finance.quick_range")}}div{class:"toolbar",button{class:"btn btn-secondary btn-sm",r#type:"button",onclick:move |_|set_recent_window(1),{i18n.t("tenant_finance.last_24h")}}button{class:"btn btn-secondary btn-sm",r#type:"button",onclick:move |_|set_recent_window(7),{i18n.t("tenant_finance.last_7d")}}button{class:"btn btn-secondary btn-sm",r#type:"button",onclick:move |_|set_recent_window(30),{i18n.t("tenant_finance.last_30d")}}}}
                     div{class:"form-field",label{r#for:"finance-from",{i18n.t("tenant_finance.from")}}input{id:"finance-from",class:"input-field",r#type:"datetime-local",step:"any",value:"{from}",oninput:move|e|from.set(e.value())}}
                     div{class:"form-field",label{r#for:"finance-to",{i18n.t("tenant_finance.to")}}input{id:"finance-to",class:"input-field",r#type:"datetime-local",step:"any",value:"{to}",oninput:move|e|to.set(e.value())}}
                 }
@@ -185,11 +197,11 @@ fn FinanceWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
         if !error().is_empty(){p{role:"alert",class:"alert alert-error","{error}"}}
         if query().tab==Tab::Usage{
             match summary{
-                Some(Ok(Some(totals)))=>rsx!{section{class:"finance-currency-totals",aria_label:i18n.t("tenant_finance.currency_totals"),
+                Some(Ok(Some(totals))) if !totals.currencies.is_empty()=>rsx!{section{class:"finance-currency-totals",aria_label:i18n.t("tenant_finance.currency_totals"),
                     h2{{i18n.t("tenant_finance.currency_totals")}}
                     div{style:"display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px",for g in &totals.currencies{article{class:"card",key:"{g.currency}",h3{"{g.currency}"}p{{i18n.t("tenant_finance.amount")} ": {g.total_amount}"}p{{i18n.t("tenant_finance.requests")} ": {g.total_requests}"}p{{i18n.t("tenant_finance.tokens")} ": {g.total_input_tokens} / {g.total_output_tokens} / {g.total_tokens}"}}}}
-                    if totals.currencies.is_empty(){div{class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}
                 }},
+                Some(Ok(Some(_)))|Some(Ok(None))=>rsx!{},
                 Some(Err(e))=>rsx!{p{role:"alert",class:"alert alert-error",{user_error_message(i18n, &e)}}},
                 _=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
             }

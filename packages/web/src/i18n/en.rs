@@ -851,7 +851,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "payment_orders.verification_tenant_hint",
-        "Verification creates and closes a real 0.01 CNY order for the selected tenant owner.",
+        "Verification creates and closes a real 0.01 CNY order for an active administrator of the selected tenant. Assign a tenant administrator before verification.",
     );
     m.insert("payment_orders.provider_switch", "Admin switch");
     m.insert("payment_orders.provider_config", "Configuration");
@@ -1958,6 +1958,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.users", "Users");
     m.insert("tenants.accounts", "Channel accounts");
     m.insert("tenants.manage", "Manage tenant");
+    m.insert("tenants.manage_access", "Manage tenant access");
     m.insert(
         "tenants.enable_to_manage",
         "Enable the tenant before managing tenant access",
@@ -1965,7 +1966,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.access_title", "Tenant access");
     m.insert(
         "tenants.access_hint",
-        "Grant access without switching workspace. Platform administrators remain outside the tenant member list.",
+        "Grant access without switching workspace. Platform administrators remain outside the tenant member list; existing tenant administrators can only be demoted, suspended, or removed here.",
     );
     m.insert("tenants.access_summary", "Access summary");
     m.insert("tenants.settings_title", "Tenant settings");
@@ -1975,16 +1976,27 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Platform-managed tenant · actions use platform authority",
     );
     m.insert(
-        "tenants.first_admin_owner_hint",
-        "This tenant has no owner. The first ordinary user to accept an administrator invitation becomes the owner.",
+        "tenants.direct_grant_title",
+        "Assign a tenant administrator",
     );
     m.insert(
-        "tenants.owner_clear_warning",
-        "This also clears the current owner; assign another administrator afterwards.",
+        "tenants.direct_grant_hint",
+        "Select an active registered ordinary user and assign tenant administrator access without an invitation. A user can belong to only one tenant; a removed user can be reassigned to the same tenant here.",
     );
+    m.insert("tenants.search_global_user", "Search platform users");
+    m.insert(
+        "tenants.no_global_user_matches",
+        "No active ordinary users match",
+    );
+    m.insert("tenants.select_user_first", "Select a user first");
+    m.insert("tenants.direct_grant_action", "Assign administrator");
     m.insert(
         "tenants.no_members_yet",
         "No tenant members have been authorized yet.",
+    );
+    m.insert(
+        "tenants.no_member_matches",
+        "No members match the current search.",
     );
     m.insert("tenants.disable", "Disable");
     m.insert("tenants.enable", "Enable");

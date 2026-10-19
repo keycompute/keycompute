@@ -2,26 +2,36 @@
 use super::*;
 use sea_orm::{ConnectOptions, Database, TransactionTrait};
 
-async fn tenant_owner_console_token(f: &Fixture) -> String {
+async fn tenant_admin(f: &Fixture, tenant_id: Uuid) -> keycompute_db::User {
+    let row = f
+        .db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT m.user_id FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.tenant_role='admin' AND m.status='active' AND u.status='active' ORDER BY m.joined_at,m.user_id LIMIT 1",
+            [tenant_id.into()],
+        ))
+        .await
+        .unwrap()
+        .expect("response fixture tenant must have an active administrator");
+    let user_id = row.try_get_by_index(0).unwrap();
+    keycompute_db::User::find_by_id(&f.db, user_id)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn tenant_admin_console_token(f: &Fixture) -> String {
     let tenant = keycompute_db::Tenant::find_by_id(&f.db, f.user.tenant_id)
         .await
         .unwrap()
         .unwrap();
-    let owner = keycompute_db::User::find_by_id(
-        &f.db,
-        tenant
-            .owner_user_id
-            .expect("response fixture tenant must have an owner"),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let admin = tenant_admin(f, tenant.id).await;
     let raw = f
         .state
         .auth
         .get_jwt_validator()
         .unwrap()
-        .generate_identity_token(owner.id, None, owner.token_version, None, None, 3600)
+        .generate_identity_token(admin.id, None, admin.token_version, None, None, 3600)
         .unwrap();
     let global = f.state.auth.verify_token(&raw).await.unwrap();
     f.state
@@ -45,7 +55,7 @@ async fn tenant_response_control_revalidates_authority_and_preserves_owner_scope
     let response_id = created["id"].as_str().unwrap().to_owned();
     let tenant_id = f.user.tenant_id;
     let owner_id = f.user.id;
-    let admin = tenant_owner_console_token(&f).await;
+    let admin = tenant_admin_console_token(&f).await;
     let base = format!("/api/v1/tenants/{tenant_id}/responses");
 
     let member = scoped_jwt(&f.state, &f.user).await;
@@ -73,7 +83,7 @@ async fn tenant_response_control_revalidates_authority_and_preserves_owner_scope
     );
 
     let foreign_tenant = create_test_tenant(&f.db, "response-control-foreign", &f.run).await;
-    let foreign_owner = keycompute_db::User::find_by_id(&f.db, foreign_tenant.owner_user_id)
+    let foreign_owner = keycompute_db::User::find_by_id(&f.db, foreign_tenant.admin_user_id)
         .await
         .unwrap()
         .unwrap();
@@ -208,15 +218,11 @@ async fn tenant_response_control_revalidates_authority_and_preserves_owner_scope
         StatusCode::OK,
     );
 
-    let stale_admin = tenant_owner_console_token(&f).await;
-    let tenant = keycompute_db::Tenant::find_by_id(&f.db, tenant_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let stale_admin = tenant_admin_console_token(&f).await;
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE users SET token_version=token_version+1 WHERE id=$1",
-        [tenant.owner_user_id.into()],
+        [tenant_admin(&f, tenant_id).await.id.into()],
     ))
     .await
     .unwrap();
@@ -237,8 +243,8 @@ async fn tenant_response_control_revalidates_authority_and_preserves_owner_scope
         stale.body
     );
 
-    // Regrant a delegated administrator, never the tenant owner. The owner
-    // invariant is independently enforced and must not be weakened by this test.
+    // Regrant a peer administrator. No administrator has a distinguished
+    // ownership role, and changing one peer must invalidate that peer's token.
     let delegated = create_test_user(&f.db, tenant_id, "response-control-delegated", &f.run).await;
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
@@ -371,7 +377,7 @@ async fn stored_response(f: &Fixture, mode: &str) -> String {
 #[tokio::test]
 async fn local_control_covers_both_families_and_preserves_personal_resource_boundaries() {
     let mut f = Fixture::new().await;
-    let admin = tenant_owner_console_token(&f).await;
+    let admin = tenant_admin_console_token(&f).await;
     let member = scoped_jwt(&f.state, &f.user).await;
     let root = keycompute_db::User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
         .await
@@ -773,7 +779,7 @@ async fn queued_control_credentials_expire_before_resource_mutation() {
 #[tokio::test]
 async fn local_control_audit_failure_rolls_back_content_and_prevents_unaudited_reads() {
     let mut f = Fixture::new().await;
-    let admin = tenant_owner_console_token(&f).await;
+    let admin = tenant_admin_console_token(&f).await;
     let id = stored_response(&f, "passthrough").await;
     let rev = revision(&f, "response", &id).await;
     let path = control_path(&f, "responses", "passthrough", &id);
@@ -984,12 +990,7 @@ async fn post_audit_expiry_case(platform: bool) {
             Some(json!({"metadata":{"private":"post-audit-expiry-marker"},"items":[{"role":"user","content":"private conversation"}]}))).await, StatusCode::OK);
         let cid = conversation["id"].as_str().unwrap().to_owned();
         let tenant = keycompute_db::Tenant::find_by_id(&f.db, f.user.tenant_id).await.unwrap().unwrap();
-        let actor = keycompute_db::User::find_by_id(
-            &f.db,
-            tenant
-                .owner_user_id
-                .expect("response fixture tenant must have an owner"),
-        ).await.unwrap().unwrap();
+        let actor = tenant_admin(&f, tenant.id).await;
         let member = keycompute_db::TenantMembership::find(&f.db,tenant.id,actor.id).await.unwrap().unwrap();
         // nextval is intentionally nontransactional: it proves the audit trigger
         // was actually reached even when the audit INSERT is later rolled back.
@@ -1118,7 +1119,7 @@ async fn real_resource_control_client_preserves_owner_and_item_cursor_contracts(
         }
     }
     let mut f = Fixture::new().await;
-    let admin = tenant_owner_console_token(&f).await;
+    let admin = tenant_admin_console_token(&f).await;
     let member = scoped_jwt(&f.state, &f.user).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1368,7 +1369,7 @@ async fn real_resource_control_client_preserves_owner_and_item_cursor_contracts(
 #[tokio::test]
 async fn native_account_pool_response_control_is_exact_owner_account_and_kind_scoped() {
     let mut f = Fixture::new().await;
-    let admin = tenant_owner_console_token(&f).await;
+    let admin = tenant_admin_console_token(&f).await;
     let member = scoped_jwt(&f.state, &f.user).await;
     let tenant = f.user.tenant_id;
     let owner = f.user.id;
@@ -1627,7 +1628,7 @@ async fn native_account_pool_conversation_is_indexed_scoped_and_tombstoned() {
     let mut f = Fixture::new().await;
     let tenant = f.user.tenant_id;
     let owner = f.user.id;
-    let admin = tenant_owner_console_token(&f).await;
+    let admin = tenant_admin_console_token(&f).await;
     let mut body = f.body(Op::Responses);
     body["store"] = true.into();
     let created = expect(
@@ -1747,10 +1748,6 @@ async fn native_response_never_dispatches_after_console_expiry_while_waiting_for
     let mut f = Fixture::new().await;
     let tenant_id = f.user.tenant_id;
     let owner_id = f.user.id;
-    let tenant = keycompute_db::Tenant::find_by_id(&f.db, tenant_id)
-        .await
-        .unwrap()
-        .unwrap();
     let mut payload = f.body(Op::Responses);
     payload["store"] = true.into();
     let created = expect(
@@ -1786,9 +1783,7 @@ async fn native_response_never_dispatches_after_console_expiry_while_waiting_for
     let admin = token_for(
         &f,
         &f.state,
-        tenant
-            .owner_user_id
-            .expect("response fixture tenant must have an owner"),
+        tenant_admin(&f, tenant_id).await.id,
         Some(tenant_id),
         ttl,
     )
@@ -1937,17 +1932,11 @@ async fn native_response_private_result_is_withheld_after_console_expiry() {
     let mut f = Fixture::new().await;
     let tenant_id = f.user.tenant_id;
     let owner_id = f.user.id;
-    let tenant = keycompute_db::Tenant::find_by_id(&f.db, tenant_id)
-        .await
-        .unwrap()
-        .unwrap();
     let ttl = 3;
     let admin = token_for(
         &f,
         &f.state,
-        tenant
-            .owner_user_id
-            .expect("response fixture tenant must have an owner"),
+        tenant_admin(&f, tenant_id).await.id,
         Some(tenant_id),
         ttl,
     )
@@ -2020,7 +2009,7 @@ async fn native_response_private_result_is_withheld_after_console_expiry() {
 #[tokio::test]
 async fn native_response_holds_one_account_credential_snapshot_until_dispatch_finishes() {
     let mut f = Fixture::new().await;
-    let admin = tenant_owner_console_token(&f).await;
+    let admin = tenant_admin_console_token(&f).await;
     let tenant = f.user.tenant_id;
     let owner = f.user.id;
     let mut payload = f.body(Op::Responses);
@@ -2110,7 +2099,7 @@ async fn native_response_holds_one_account_credential_snapshot_until_dispatch_fi
 #[tokio::test]
 async fn native_response_delete_serializes_against_new_settlement_state() {
     let mut f = Fixture::new().await;
-    let admin = tenant_owner_console_token(&f).await;
+    let admin = tenant_admin_console_token(&f).await;
     let tenant = f.user.tenant_id;
     let owner = f.user.id;
     let mut payload = f.body(Op::Responses);
@@ -2206,7 +2195,7 @@ async fn native_response_delete_serializes_against_new_settlement_state() {
 #[tokio::test]
 async fn native_response_private_result_remains_available_after_pool_binding_revocation() {
     let mut f = Fixture::new().await;
-    let admin = tenant_owner_console_token(&f).await;
+    let admin = tenant_admin_console_token(&f).await;
     let tenant = f.user.tenant_id;
     let owner = f.user.id;
     let mut payload = f.body(Op::Responses);

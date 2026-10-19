@@ -5,25 +5,21 @@
 
 use chrono::{DateTime, NaiveDateTime, SecondsFormat, TimeZone, Timelike, Utc};
 
-/// 将 ISO 8601 时间字符串格式化为 `YYYY-MM-DD HH:mm` 供 UI 展示。
+/// 将 ISO 8601 时间字符串统一转换为 `YYYY-MM-DD HH:mm UTC` 供 UI 展示。
 ///
-/// - 输入如 `"2024-03-01T12:34:56Z"` → `"2024-03-01 12:34"`
-/// - 输入如 `"2024-03-01T12:34:56.123Z"` → `"2024-03-01 12:34"`
+/// - 输入如 `"2024-03-01T12:34:56Z"` → `"2024-03-01 12:34 UTC"`
+/// - 带偏移量的输入会先转换为 UTC，避免将 UTC 时间误认为本地时间。
 /// - 输入如 `"2024-03-01"` → `"2024-03-01"`
 /// - 无法解析时原样返回
 pub fn format_time(iso: &str) -> String {
-    // ISO 8601 形如 "2024-03-01T12:34:56Z" 或 "2024-03-01T12:34:56.123456Z"
-    // 直接按字节切割，不需要任何时区转换
-    if let Some(t_pos) = iso.find('T') {
-        let date = &iso[..t_pos];
-        let rest = &iso[t_pos + 1..];
-        // 取时分（前5字节 "HH:mm"）
-        let time = if rest.len() >= 5 { &rest[..5] } else { rest };
-        format!("{} {}", date, time)
-    } else {
-        // 纯日期或其他格式，原样返回
-        iso.to_string()
-    }
+    DateTime::parse_from_rfc3339(iso.trim())
+        .map(|value| {
+            value
+                .with_timezone(&Utc)
+                .format("%Y-%m-%d %H:%M UTC")
+                .to_string()
+        })
+        .unwrap_or_else(|_| iso.to_string())
 }
 
 /// 同 `format_time`，但接受 `Option<&str>`，None 时返回 "—"。
@@ -77,7 +73,16 @@ pub fn datetime_input_to_rfc3339(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod datetime_input_tests {
-    use super::{datetime_input_to_rfc3339, rfc3339_to_datetime_local};
+    use super::{datetime_input_to_rfc3339, format_time, rfc3339_to_datetime_local};
+
+    #[test]
+    fn display_timestamps_are_normalized_and_labelled_as_utc() {
+        assert_eq!(
+            format_time("2026-10-19T10:15:00+08:00"),
+            "2026-10-19 02:15 UTC"
+        );
+        assert_eq!(format_time("2026-10-19"), "2026-10-19");
+    }
 
     #[test]
     fn datetime_controls_round_trip_utc_without_exposing_rfc3339() {

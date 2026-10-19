@@ -83,7 +83,7 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
     .unwrap();
     let root_global = token(&state, &db, root_id, None).await;
     let operator = token(&state, &db, operator.id, None).await;
-    let admin_b = token(&state, &db, b.owner_user_id, Some(b.id)).await;
+    let admin_b = token(&state, &db, b.admin_user_id, Some(b.id)).await;
     assert!(
         TenantMembership::find_any(&db, b.id, root_id)
             .await
@@ -95,7 +95,7 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
         &db,
         &CreateProduceAiKeyRequest {
             tenant_id: a.id,
-            user_id: a.owner_user_id,
+            user_id: a.admin_user_id,
             name: "pricing-only-fixture".into(),
             produce_ai_key_hash: ProduceAiKeyValidator::hash_key(&raw_key),
             produce_ai_key_preview: "test-only".into(),
@@ -246,11 +246,14 @@ async fn platform_pricing_client_obeys_explicit_targets_and_the_actual_server_co
         0
     );
     let audits=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT COUNT(*)::bigint AS n, COUNT(*) FILTER (WHERE platform_role IN ('root','operator'))::bigint AS platform_n, COUNT(*) FILTER (WHERE actor_user_id=$1)::bigint AS tenant_owner_n FROM tenant_audit_events WHERE resource_id=$2 AND tenant_id=$3 AND action LIKE 'pricing.%'",
-        [a.owner_user_id.into(),owned.pricing_id.into(),b.id.into()])).await.unwrap().unwrap();
+        "SELECT COUNT(*)::bigint AS n, COUNT(*) FILTER (WHERE platform_role IN ('root','operator'))::bigint AS platform_n, COUNT(*) FILTER (WHERE actor_user_id=$1)::bigint AS tenant_admin_actor_n FROM tenant_audit_events WHERE resource_id=$2 AND tenant_id=$3 AND action LIKE 'pricing.%'",
+        [a.admin_user_id.into(),owned.pricing_id.into(),b.id.into()])).await.unwrap().unwrap();
     assert_eq!(audits.try_get::<i64>("", "n").unwrap(), 4);
     assert_eq!(audits.try_get::<i64>("", "platform_n").unwrap(), 4);
-    assert_eq!(audits.try_get::<i64>("", "tenant_owner_n").unwrap(), 0);
+    assert_eq!(
+        audits.try_get::<i64>("", "tenant_admin_actor_n").unwrap(),
+        0
+    );
     // Remove only this test's unique platform price. The test wrapper owns the entire disposable DB.
     db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"DELETE FROM pricing_models WHERE id=$1 AND scope_type='platform' AND tenant_id IS NULL AND model_name=$2",[Uuid::parse_str(&global.pricing_id).unwrap().into(),model.into()])).await.unwrap();
     cleanup.cleanup().await.unwrap();

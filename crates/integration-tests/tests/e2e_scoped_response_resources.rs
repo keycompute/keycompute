@@ -250,6 +250,7 @@ struct Fixture {
     cleanup: TestDataGuard,
     state: AppState,
     app: Router,
+    admin_user_id: Uuid,
     user: TenantActor,
     key: String,
     model: String,
@@ -276,6 +277,7 @@ impl Fixture {
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "resource-state", &run).await;
+        let admin_user_id = tenant.admin_user_id;
         let user = create_test_user(&db, tenant.id, "native", &run).await;
         UserBalance::recharge(
             &db,
@@ -430,6 +432,7 @@ impl Fixture {
             cleanup,
             state,
             app,
+            admin_user_id,
             user,
             key,
             model,
@@ -1953,21 +1956,23 @@ async fn tenant_cancels_unleased_managed_node_task_without_charging_or_reexecuti
         .await
         .unwrap()
         .unwrap();
-    let owner = keycompute_db::User::find_by_id(
-        &f.db,
-        tenant
-            .owner_user_id
-            .expect("response fixture tenant must have an owner"),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let admin_user = keycompute_db::User::find_by_id(&f.db, f.admin_user_id)
+        .await
+        .unwrap()
+        .unwrap();
     let raw = f
         .state
         .auth
         .get_jwt_validator()
         .unwrap()
-        .generate_identity_token(owner.id, None, owner.token_version, None, None, 3600)
+        .generate_identity_token(
+            admin_user.id,
+            None,
+            admin_user.token_version,
+            None,
+            None,
+            3600,
+        )
         .unwrap();
     let global = f.state.auth.verify_token(&raw).await.unwrap();
     let admin = f
@@ -2059,21 +2064,23 @@ async fn accepted_node_result_after_cancel_request_keeps_one_original_owner_char
         .await
         .unwrap()
         .unwrap();
-    let owner = keycompute_db::User::find_by_id(
-        &f.db,
-        tenant
-            .owner_user_id
-            .expect("response fixture tenant must have an owner"),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let admin_user = keycompute_db::User::find_by_id(&f.db, f.admin_user_id)
+        .await
+        .unwrap()
+        .unwrap();
     let raw = f
         .state
         .auth
         .get_jwt_validator()
         .unwrap()
-        .generate_identity_token(owner.id, None, owner.token_version, None, None, 3600)
+        .generate_identity_token(
+            admin_user.id,
+            None,
+            admin_user.token_version,
+            None,
+            None,
+            3600,
+        )
         .unwrap();
     let global = f.state.auth.verify_token(&raw).await.unwrap();
     let admin = f
@@ -2139,7 +2146,7 @@ async fn accepted_node_result_after_cancel_request_keeps_one_original_owner_char
     assert_eq!(row.try_get::<Uuid>("", "tenant_id").unwrap(), tenant.id);
     assert_eq!(row.try_get::<Uuid>("", "user_id").unwrap(), f.user.id);
     assert_ne!(
-        f.user.id, owner.id,
+        f.user.id, admin_user.id,
         "administrator must not become billing owner"
     );
     assert_eq!(row.try_get::<i32>("", "input_tokens").unwrap(), 7);

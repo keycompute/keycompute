@@ -2,7 +2,9 @@
 use super::tenant_audit_event::{AuditContext, TenantAuditEvent, lock_identity_admin};
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use keycompute_types::{AuditResult, AuditScopeType, MembershipStatus, TenantRole, TenantScope};
+use keycompute_types::{
+    AuditResult, AuditScopeType, MembershipStatus, PlatformRole, TenantRole, TenantScope,
+};
 use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -21,9 +23,10 @@ pub struct TenantMembership {
     pub updated_at: DateTime<Utc>,
 }
 
+#[cfg(feature = "test-fixtures")]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CreateTenantMembershipRequest {
+pub struct CreateTenantMembershipFixture {
     pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub tenant_role: TenantRole,
@@ -34,6 +37,22 @@ fn conflict(tenant: Uuid, user: Uuid) -> DbError {
         entity: "tenant_membership".into(),
         id: format!("{tenant}/{user}"),
     }
+}
+
+pub const PEER_TENANT_ADMINISTRATOR_PROTECTED: &str = "peer_tenant_administrator_protected";
+
+/// Tenant administrators are peers. Once a member is an administrator, only
+/// an explicit root/operator platform action may change that membership.
+/// This also prevents an administrator from demoting, suspending or removing
+/// their own membership through a tenant-scoped command.
+pub(crate) fn require_mutable_membership_target(
+    membership: &TenantMembership,
+    actor_platform_role: PlatformRole,
+) -> Result<(), DbError> {
+    if membership.tenant_role()? == TenantRole::Admin && !actor_platform_role.is_platform_admin() {
+        return Err(DbError::Other(PEER_TENANT_ADMINISTRATOR_PROTECTED.into()));
+    }
+    Ok(())
 }
 
 impl TenantMembership {
@@ -101,11 +120,12 @@ impl TenantMembership {
         )).all(db).await?)
     }
 
-    /// Trusted administrative addition. Public email-based onboarding uses the
-    /// invitation flow so an unrelated user cannot be silently enrolled.
-    pub async fn create(
+    /// Test-only membership fixture. Production onboarding must use either the
+    /// platform grant command or the invitation flow.
+    #[cfg(feature = "test-fixtures")]
+    pub async fn create_fixture(
         tx: &DatabaseTransaction,
-        req: &CreateTenantMembershipRequest,
+        req: &CreateTenantMembershipFixture,
         actor: &AuditContext,
     ) -> Result<Self, DbError> {
         lock_identity_admin(tx).await?;
@@ -117,6 +137,17 @@ impl TenantMembership {
             .await?
             .filter(|user| user.status == "active" && user.platform_role == "none")
             .ok_or_else(|| DbError::Other("active member identity required".into()))?;
+        if tx
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT 1 FROM tenant_memberships WHERE user_id=$1 AND tenant_id<>$2 AND status<>'removed' LIMIT 1",
+                [req.user_id.into(), req.tenant_id.into()],
+            ))
+            .await?
+            .is_some()
+        {
+            return Err(DbError::Other("user_already_belongs_to_tenant".into()));
+        }
         let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
             "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status,invited_by) VALUES($1,$2,$3,'active',$4) ON CONFLICT (tenant_id,user_id) DO NOTHING RETURNING *",
             [req.tenant_id.into(),req.user_id.into(),req.tenant_role.as_str().into(),actor.actor_user_id.into()],
@@ -152,6 +183,7 @@ impl TenantMembership {
         let before = Self::find_any(tx, tenant, user)
             .await?
             .ok_or_else(|| conflict(tenant, user))?;
+        require_mutable_membership_target(&before, actor.actor_platform_role)?;
         if expected <= 0 {
             return Err(conflict(tenant, user));
         }
@@ -190,6 +222,7 @@ impl TenantMembership {
         let before = Self::find_any(tx, tenant, user)
             .await?
             .ok_or_else(|| conflict(tenant, user))?;
+        require_mutable_membership_target(&before, actor.actor_platform_role)?;
         if expected <= 0 || (before.status == "removed" && status != MembershipStatus::Removed) {
             return Err(DbError::Other(
                 "removed membership requires a new invitation".into(),

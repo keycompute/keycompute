@@ -44,8 +44,8 @@ async fn real_personal_key_client_creates_only_the_current_owners_key_with_serve
     let peer = create_test_user(&db, a.id, "personal-key-peer", &run).await;
     let state = AppState::with_pool(DbRouter::single(db.clone()));
     let token = console(&state, &db, owner.id, &a).await;
-    let admin = console(&state, &db, a.owner_user_id, &a).await;
-    let foreign = console(&state, &db, b.owner_user_id, &b).await;
+    let admin = console(&state, &db, a.admin_user_id, &a).await;
+    let foreign = console(&state, &db, b.admin_user_id, &b).await;
     let peer = console(&state, &db, peer.id, &a).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

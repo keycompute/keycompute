@@ -53,9 +53,9 @@ fn get_write_url() -> String {
     })
 }
 
-fn tenant_owner_audit(owner_user_id: uuid::Uuid) -> AuditContext {
+fn tenant_admin_audit(admin_user_id: uuid::Uuid) -> AuditContext {
     AuditContext {
-        actor_user_id: owner_user_id,
+        actor_user_id: admin_user_id,
         credential_kind: CredentialKind::Jwt,
         actor_platform_role: PlatformRole::None,
         actor_tenant_role: None,
@@ -80,7 +80,7 @@ async fn test_single_db_mode() {
         .expect("cleanup should succeed");
 
     // 1. 写操作：通过 DbRouter::single 创建全局身份和租户
-    let owner = User::create(
+    let administrator = User::create(
         router.as_ref(),
         &CreateUserRequest {
             email: format!("single-owner-{}@example.com", test_id),
@@ -88,7 +88,7 @@ async fn test_single_db_mode() {
         },
     )
     .await
-    .expect("global tenant owner creation should succeed");
+    .expect("tenant administrator fixture creation should succeed");
     let tenant = router
         .as_ref()
         .transaction::<_, Tenant, DbError>(|tx| {
@@ -99,9 +99,10 @@ async fn test_single_db_mode() {
                 default_rpm_limit: Some(100),
                 default_tpm_limit: Some(50000),
             };
-            let owner_id = owner.id;
+            let admin_id = administrator.id;
             Box::pin(async move {
-                Tenant::create_owned(tx, &request, owner_id, &tenant_owner_audit(owner_id)).await
+                Tenant::create_with_admin(tx, &request, admin_id, &tenant_admin_audit(admin_id))
+                    .await
             })
         })
         .await
@@ -276,7 +277,7 @@ async fn test_replica_read_write_routing() {
     // =========================================================
     // 测试 A: 写操作通过 DbRouter（应路由到主库）
     // =========================================================
-    let owner = User::create(
+    let administrator = User::create(
         router.as_ref(),
         &CreateUserRequest {
             email: format!("replica-owner-{}@example.com", test_id),
@@ -284,7 +285,7 @@ async fn test_replica_read_write_routing() {
         },
     )
     .await
-    .expect("global tenant owner creation should succeed");
+    .expect("tenant administrator fixture creation should succeed");
     let tenant = router
         .as_ref()
         .transaction::<_, Tenant, DbError>(|tx| {
@@ -295,9 +296,10 @@ async fn test_replica_read_write_routing() {
                 default_rpm_limit: Some(100),
                 default_tpm_limit: Some(50000),
             };
-            let owner_id = owner.id;
+            let admin_id = administrator.id;
             Box::pin(async move {
-                Tenant::create_owned(tx, &request, owner_id, &tenant_owner_audit(owner_id)).await
+                Tenant::create_with_admin(tx, &request, admin_id, &tenant_admin_audit(admin_id))
+                    .await
             })
         })
         .await
@@ -480,7 +482,7 @@ async fn test_replica_transaction_routing() {
         .await
         .expect("cleanup_test_data should succeed");
 
-    let owner = User::create(
+    let administrator = User::create(
         router.as_ref(),
         &CreateUserRequest {
             email: format!("tx-owner-{}@example.com", test_id),
@@ -488,7 +490,7 @@ async fn test_replica_transaction_routing() {
         },
     )
     .await
-    .expect("global tenant owner creation should succeed");
+    .expect("tenant administrator fixture creation should succeed");
 
     // 在事务中同时执行写操作和查询
     let tx_result = router
@@ -497,8 +499,8 @@ async fn test_replica_transaction_routing() {
             let test_id = test_id.clone();
             Box::pin(async move {
                 // 在事务内创建租户
-                let owner_id = owner.id;
-                let tenant = Tenant::create_owned(
+                let admin_id = administrator.id;
+                let tenant = Tenant::create_with_admin(
                     txn,
                     &CreateTenantRequest {
                         name: format!("Tx-{}", test_id),
@@ -507,8 +509,8 @@ async fn test_replica_transaction_routing() {
                         default_rpm_limit: Some(100),
                         default_tpm_limit: Some(50000),
                     },
-                    owner_id,
-                    &tenant_owner_audit(owner_id),
+                    admin_id,
+                    &tenant_admin_audit(admin_id),
                 )
                 .await?;
 
@@ -628,7 +630,7 @@ async fn test_degenerate_single_db_mode() {
     initialize_test_schema(router_single.write_conn())
         .await
         .expect("Schema initialization should succeed");
-    let owner = User::create(
+    let administrator = User::create(
         router_single.as_ref(),
         &CreateUserRequest {
             email: format!("degenerate-owner-{}@example.com", test_id),
@@ -636,7 +638,7 @@ async fn test_degenerate_single_db_mode() {
         },
     )
     .await
-    .expect("global tenant owner creation should succeed");
+    .expect("tenant administrator fixture creation should succeed");
     let tenant2 = router_single
         .as_ref()
         .transaction::<_, Tenant, DbError>(|tx| {
@@ -647,9 +649,10 @@ async fn test_degenerate_single_db_mode() {
                 default_rpm_limit: Some(100),
                 default_tpm_limit: Some(50000),
             };
-            let owner_id = owner.id;
+            let admin_id = administrator.id;
             Box::pin(async move {
-                Tenant::create_owned(tx, &request, owner_id, &tenant_owner_audit(owner_id)).await
+                Tenant::create_with_admin(tx, &request, admin_id, &tenant_admin_audit(admin_id))
+                    .await
             })
         })
         .await
@@ -689,7 +692,7 @@ async fn test_concurrent_through_router() {
         .expect("cleanup should succeed");
 
     // 创建基础租户
-    let owner = User::create(
+    let administrator = User::create(
         router.as_ref(),
         &CreateUserRequest {
             email: format!("concurrent-owner-{}@example.com", test_id),
@@ -697,7 +700,7 @@ async fn test_concurrent_through_router() {
         },
     )
     .await
-    .expect("global tenant owner creation should succeed");
+    .expect("tenant administrator fixture creation should succeed");
     let tenant = router
         .as_ref()
         .transaction::<_, Tenant, DbError>(|tx| {
@@ -708,9 +711,10 @@ async fn test_concurrent_through_router() {
                 default_rpm_limit: Some(100),
                 default_tpm_limit: Some(50000),
             };
-            let owner_id = owner.id;
+            let admin_id = administrator.id;
             Box::pin(async move {
-                Tenant::create_owned(tx, &request, owner_id, &tenant_owner_audit(owner_id)).await
+                Tenant::create_with_admin(tx, &request, admin_id, &tenant_admin_audit(admin_id))
+                    .await
             })
         })
         .await

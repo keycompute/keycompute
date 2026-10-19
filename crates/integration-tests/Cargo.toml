@@ -7,7 +7,7 @@ edition = "2024"
 # 被测试的 crates
 keycompute-config = { path = "../keycompute-config" }
 keycompute-types = { workspace = true }
-keycompute-db = { workspace = true }
+keycompute-db = { workspace = true, features = ["test-fixtures"] }
 keycompute-auth = { workspace = true }
 keycompute-ratelimit = { workspace = true, features = ["redis"] }
 keycompute-pricing = { workspace = true }

@@ -29,10 +29,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_users_single_root
 -- tenants: 租户/组织表
 CREATE TABLE IF NOT EXISTS tenants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    -- Platform administrators may provision an empty tenant and grant access
-    -- later.  NULL means no ordinary tenant owner has been assigned; it never
-    -- means that the creating root/operator is a tenant member or owner.
-    owner_user_id UUID REFERENCES users(id) ON DELETE RESTRICT,
     name VARCHAR(255) NOT NULL,
     slug VARCHAR(100) NOT NULL UNIQUE,
     description TEXT,
@@ -65,8 +61,8 @@ CREATE TABLE IF NOT EXISTS tenants (
 CREATE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);
 CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
 
--- Membership is the sole source of persisted tenant roles and ordinary
--- ownership. Platform administration remains implicit and is never stored here.
+-- Membership is the sole source of persisted tenant roles. Platform
+-- administration remains implicit and is never stored here.
 CREATE TABLE IF NOT EXISTS tenant_memberships (
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
@@ -88,6 +84,11 @@ CREATE TABLE IF NOT EXISTS tenant_memberships (
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_memberships_user ON tenant_memberships(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_tenant_memberships_tenant_role ON tenant_memberships(tenant_id, tenant_role, status);
+-- A user may retain removed membership history, but can belong to only one
+-- tenant at a time. This index is the concurrency-safe backstop shared by
+-- direct grants and invitation acceptance.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_memberships_one_current_tenant_per_user
+    ON tenant_memberships(user_id) WHERE status <> 'removed';
 
 CREATE TABLE IF NOT EXISTS tenant_invitations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2101,7 +2102,7 @@ CREATE TRIGGER identity_tenants_fence BEFORE INSERT OR DELETE ON tenants
     FOR EACH STATEMENT EXECUTE FUNCTION serialize_identity_admin();
 DROP TRIGGER IF EXISTS identity_tenants_update_fence ON tenants;
 CREATE TRIGGER identity_tenants_update_fence
-    BEFORE UPDATE OF owner_user_id, name, slug, description, status,
+    BEFORE UPDATE OF name, slug, description, status,
         default_rpm_limit, default_tpm_limit ON tenants
     FOR EACH STATEMENT EXECUTE FUNCTION serialize_identity_admin();
 DROP TRIGGER IF EXISTS identity_memberships_fence ON tenant_memberships;
@@ -2134,14 +2135,13 @@ BEGIN
     IF NEW.id IS DISTINCT FROM OLD.id THEN
         RAISE EXCEPTION 'tenant identity is immutable' USING ERRCODE='23514';
     END IF;
-    IF ROW(NEW.owner_user_id,NEW.name,NEW.slug,NEW.description,NEW.status,NEW.default_rpm_limit,NEW.default_tpm_limit)
-       IS DISTINCT FROM ROW(OLD.owner_user_id,OLD.name,OLD.slug,OLD.description,OLD.status,OLD.default_rpm_limit,OLD.default_tpm_limit) THEN
+    IF ROW(NEW.name,NEW.slug,NEW.description,NEW.status,NEW.default_rpm_limit,NEW.default_tpm_limit)
+       IS DISTINCT FROM ROW(OLD.name,OLD.slug,OLD.description,OLD.status,OLD.default_rpm_limit,OLD.default_tpm_limit) THEN
         NEW.revision := OLD.revision+1;
     ELSIF NEW.revision < OLD.revision THEN
         RAISE EXCEPTION 'tenant revision cannot decrease' USING ERRCODE='23514';
     END IF;
-    IF ROW(NEW.owner_user_id,NEW.status)
-       IS DISTINCT FROM ROW(OLD.owner_user_id,OLD.status) THEN
+    IF NEW.status IS DISTINCT FROM OLD.status THEN
         NEW.authz_version := OLD.authz_version+1;
     ELSIF NEW.authz_version < OLD.authz_version THEN
         RAISE EXCEPTION 'tenant authorization version cannot decrease' USING ERRCODE='23514';
@@ -2155,7 +2155,7 @@ CREATE TRIGGER tenant_authority_version BEFORE UPDATE ON tenants
 
 CREATE OR REPLACE FUNCTION version_membership_authority() RETURNS TRIGGER AS $$
 DECLARE target_tenant UUID;
-DECLARE new_invitation BOOLEAN;
+DECLARE new_admission BOOLEAN;
 BEGIN
     target_tenant := CASE WHEN TG_OP='DELETE' THEN OLD.tenant_id ELSE NEW.tenant_id END;
     IF TG_OP='DELETE' THEN
@@ -2169,22 +2169,34 @@ BEGIN
             RAISE EXCEPTION 'membership identity is immutable' USING ERRCODE='23514';
         END IF;
         -- An inviter or a client-supplied timestamp is not proof of admission.
-        -- The invitation must have been consumed after the prior removal,
-        -- including when the same administrator sends the new invitation.
-        new_invitation := NEW.status='active' AND NEW.removed_at IS NULL AND EXISTS (
-            SELECT 1 FROM tenant_invitations i
-            WHERE i.tenant_id=NEW.tenant_id AND i.accepted_by=NEW.user_id
-              AND i.invited_by IS NOT DISTINCT FROM NEW.invited_by
-              AND i.tenant_role=NEW.tenant_role AND i.status='accepted'
-              AND i.accepted_at=NEW.joined_at
-              AND i.accepted_at > COALESCE(OLD.removed_at,OLD.updated_at)
+        -- Reactivation requires either a newly consumed invitation or a direct
+        -- administrator grant by a currently active root/operator. Platform
+        -- grants always assign the tenant administrator role.
+        new_admission := NEW.status='active' AND NEW.removed_at IS NULL AND (
+            EXISTS (
+                SELECT 1 FROM tenant_invitations i
+                WHERE i.tenant_id=NEW.tenant_id AND i.accepted_by=NEW.user_id
+                  AND i.invited_by IS NOT DISTINCT FROM NEW.invited_by
+                  AND i.tenant_role=NEW.tenant_role AND i.status='accepted'
+                  AND i.accepted_at=NEW.joined_at
+                  AND i.accepted_at > COALESCE(OLD.removed_at,OLD.updated_at)
+            ) OR (
+                NEW.tenant_role='admin'
+                AND NEW.joined_at > COALESCE(OLD.removed_at,OLD.updated_at)
+                AND EXISTS (
+                    SELECT 1 FROM users platform_actor
+                    WHERE platform_actor.id=NEW.invited_by
+                      AND platform_actor.status='active'
+                      AND platform_actor.platform_role IN ('root','operator')
+                )
+            )
         );
-        IF OLD.status='removed' AND NEW.status<>'removed' AND NOT new_invitation THEN
-            RAISE EXCEPTION 'removed memberships require a new invitation' USING ERRCODE='23514';
+        IF OLD.status='removed' AND NEW.status<>'removed' AND NOT new_admission THEN
+            RAISE EXCEPTION 'removed memberships require a new invitation or platform grant' USING ERRCODE='23514';
         END IF;
         IF ROW(NEW.invited_by,NEW.joined_at) IS DISTINCT FROM ROW(OLD.invited_by,OLD.joined_at)
-           AND NOT new_invitation THEN
-            RAISE EXCEPTION 'membership provenance requires a new invitation' USING ERRCODE='23514';
+           AND NOT new_admission THEN
+            RAISE EXCEPTION 'membership provenance requires a new invitation or platform grant' USING ERRCODE='23514';
         END IF;
         IF ROW(NEW.tenant_role,NEW.status) IS DISTINCT FROM ROW(OLD.tenant_role,OLD.status) THEN
             NEW.authz_version := OLD.authz_version+1;
@@ -2239,18 +2251,9 @@ DROP TRIGGER IF EXISTS membership_credentials_revoked ON tenant_memberships;
 CREATE TRIGGER membership_credentials_revoked AFTER UPDATE OF tenant_role,status ON tenant_memberships
     FOR EACH ROW EXECUTE FUNCTION revoke_membership_credentials();
 
--- Validate final transaction state, permitting atomic create and transfer.
+-- Validate final transaction state for platform and tenant identities.
 CREATE OR REPLACE FUNCTION assert_identity_invariants() RETURNS TRIGGER AS $$
 BEGIN
-    IF EXISTS (
-        SELECT 1 FROM tenants t WHERE t.owner_user_id IS NOT NULL AND NOT EXISTS (
-            SELECT 1 FROM tenant_memberships m JOIN users owner_identity ON owner_identity.id=m.user_id
-            WHERE m.tenant_id=t.id AND m.user_id=t.owner_user_id
-              AND m.tenant_role='admin' AND m.status='active' AND owner_identity.status='active'
-        )
-    ) THEN
-        RAISE EXCEPTION 'an assigned tenant owner must be an active admin' USING ERRCODE='23514';
-    END IF;
     IF NOT EXISTS (SELECT 1 FROM users WHERE platform_role='root' AND status='active') THEN
         RAISE EXCEPTION 'at least one active root is required' USING ERRCODE='23514';
     END IF;
@@ -2290,7 +2293,7 @@ DROP TRIGGER IF EXISTS identity_users_guard ON users;
 CREATE CONSTRAINT TRIGGER identity_users_guard AFTER INSERT OR UPDATE OF platform_role,status OR DELETE ON users
     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION assert_identity_invariants();
 DROP TRIGGER IF EXISTS identity_tenants_guard ON tenants;
-CREATE CONSTRAINT TRIGGER identity_tenants_guard AFTER INSERT OR UPDATE OF owner_user_id,status OR DELETE ON tenants
+CREATE CONSTRAINT TRIGGER identity_tenants_guard AFTER INSERT OR UPDATE OF status OR DELETE ON tenants
     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION assert_identity_invariants();
 DROP TRIGGER IF EXISTS identity_memberships_guard ON tenant_memberships;
 CREATE CONSTRAINT TRIGGER identity_memberships_guard AFTER INSERT OR UPDATE OF tenant_role,status,invited_by,joined_at,removed_at OR DELETE ON tenant_memberships

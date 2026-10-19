@@ -6,7 +6,7 @@ use axum::{
 };
 use integration_tests::{
     common::generate_test_id,
-    db::{OwnedTenant, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{TenantFixture, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_db::{DbRouter, Tenant, TenantMembership, User};
 use keycompute_server::{AppState, AppStateConfig, create_router};
@@ -18,7 +18,7 @@ struct InvitationFixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    tenant: OwnedTenant,
+    tenant: TenantFixture,
     inviter: User,
     inviter_token: String,
     invitee: User,
@@ -32,7 +32,7 @@ impl InvitationFixture {
         let run = generate_test_id();
         let guard = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "invite", &run).await;
-        let inviter = User::find_by_id(&db, tenant.owner_user_id)
+        let inviter = User::find_by_id(&db, tenant.admin_user_id)
             .await
             .unwrap()
             .unwrap();

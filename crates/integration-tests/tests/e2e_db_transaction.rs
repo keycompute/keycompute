@@ -44,7 +44,7 @@ mod tests {
             default_tpm_limit: None,
         };
         let committed = pool.begin().await.unwrap();
-        let tenant = Tenant::create_owned(&committed, &request("commit"), owner.id, &audit)
+        let tenant = Tenant::create_with_admin(&committed, &request("commit"), owner.id, &audit)
             .await
             .unwrap();
         committed.commit().await.unwrap();
@@ -61,9 +61,10 @@ mod tests {
                 .is_some()
         );
         let rolled_back = pool.begin().await.unwrap();
-        let aborted = Tenant::create_owned(&rolled_back, &request("rollback"), owner.id, &audit)
-            .await
-            .unwrap();
+        let aborted =
+            Tenant::create_with_admin(&rolled_back, &request("rollback"), owner.id, &audit)
+                .await
+                .unwrap();
         assert!(
             Tenant::find_by_id(&rolled_back, aborted.id)
                 .await

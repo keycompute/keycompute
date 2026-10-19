@@ -16,7 +16,9 @@ and no fallback from a missing tenant scope to a global query.
 
 ### TenantRole
 
-- `admin`: all tenant-owned resource management, member management, and invitations in one active tenant.
+- `admin`: all tenant-owned resource management, ordinary-member management,
+  promotion of ordinary members, and invitations in one active tenant. Existing
+  administrator memberships are peer-protected from tenant-scoped mutations.
 - `member`: tenant resource use and personal resource management only.
 
 A tenant role never grants a platform role. Root/operator tenant administration
@@ -30,13 +32,14 @@ referral relation. It does not create a tenant, membership, balance or initial
 credit. A newly registered user therefore has `platform_role = none`, no active
 tenant memberships and a valid global console session.
 
-Tenant membership is added explicitly by tenant administration or by accepting a
-single-use invitation addressed to the user's verified email. Accepting an
-invitation adds or reactivates that tenant membership; it does not remove any
-other active membership. Users may belong to multiple tenants and select one
-verified membership for tenant-scoped APIs, or clear the selection to return to a
-global identity. The selected tenant is a request context, not the user's global
-ownership or platform role.
+Tenant membership is added by an explicit root/operator platform-target grant or
+by accepting a single-use invitation addressed to the user's verified email.
+Accepting an invitation adds or reactivates that tenant membership only when the
+user has no other non-removed membership. An ordinary user may therefore belong
+to at most one current tenant and can select that verified membership for
+tenant-scoped APIs, or clear the selection to return to a global identity. The
+selected tenant is a request context, not the user's global identity or platform
+role.
 
 ## Resource ownership contract
 
@@ -50,6 +53,14 @@ Every resource is classified as one of:
 Tenant-scoped data always carries a server-verified `tenant_id`. User-owned data carries both `tenant_id` and `owner_user_id`. A request-supplied tenant ID is only a selector and must be checked against the verified membership or platform scope.
 
 Tenant administrators may manage all tenant resources, including other members' tenant Responses. The original owner and billing subject remain immutable. Secrets are rotatable and revocable, never readable in plaintext.
+
+Tenant administrators are equal peers. They can manage ordinary members and
+promote a member to administrator, but cannot change the role or lifecycle state
+of an existing administrator, including themselves. Demotion, suspension,
+restoration, and removal of an administrator require an explicit audited
+root/operator platform-target action. A `removed` row is retained history rather
+than a current administrator; a fresh invitation may reauthorize that user with
+the newly granted role, while a suspended administrator remains peer-protected.
 
 Tenant-owned personal-resource `/me` endpoints remain `tenant_id + user_id`
 scoped, even for a tenant admin. Global profile endpoints such as `/api/v1/me`

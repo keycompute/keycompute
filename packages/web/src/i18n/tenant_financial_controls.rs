@@ -37,6 +37,11 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
             "可提现",
         ),
         (
+            "tenant_financial_controls.currency_scope",
+            "This ledger currently settles in CNY.",
+            "当前收益账本仅以 CNY 结算。",
+        ),
+        (
             "tenant_financial_controls.earnings_reserved",
             "Reserved",
             "提现预留",

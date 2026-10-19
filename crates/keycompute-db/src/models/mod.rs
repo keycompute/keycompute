@@ -102,7 +102,9 @@ pub use tenant_distribution_rule::{
 pub use tenant_invitation::{
     CreateTenantInvitationRequest, CreatedTenantInvitation, TenantInvitation,
 };
-pub use tenant_membership::{CreateTenantMembershipRequest, TenantMembership};
+#[cfg(feature = "test-fixtures")]
+pub use tenant_membership::CreateTenantMembershipFixture;
+pub use tenant_membership::TenantMembership;
 pub use usage_log::{CreateUsageLogRequest, UsageLog, UsageStats, UserUsageStats};
 pub use user::{CreateUserRequest, UpdateUserRequest, User};
 pub use user_balance::{

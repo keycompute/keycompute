@@ -21,10 +21,11 @@ use keycompute_auth::AuthorizationAction;
 use keycompute_db::{
     AuditContext,
     models::tenant_control::{
-        self, MAX_INVITATION_TTL_SECONDS, MAX_TENANT_CONTROL_PAGE_SIZE, MIN_INVITATION_TTL_SECONDS,
-        MemberPatch, Page, TenantAuthzSnapshot, TenantContext, TenantMember as TenantMemberRecord,
-        TenantPatch,
+        self, GrantMember, MAX_INVITATION_TTL_SECONDS, MAX_TENANT_CONTROL_PAGE_SIZE,
+        MIN_INVITATION_TTL_SECONDS, MemberPatch, Page, TenantAuthzSnapshot, TenantContext,
+        TenantMember as TenantMemberRecord, TenantPatch,
     },
+    models::tenant_membership::PEER_TENANT_ADMINISTRATOR_PROTECTED,
 };
 use keycompute_types::{MembershipStatus, TenantRole};
 use sea_orm::{DatabaseTransaction, TransactionTrait};
@@ -76,6 +77,12 @@ pub struct MemberPatchRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantMemberRequest {
+    pub user_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MemberListQuery {
     pub search: Option<String>,
     pub status: Option<MembershipStatus>,
@@ -99,12 +106,6 @@ pub struct CreateInvitationRequest {
     pub email: String,
     pub tenant_role: TenantRole,
     pub expires_in_seconds: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TransferOwnershipRequest {
-    pub new_owner_user_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +231,9 @@ fn db_error(error: keycompute_db::DbError) -> ApiError {
             ApiError::Conflict("the requested tenant state already exists".into())
         }
         DbError::Other(message) => {
+            if message == PEER_TENANT_ADMINISTRATOR_PROTECTED {
+                return ApiError::Forbidden(message);
+            }
             let lower = message.to_ascii_lowercase();
             if lower.contains("conflict")
                 || lower.contains("last ")
@@ -239,20 +243,24 @@ fn db_error(error: keycompute_db::DbError) -> ApiError {
                 || lower.contains("active tenant member cannot receive")
                 || lower.contains("different role")
                 || lower.contains("already used")
+                || lower.contains("already has retained tenant membership")
+                || lower.contains("already belongs to this tenant")
+                || lower.contains("already_belongs_to_tenant")
                 || lower.contains("unavailable")
-                || lower.contains("tenant owner")
             {
                 ApiError::Conflict(message)
             } else if lower.contains("expected_authz_version")
                 || lower.contains("expected_revision")
                 || lower.contains("at least one")
                 || lower.contains("invalid")
+                || lower.contains("member id")
+                || lower.contains("active member identity")
+                || lower.contains("platform identities cannot")
             {
                 ApiError::BadRequest(message)
             } else if lower.contains("required")
                 || lower.contains("permission")
                 || lower.contains("administrator")
-                || lower.contains("owner")
             {
                 ApiError::Forbidden(message)
             } else {
@@ -264,7 +272,7 @@ fn db_error(error: keycompute_db::DbError) -> ApiError {
             let lower = message.to_ascii_lowercase();
             if lower.contains("last admin")
                 || lower.contains("active admin")
-                || lower.contains("owner")
+                || lower.contains("uq_tenant_memberships_one_current_tenant_per_user")
                 || lower.contains("constraint")
             {
                 ApiError::Conflict("tenant membership invariant rejected the change".into())
@@ -280,6 +288,45 @@ fn db_error(error: keycompute_db::DbError) -> ApiError {
             ApiError::ServiceUnavailable("tenant control storage is temporarily unavailable".into())
         }
     }
+}
+
+pub async fn grant_member(
+    access: TenantAdministration,
+    Path(path): Path<TenantPath>,
+    State(state): State<AppState>,
+    request_id: RequestId,
+    Json(request): Json<GrantMemberRequest>,
+) -> Result<(StatusCode, Json<TenantMemberRecord>)> {
+    access.require_path_tenant(path.tenant_id)?;
+    access.require(AuthorizationAction::ManageMembers)?;
+    if access.platform_scope()?.is_none() {
+        return Err(ApiError::Forbidden(
+            "direct tenant authorization requires platform administration".into(),
+        ));
+    }
+    if request.user_id.is_nil() {
+        return Err(ApiError::BadRequest("member ID is required".into()));
+    }
+    let tx = pool(&state)?
+        .begin()
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let result = match tenant_control::grant_member(
+        &tx,
+        access.scope(),
+        snapshot(&access),
+        &GrantMember {
+            user_id: request.user_id,
+        },
+        &audit_from_request(&access, request_id),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => return rollback(tx, db_error(error)).await,
+    };
+    commit_mutation(tx, &state).await?;
+    Ok((StatusCode::CREATED, Json(result)))
 }
 
 fn audit_from_request(admin: &TenantAdministration, request_id: RequestId) -> AuditContext {
@@ -711,35 +758,6 @@ pub async fn accept_invitation(
     }))
 }
 
-pub async fn transfer_ownership(
-    access: TenantAdministration,
-    Path(path): Path<TenantPath>,
-    State(state): State<AppState>,
-    request_id: RequestId,
-    Json(request): Json<TransferOwnershipRequest>,
-) -> Result<Json<TenantContext>> {
-    access.require_path_tenant(path.tenant_id)?;
-    access.require(AuthorizationAction::ManageTenantResource)?;
-    let tx = pool(&state)?
-        .begin()
-        .await
-        .map_err(|error| ApiError::Internal(error.to_string()))?;
-    let result = match tenant_control::transfer_ownership(
-        &tx,
-        access.scope(),
-        snapshot(&access),
-        request.new_owner_user_id,
-        &audit_from_request(&access, request_id),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => return rollback(tx, db_error(error)).await,
-    };
-    commit_mutation(tx, &state).await?;
-    Ok(Json(result))
-}
-
 pub async fn list_audit_events(
     access: TenantAdministration,
     Path(path): Path<TenantPath>,
@@ -797,10 +815,6 @@ pub fn router() -> Router<AppState> {
             post(accept_invitation),
         )
         .route(
-            "/api/v1/tenants/{tenant_id}/transfer-ownership",
-            post(transfer_ownership),
-        )
-        .route(
             "/api/v1/tenants/{tenant_id}/audit-events",
             get(list_audit_events),
         )
@@ -810,23 +824,11 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/platform/tenants/{tenant_id}/control/members",
-            get(list_members),
+            get(list_members).post(grant_member),
         )
         .route(
             "/api/v1/platform/tenants/{tenant_id}/control/members/{user_id}",
             get(get_member).patch(patch_member).delete(delete_member),
-        )
-        .route(
-            "/api/v1/platform/tenants/{tenant_id}/control/invitations",
-            get(list_invitations).post(create_invitation),
-        )
-        .route(
-            "/api/v1/platform/tenants/{tenant_id}/control/invitations/{id}/revoke",
-            post(revoke_invitation),
-        )
-        .route(
-            "/api/v1/platform/tenants/{tenant_id}/control/transfer-ownership",
-            post(transfer_ownership),
         )
         .route(
             "/api/v1/platform/tenants/{tenant_id}/control/audit-events",
@@ -918,6 +920,17 @@ mod tests {
         let (_, html) = invitation_email("<tenant>", "https://console.test/invite#token=x");
         assert!(html.contains("&lt;tenant&gt;"));
         assert!(!html.contains("<tenant>"));
+    }
+
+    #[test]
+    fn peer_administrator_protection_is_a_forbidden_client_error() {
+        assert!(matches!(
+            db_error(keycompute_db::DbError::Other(
+                PEER_TENANT_ADMINISTRATOR_PROTECTED.into()
+            )),
+            ApiError::Forbidden(message)
+                if message == PEER_TENANT_ADMINISTRATOR_PROTECTED
+        ));
     }
 
     #[test]

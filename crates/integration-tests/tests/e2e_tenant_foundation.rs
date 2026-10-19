@@ -30,46 +30,23 @@ async fn global_identity_has_explicit_memberships_and_single_use_invitations() {
     let member = create_test_user(&db, tenant.id, "foundation-member", &run).await;
     let second_tenant = create_test_tenant(&db, "foundation-second", &run).await;
 
-    let member_audit = tenant_audit(second_tenant.owner_user_id, Some(TenantRole::Admin));
+    let member_audit = tenant_audit(second_tenant.admin_user_id, Some(TenantRole::Admin));
     let tx = db.begin().await.unwrap();
-    let second_membership = TenantMembership::create(
-        &tx,
-        &keycompute_db::CreateTenantMembershipRequest {
-            tenant_id: second_tenant.id,
-            user_id: member.id,
-            tenant_role: TenantRole::Admin,
-        },
-        &member_audit,
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-
-    let memberships = TenantMembership::list_active_for_user(&db, member.id)
+    assert!(
+        TenantMembership::create_fixture(
+            &tx,
+            &keycompute_db::CreateTenantMembershipFixture {
+                tenant_id: second_tenant.id,
+                user_id: member.id,
+                tenant_role: TenantRole::Admin,
+            },
+            &member_audit,
+        )
         .await
-        .unwrap();
-    assert_eq!(memberships.len(), 2);
-    assert!(
-        memberships
-            .iter()
-            .any(|m| m.tenant_id == tenant.id && m.tenant_role().unwrap() == TenantRole::Member)
+        .is_err(),
+        "a user with a current membership cannot join a second tenant"
     );
-    assert!(
-        memberships
-            .iter()
-            .any(|m| m.tenant_id == second_tenant.id
-                && m.tenant_role().unwrap() == TenantRole::Admin)
-    );
-    assert_eq!(
-        User::find_by_id(&db, member.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .platform_role()
-            .unwrap(),
-        PlatformRole::None
-    );
-    assert_eq!(second_membership.user_id, member.id);
+    tx.rollback().await.unwrap();
 
     let tx = db.begin().await.unwrap();
     tx.execute(Statement::from_sql_and_values(
@@ -89,6 +66,41 @@ async fn global_identity_has_explicit_memberships_and_single_use_invitations() {
         keycompute_types::MembershipStatus::Removed
     );
 
+    let tx = db.begin().await.unwrap();
+    let second_membership = TenantMembership::create_fixture(
+        &tx,
+        &keycompute_db::CreateTenantMembershipFixture {
+            tenant_id: second_tenant.id,
+            user_id: member.id,
+            tenant_role: TenantRole::Admin,
+        },
+        &member_audit,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let memberships = TenantMembership::list_active_for_user(&db, member.id)
+        .await
+        .unwrap();
+    assert_eq!(memberships.len(), 1);
+    assert!(
+        memberships
+            .iter()
+            .any(|m| m.tenant_id == second_tenant.id
+                && m.tenant_role().unwrap() == TenantRole::Admin)
+    );
+    assert_eq!(
+        User::find_by_id(&db, member.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .platform_role()
+            .unwrap(),
+        PlatformRole::None
+    );
+    assert_eq!(second_membership.user_id, member.id);
+
     let invitee = User::create(
         &db,
         &CreateUserRequest {
@@ -98,13 +110,13 @@ async fn global_identity_has_explicit_memberships_and_single_use_invitations() {
     )
     .await
     .unwrap();
-    let audit = tenant_audit(second_tenant.owner_user_id, Some(TenantRole::Admin));
+    let audit = tenant_audit(second_tenant.admin_user_id, Some(TenantRole::Admin));
     let tx = db.begin().await.unwrap();
     let created = TenantInvitation::create(
         &tx,
         &CreateTenantInvitationRequest {
             tenant_id: second_tenant.id,
-            invited_by: second_tenant.owner_user_id,
+            invited_by: second_tenant.admin_user_id,
             email: invitee.email.clone(),
             tenant_role: TenantRole::Member,
             expires_at: Utc::now() + Duration::hours(1),
@@ -174,7 +186,7 @@ async fn global_identity_has_explicit_memberships_and_single_use_invitations() {
 }
 
 #[tokio::test]
-async fn tenant_owner_remains_an_active_admin_under_last_admin_changes() {
+async fn tenant_supports_multiple_peer_admins_without_an_owner_invariant() {
     let db = create_test_pool().await;
     let run = generate_test_id();
     let tenant = create_test_tenant(&db, "last-admin", &run).await;
@@ -191,22 +203,24 @@ async fn tenant_owner_remains_an_active_admin_under_last_admin_changes() {
     tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE tenant_memberships SET status='suspended' WHERE tenant_id=$1 AND user_id=$2",
-        [tenant.id.into(), tenant.owner_user_id.into()],
+        [tenant.id.into(), tenant.admin_user_id.into()],
     ))
     .await
     .unwrap();
-    assert!(
-        tx.commit().await.is_err(),
-        "the deferred tenant invariant must reject suspending the owner"
-    );
+    tx.commit().await.unwrap();
     let active_admins = TenantMembership::list_active_for_tenant(&db, tenant.id)
         .await
         .unwrap();
     assert!(
         active_admins
             .iter()
-            .any(|m| m.user_id == tenant.owner_user_id
-                && m.tenant_role == TenantRole::Admin.as_str())
+            .any(|m| m.user_id == other.id && m.tenant_role == TenantRole::Admin.as_str())
+    );
+    assert!(
+        active_admins
+            .iter()
+            .all(|m| m.user_id != tenant.admin_user_id),
+        "suspended administrators are not active authority"
     );
     cleanup_test_data(&db, &run).await.unwrap();
 }

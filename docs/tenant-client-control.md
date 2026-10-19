@@ -15,10 +15,13 @@ reads rather than the client's display cache. `/api/v1/me` is also fresh.
 Pages are bounded to 1–100 items, member search is encoded as one query value, and
 the typed membership-status filter is used for unambiguous active-member totals.
 
-`TenantContext.owner_user_id` comes from the authorized tenant query and may be
-absent until an ordinary administrator is assigned. Do not infer ownership from
-the admin role: a tenant can have multiple administrators, while root/operator
-authority is implicit and never represented as membership or ownership.
+`TenantContext` has no owner field. A tenant can have zero, one, or multiple
+administrators, and every active administrator has the same tenant authority.
+Tenant-scoped member commands may manage ordinary members and promote them, but
+cannot demote, suspend, restore, or remove an existing administrator. The same
+rule protects the caller's own administrator membership. Those operations are
+available only through explicit root/operator platform-target administration.
+Root/operator authority is implicit and is never represented as membership.
 The selected-session contract is `selected_tenant.tenant_role`, not `role`.
 It is a required typed enum; there is no legacy-role alias or default admin.
 Member records distinguish `membership_status` from global `user_status`.
@@ -27,16 +30,16 @@ Member update/removal carries a positive `expected_authz_version`; removal uses
 DELETE with the version JSON body. Tenant configuration carries a separate
 positive `expected_revision`, so concurrent name, description and default-limit
 edits are detected without treating display configuration as authorization.
-Ownership transfer sends only the explicit new owner UUID. The server enforces
-current authority and the assigned-owner invariant under its transaction.
-Ordinary tenant administration must retain its owner/administrator boundary;
-explicit platform administration may deliberately return a tenant to an
-ownerless state before granting access again.
+No ownership-transfer command exists. Root/operator may directly grant an
+eligible ordinary user the administrator role through the explicit platform-target API;
+tenant administrators use invitations for ordinary membership onboarding.
+Database and application checks enforce at most one current tenant membership
+per user, including suspended memberships.
 
 All tenant mutations use the SDK's single-dispatch path. Network/503 failures
 are not automatically retried. Ordinary configuration changes advance
-`revision` but keep the selected JWT valid. Ownership, tenant-status and
-self-membership changes can advance authorization versions and invalidate the
+`revision` but keep the selected JWT valid. Tenant-status and self-membership
+changes can advance authorization versions and invalidate the
 selected JWT even after a successful command: do not replay the write; obtain a
 fresh supported selection or login session.
 
@@ -66,7 +69,7 @@ configuration revision serialization, secret redaction,
 no mutation retries, versioned DELETE, fresh reads, bounds and query injection.
 `crates/integration-tests/tests/support/tenant_console_wire.rs` runs this exact client
 against a real loopback Axum server and isolated PostgreSQL, covering membership,
-invitation, owner transfer, configuration, audit and session selection responses.
+invitation, direct platform grants, configuration, audit and session selection responses.
 It also checks that configuration updates preserve the current authorization
 session, restored membership does not revive old JWTs and a removed membership
 requires a new invitation. These are not mock-only wire fixtures.

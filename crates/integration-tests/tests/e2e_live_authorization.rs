@@ -16,8 +16,8 @@ use keycompute_auth::{
     ResourceScope, authorize,
 };
 use keycompute_db::{
-    AuditContext, CreateTenantMembershipRequest, CreateUserRequest, DbRouter, Tenant,
-    TenantMembership, User, models::api_key::CreateProduceAiKeyRequest,
+    AuditContext, CreateUserRequest, DbRouter, TenantMembership, User,
+    models::api_key::CreateProduceAiKeyRequest,
 };
 use keycompute_server::{
     AppState, create_router,
@@ -117,22 +117,33 @@ async fn call(
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
 }
-fn audit(tenant: &Tenant) -> AuditContext {
+fn audit(tenant: &integration_tests::db::TenantFixture) -> AuditContext {
     AuditContext {
-        actor_user_id: tenant
-            .owner_user_id
-            .expect("authorization fixture tenant must have an owner"),
+        actor_user_id: tenant.admin_user_id,
         credential_kind: CredentialKind::Jwt,
         actor_platform_role: PlatformRole::None,
         actor_tenant_role: Some(TenantRole::Admin),
         request_id: Some(Uuid::new_v4()),
     }
 }
+async fn platform_audit(db: &DatabaseConnection) -> AuditContext {
+    let root = User::find_by_email(db, "tenant-test-root@fixture.invalid")
+        .await
+        .unwrap()
+        .unwrap();
+    AuditContext {
+        actor_user_id: root.id,
+        credential_kind: CredentialKind::Jwt,
+        actor_platform_role: PlatformRole::Root,
+        actor_tenant_role: None,
+        request_id: Some(Uuid::new_v4()),
+    }
+}
 struct Fixture {
     db: DatabaseConnection,
     state: AppState,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     run: String,
     guard: TestDataGuard,
 }
@@ -175,17 +186,6 @@ impl Fixture {
             TenantRole::Admin,
             1,
             &audit(&self.a),
-        )
-        .await
-        .unwrap();
-        TenantMembership::create(
-            &tx,
-            &CreateTenantMembershipRequest {
-                tenant_id: self.b.id,
-                user_id: member.id,
-                tenant_role: TenantRole::Member,
-            },
-            &audit(&self.b),
         )
         .await
         .unwrap();
@@ -274,25 +274,29 @@ async fn credential_and_disjoint_role_matrix_is_enforced_over_http() {
     let user = f.member("tenant-matrix", PlatformRole::None).await;
     let global = f.global_token(user.id).await;
     let a = f.selected(&global, f.a.id).await;
-    let b = f.selected(&global, f.b.id).await;
+    let context = f.state.auth.verify_token(&global).await.unwrap();
+    assert!(
+        f.state
+            .auth
+            .select_tenant(&context, Some(f.b.id))
+            .await
+            .is_err()
+    );
     assert_eq!(f.request(&global, "/platform").await, StatusCode::FORBIDDEN);
     assert_eq!(f.request(&global, "/health").await, StatusCode::FORBIDDEN);
     assert_eq!(f.request(&global, "/admin").await, StatusCode::UNAUTHORIZED);
     assert_eq!(f.request(&a, "/admin").await, StatusCode::NO_CONTENT);
-    assert_eq!(f.request(&b, "/admin").await, StatusCode::FORBIDDEN);
-    for token in [&a, &b] {
-        assert_eq!(
-            f.request(token, &format!("/personal/{}", user.id)).await,
-            StatusCode::NO_CONTENT
-        );
-        assert_eq!(
-            f.request(token, &format!("/personal/{}", f.a.owner_user_id))
-                .await,
-            StatusCode::FORBIDDEN
-        );
-    }
     assert_eq!(
-        f.request(&a, &format!("/resource/{}/{}", f.a.id, f.a.owner_user_id))
+        f.request(&a, &format!("/personal/{}", user.id)).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        f.request(&a, &format!("/personal/{}", f.a.admin_user_id))
+            .await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        f.request(&a, &format!("/resource/{}/{}", f.a.id, f.a.admin_user_id))
             .await,
         StatusCode::NO_CONTENT
     );
@@ -402,7 +406,7 @@ async fn global_identity_can_select_only_existing_memberships_and_clear_selectio
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(a["selected_tenant"]["tenant_role"], "admin");
-    let (status, b) = call(
+    let (status, denied) = call(
         create_router(f.state.clone()),
         a["access_token"].as_str().unwrap(),
         "POST",
@@ -411,11 +415,11 @@ async fn global_identity_can_select_only_existing_memberships_and_clear_selectio
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(b["selected_tenant"]["tenant_role"], "member");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(denied.get("selected_tenant").is_none());
     let (status, global_again) = call(
         create_router(f.state.clone()),
-        b["access_token"].as_str().unwrap(),
+        a["access_token"].as_str().unwrap(),
         "POST",
         "/api/v1/me/tenant",
         json!({"tenant_id":null}),
@@ -432,15 +436,18 @@ async fn global_identity_can_select_only_existing_memberships_and_clear_selectio
 async fn membership_and_tenant_versions_revoke_only_their_own_scope() {
     let mut f = Fixture::new().await;
     let user = f.member("versions", PlatformRole::None).await;
+    let b_user = create_test_user(&f.db, f.b.id, "versions-b", &f.run).await;
     let global = f.global_token(user.id).await;
     let a = f.selected(&global, f.a.id).await;
-    let b = f.selected(&global, f.b.id).await;
+    let b_global = f.global_token(b_user.id).await;
+    let b = f.selected(&b_global, f.b.id).await;
     let key_a = f.key(user.id, f.a.id).await;
-    let key_b = f.key(user.id, f.b.id).await;
+    let key_b = f.key(b_user.id, f.b.id).await;
     let before = TenantMembership::find(&f.db, f.a.id, user.id)
         .await
         .unwrap()
         .unwrap();
+    let platform = platform_audit(&f.db).await;
     let tx = f.db.begin().await.unwrap();
     let lowered = TenantMembership::set_role(
         &tx,
@@ -448,7 +455,7 @@ async fn membership_and_tenant_versions_revoke_only_their_own_scope() {
         user.id,
         TenantRole::Member,
         before.authz_version,
-        &audit(&f.a),
+        &platform,
     )
     .await
     .unwrap();
@@ -522,7 +529,6 @@ async fn live_global_token_changes_invalidate_all_old_sessions_without_cross_sco
     let user = f.member("global-versions", PlatformRole::None).await;
     let global = f.global_token(user.id).await;
     let a = f.selected(&global, f.a.id).await;
-    let b = f.selected(&global, f.b.id).await;
     let key = f.key(user.id, f.a.id).await;
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
@@ -531,7 +537,7 @@ async fn live_global_token_changes_invalidate_all_old_sessions_without_cross_sco
     ))
     .await
     .unwrap();
-    for token in [&global, &a, &b] {
+    for token in [&global, &a] {
         assert!(f.state.auth.verify_token(token).await.is_err());
     }
     let key_context = f.state.auth.verify_token(&key).await.unwrap();

@@ -402,8 +402,7 @@ mod tests {
             .split("\n);")
             .next()
             .unwrap();
-        assert!(tenants.contains("owner_user_id UUID REFERENCES users(id) ON DELETE RESTRICT"));
-        assert!(!tenants.contains("owner_user_id UUID NOT NULL"));
+        assert!(!tenants.contains("owner_user_id"));
         for expected in [
             "status VARCHAR(20) NOT NULL DEFAULT 'active'",
             "tenant_role VARCHAR(20) NOT NULL DEFAULT 'member'",
@@ -413,9 +412,9 @@ mod tests {
             "authz_version BIGINT NOT NULL DEFAULT 1",
             "revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0)",
             "NEW.revision := OLD.revision+1",
-            "IF ROW(NEW.owner_user_id,NEW.status)",
+            "IF NEW.status IS DISTINCT FROM OLD.status",
             "CONSTRAINT ck_tenant_memberships_removed_lifecycle",
-            "owner_identity.status='active'",
+            "uq_tenant_memberships_one_current_tenant_per_user",
             "status IN ('active', 'suspended', 'removed')",
             "tenant_role VARCHAR(20)",
             "accepted_by UUID REFERENCES users(id) ON DELETE RESTRICT",

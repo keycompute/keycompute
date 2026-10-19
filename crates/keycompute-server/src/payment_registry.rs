@@ -212,8 +212,8 @@ impl PaymentRegistry {
     /// Create and close a real provider order, then bind verification to the current config.
     ///
     /// 补偿窗口说明：若远端 close_order 失败，该 0.01 元订单会保持 pending
-    /// 直至 timeout_minutes 过期；期间若被实际支付，将经回调向发起验证的
-    /// 管理员账户入账 0.01 元。此类订单可通过 [`PROVIDER_VERIFICATION_SUBJECT`]
+    /// 直至 timeout_minutes 过期；期间若被实际支付，将经回调向选定租户的
+    /// 有效管理员账户入账 0.01 元。此类订单可通过 [`PROVIDER_VERIFICATION_SUBJECT`]
     /// 在对账时识别。
     pub async fn verify_provider(
         &self,

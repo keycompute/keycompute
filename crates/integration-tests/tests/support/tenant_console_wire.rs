@@ -59,7 +59,7 @@ async fn sdk_accepts_actual_session_membership_invitation_and_audit_contracts() 
         TenantRole::Admin
     );
     let context = control.context(&token).await.unwrap();
-    assert_eq!(context.owner_user_id, Some(f.inviter.id));
+    assert_eq!(context.tenant_role, TenantRole::Admin);
     let members = control.members(1, 20, None, &token).await.unwrap();
     assert!(
         members
@@ -92,7 +92,7 @@ async fn sdk_accepts_actual_session_membership_invitation_and_audit_contracts() 
         .await
         .unwrap();
     assert_eq!(accepted.tenant.id, f.tenant.id);
-    assert_eq!(accepted.tenant.owner_user_id, Some(f.inviter.id));
+    assert_eq!(accepted.tenant.tenant_role, TenantRole::Member);
     assert_eq!(
         accepted.membership.membership_status,
         MembershipStatus::Active
@@ -123,7 +123,7 @@ async fn sdk_accepts_actual_session_membership_invitation_and_audit_contracts() 
     f.guard.cleanup().await.unwrap();
 }
 #[tokio::test]
-async fn sdk_member_versions_owner_transfer_and_tenant_selection_are_real_server_boundaries() {
+async fn sdk_member_versions_multiple_admins_and_tenant_selection_are_real_server_boundaries() {
     let mut f = InvitationFixture::new().await;
     let peer = create_test_user(&f.db, f.tenant.id, "console-peer", &f.run).await;
     let other = create_test_tenant(&f.db, "console-foreign", &f.run).await;
@@ -151,13 +151,6 @@ async fn sdk_member_versions_owner_transfer_and_tenant_selection_are_real_server
             .await
             .is_err()
     );
-    let owner = control.member(f.inviter.id, &token).await.unwrap();
-    assert!(
-        control
-            .remove_member(owner.user_id, owner.authz_version, &token)
-            .await
-            .is_err()
-    );
     assert!(
         TenantControlApi::new(api, other.id)
             .unwrap()
@@ -165,14 +158,7 @@ async fn sdk_member_versions_owner_transfer_and_tenant_selection_are_real_server
             .await
             .is_err()
     );
-    let next = control.transfer_ownership(peer.id, &token).await.unwrap();
-    assert_eq!(next.owner_user_id, Some(peer.id));
-    assert!(
-        control.context(&token).await.is_err(),
-        "ownership change invalidates old selected JWT"
-    );
-    let fresh = selected(&f, api, f.inviter.id).await;
-    let before = control.context(&fresh).await.unwrap();
+    let before = control.context(&token).await.unwrap();
     let after = control
         .patch_context(
             &TenantPatch {
@@ -182,14 +168,14 @@ async fn sdk_member_versions_owner_transfer_and_tenant_selection_are_real_server
                 default_rpm_limit: Some(70),
                 default_tpm_limit: Some(1000),
             },
-            &fresh,
+            &token,
         )
         .await
         .unwrap();
     assert_eq!(after.name, "Console contract tenant");
     assert!(after.revision > before.revision);
     assert_eq!(after.authz_version, before.authz_version);
-    assert!(control.context(&fresh).await.is_ok());
+    assert!(control.context(&token).await.is_ok());
     let global = AuthApi::new(api)
         .select_tenant(
             &SelectTenantRequest::global(),

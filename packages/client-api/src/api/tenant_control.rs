@@ -17,7 +17,6 @@ pub struct Page<T> {
 #[derive(Debug, Clone, Deserialize)]
 pub struct TenantContext {
     pub id: Uuid,
-    pub owner_user_id: Option<Uuid>,
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
@@ -107,6 +106,10 @@ pub struct MemberPatch {
     pub tenant_role: Option<TenantRole>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<MembershipStatus>,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct GrantMember {
+    pub user_id: Uuid,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateInvitation {
@@ -327,12 +330,28 @@ impl TenantControlApi {
         )
         .await
     }
+    pub async fn grant_member(&self, body: &GrantMember, token: &str) -> Result<TenantMember> {
+        if !self.base.starts_with("/api/v1/platform/") {
+            return Err(ClientError::Config(
+                "Direct tenant authorization requires a platform target".into(),
+            ));
+        }
+        real_id(body.user_id)?;
+        self.client
+            .post_json(&format!("{}/members", self.base), body, Some(token))
+            .await
+    }
     pub async fn invitations(
         &self,
         page: u32,
         size: u32,
         token: &str,
     ) -> Result<Page<TenantInvitation>> {
+        if self.base.starts_with("/api/v1/platform/") {
+            return Err(ClientError::Config(
+                "Invitations require a tenant administrator membership".into(),
+            ));
+        }
         self.client
             .get_json_fresh(
                 &format!("{}/invitations?{}", self.base, page_query(page, size)?),
@@ -345,6 +364,11 @@ impl TenantControlApi {
         body: &CreateInvitation,
         token: &str,
     ) -> Result<InvitationCreateResponse> {
+        if self.base.starts_with("/api/v1/platform/") {
+            return Err(ClientError::Config(
+                "Invitations require a tenant administrator membership".into(),
+            ));
+        }
         if !(300..=604800).contains(&body.expires_in_seconds) {
             return Err(ClientError::Config(
                 "invitation duration is outside the supported range".into(),
@@ -359,21 +383,16 @@ impl TenantControlApi {
         invitation_id: Uuid,
         token: &str,
     ) -> Result<TenantInvitation> {
+        if self.base.starts_with("/api/v1/platform/") {
+            return Err(ClientError::Config(
+                "Invitations require a tenant administrator membership".into(),
+            ));
+        }
         real_id(invitation_id)?;
         self.client
             .post_json(
                 &format!("{}/invitations/{invitation_id}/revoke", self.base),
                 &serde_json::json!({}),
-                Some(token),
-            )
-            .await
-    }
-    pub async fn transfer_ownership(&self, new_owner: Uuid, token: &str) -> Result<TenantContext> {
-        real_id(new_owner)?;
-        self.client
-            .post_json(
-                &format!("{}/transfer-ownership", self.base),
-                &serde_json::json!({"new_owner_user_id":new_owner}),
                 Some(token),
             )
             .await

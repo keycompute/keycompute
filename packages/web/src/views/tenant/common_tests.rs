@@ -241,8 +241,7 @@ fn technical_ids_keep_the_full_value_in_the_accessible_dom() {
     assert!(!component.contains("short_id"));
 
     let settings = include_str!("settings.rs");
-    assert!(settings.contains("if let Some(owner_user_id) = value.owner_user_id"));
-    assert!(settings.contains("TechnicalId { value: owner_user_id.to_string() }"));
+    assert!(!settings.contains("owner_user_id"));
     assert!(!settings.contains("short_id"));
 }
 

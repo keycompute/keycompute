@@ -76,7 +76,7 @@ impl TipWithdrawalTestEnv {
         )
         .await?;
         let tx = pool.begin().await?;
-        let tenant = Tenant::create_owned(
+        let tenant = Tenant::create_with_admin(
             &tx,
             &CreateTenantRequest {
                 name: format!("tip-test-tenant-{}", suffix),

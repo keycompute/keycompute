@@ -10,27 +10,26 @@ contains the corresponding tenant capability; platform roles remain independent.
 - Global header switcher: personal/platform context plus active memberships.
 - `/tenant`: role-aware workspace overview and zero-membership guidance.
 - `/tenant/settings`: workspace name, description and default limits.
-- `/tenant/members`: member role/status changes, removal and ownership transfer.
+- `/tenant/members`: member role/status changes and removal.
 - `/tenant/invitations`: create, inspect and revoke invitations.
 - `/tenant/audit`: paginated audit events and canonical request IDs.
 - `/invite`: explicit one-time invitation acceptance, including return after login.
 
 Registration leaves a user at the global identity with zero memberships. The
 workspace page presents that state explicitly; an invitation acceptance adds the
-new membership without removing memberships in other tenants. The acceptance
+membership only when the user has no current membership in another tenant. The acceptance
 page can immediately select the new membership and enter its dashboard; later
 switching remains available from the global header.
 
 Tenant administration consumes the server's tenant capability vector and selected
 membership. Navigation and route guards distinguish settings, members,
 invitations, providers, keys, billing and pricing instead of using one broad UI
-flag. The persisted roles remain deliberately small: optional Owner is a tenant
-ownership identity, while Admin and Member are inviteable membership roles.
+flag. The persisted roles remain deliberately small: Admin and Member. A tenant
+may have multiple peer administrators and has no owner role or owner field.
 Platform role labels and platform capabilities never synthesize a tenant grant.
-Root/operator global identities cannot enter ordinary tenant-scoped management or
-resource pages without an actual qualifying selected membership. Their separately
-authorized platform consoles carry an explicit target tenant and provide equivalent
-administration without inserting a membership row.
+Root/operator global identities use separately authorized platform consoles with
+an explicit target tenant. They provide equivalent administration without
+inserting a membership row or selecting the tenant.
 Backend checks remain authoritative.
 
 The workspace reads the already verified profile after opaque-token restoration;
@@ -39,16 +38,18 @@ tenant from missing local selection metadata. Tenant selection verifies the
 original user and returned target through AuthStore's
 existing compare-and-install operation. Editable configuration uses its own
 monotonic `revision`, so ordinary name, description and limit updates do not
-invalidate selected sessions. Ownership, tenant status and self-membership
+invalidate selected sessions. Tenant status and self-membership
 changes still advance authorization versions and require a fresh selection or
 sign-in. A configuration conflict keeps the local draft visible and exposes an
 explicit refresh action that loads the latest revision before a corrected save.
 Successful name changes synchronize the header and membership labels in the
 current session. Other members' changes refresh the current page.
 
-Platform tenant creation starts with no owner or members. Root/operator may grant
-access later through the explicit platform tenant administration page; the first
-ordinary active administrator who accepts an invitation becomes owner atomically.
+Platform tenant creation starts with no members. Root/operator may directly add
+an eligible ordinary user as an administrator through the explicit platform
+tenant administration page, without an invitation. Tenant administrators may
+then invite more administrators or members. A user with any non-removed
+membership cannot be added to or accept an invitation for another tenant.
 On narrow mobile headers, secondary repository/theme shortcuts yield space to the
 workspace selector while Home and account actions remain available.
 
@@ -67,8 +68,13 @@ Reads can use the existing coordinated authentication refresh. All tenant contro
 commands are single dispatch, including after 401, 503 or uncertain transport
 outcomes. The UI tells the user to refresh records before deciding to resubmit.
 Member mutations send the displayed positive revision. Removed members need a
-new invitation. The owner cannot be demoted/removed through member controls;
-ownership transfer explicitly selects another active administrator.
+new invitation when tenant administrators restore access; platform administrators
+may explicitly reauthorize that same ordinary user. Administrators are peers:
+the tenant console exposes actions only for ordinary members and cannot demote,
+suspend, restore, or remove any administrator, including the caller. Existing
+non-removed administrator memberships are managed only from the audited
+root/operator platform tenant page. A removed administrator row is historical
+and can only re-enter through a fresh invitation or explicit platform grant.
 
 ## Invitation secrets
 
@@ -98,7 +104,7 @@ Code-level UI and integration regressions cover exact-revision member commands,
 literal search, invitation lifecycle, uncertain-write single dispatch, workspace
 switch isolation, route guards, fragment scrubbing, login resumption and direct
 workspace entry after acceptance. They also verify that configuration saves do not
-invalidate the selected authorization session, ownership transfer does, and an
+invalidate the selected authorization session, direct membership changes do, and an
 expired restored token cannot consume an invitation before verified login. CI runs
 these tests and verifies the production Web image can be built; backend isolation
 continues to be proven by the real SDK/Axum/PostgreSQL suites.

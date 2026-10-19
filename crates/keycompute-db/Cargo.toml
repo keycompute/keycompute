@@ -3,6 +3,10 @@ name = "keycompute-db"
 version = "0.2.0"
 edition = "2024"
 
+[features]
+default = []
+test-fixtures = []
+
 [dependencies]
 keycompute-types.workspace = true
 keycompute-config.workspace = true

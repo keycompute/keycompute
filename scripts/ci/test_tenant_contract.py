@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
  status TEXT, token_version INTEGER, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
 );
 CREATE TABLE IF NOT EXISTS tenants (
- id UUID, owner_user_id UUID, revision BIGINT NOT NULL,
+ id UUID, revision BIGINT NOT NULL,
  authz_version BIGINT NOT NULL,
  status TEXT CHECK(status IN ('active','inactive'))
 );
@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS tenant_invitations (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS invitation_pending
  ON tenant_invitations(tenant_id,lower(email)) WHERE status='pending';
+CREATE UNIQUE INDEX IF NOT EXISTS one_current_membership
+ ON tenant_memberships(user_id) WHERE status<>'removed';
 CREATE TABLE IF NOT EXISTS tenant_audit_events (
  scope_type TEXT, tenant_id UUID, actor_user_id UUID, credential_kind TEXT,
  platform_role TEXT, tenant_role TEXT, request_id UUID, action TEXT, result TEXT, metadata JSONB
@@ -74,10 +76,14 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(self.issues(SCHEMA.replace("'admin','member'", "'root','admin','member'")))
         self.assertTrue(self.issues(SCHEMA.replace("'active','suspended','removed'", "'active','suspended','revoked'")))
 
-    def test_optional_ownership_and_membership_primary_key(self):
-        self.assertTrue(self.issues(SCHEMA.replace('owner_user_id UUID,', 'owner_user_id UUID NOT NULL,')))
+    def test_retired_tenant_owner_and_membership_primary_key(self):
+        self.assertTrue(self.issues(SCHEMA.replace('id UUID, revision', 'id UUID, owner_user_id UUID, revision')))
         self.assertTrue(self.issues(SCHEMA.replace('PRIMARY KEY(tenant_id,user_id)', 'UNIQUE(tenant_id,user_id)')))
         self.assertTrue(self.issues(SCHEMA.replace('token_version INTEGER,', '')))
+
+    def test_one_current_tenant_per_user_index_is_required(self):
+        self.assertTrue(self.issues(SCHEMA.replace('CREATE UNIQUE INDEX IF NOT EXISTS one_current_membership', 'CREATE INDEX IF NOT EXISTS one_current_membership')))
+        self.assertTrue(self.issues(SCHEMA.replace("WHERE status<>'removed'", "WHERE status='active'")))
 
     def test_invitation_index_must_be_unique_and_pending_and_tokens_hashed(self):
         self.assertTrue(self.issues(SCHEMA.replace('CREATE UNIQUE INDEX', 'CREATE INDEX')))

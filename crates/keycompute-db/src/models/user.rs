@@ -117,12 +117,6 @@ impl User {
     ) -> Result<(AuditContext, Self, Self), DbError> {
         lock_identity_admin(tx).await?;
         let actor = actor.require_platform_admin(tx).await?;
-        tx.query_all(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT id FROM tenants WHERE owner_user_id=$1 ORDER BY id FOR UPDATE",
-            [id.into()],
-        ))
-        .await?;
         let before = Self::find_by_id_for_update(tx, id)
             .await?
             .ok_or_else(|| DbError::not_found("User", id))?;

@@ -13,8 +13,7 @@ use integration_tests::{
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::models::api_key::KeyRemoval;
 use keycompute_db::{
-    AuditContext, CreateProduceAiKeyRequest, CreateTenantMembershipRequest, DbRouter, ProduceAiKey,
-    Tenant, TenantMembership, User,
+    AuditContext, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey, Tenant, TenantMembership, User,
 };
 use keycompute_server::{AppState, create_router};
 use keycompute_types::{
@@ -25,14 +24,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-fn admin(t: &Tenant) -> TenantScope {
-    TenantScope::checked(
-        t.id,
-        t.owner_user_id
-            .expect("key fixture tenant must have an owner"),
-        TenantRole::Admin,
-    )
-    .unwrap()
+fn admin(t: &integration_tests::db::TenantFixture) -> TenantScope {
+    TenantScope::checked(t.id, t.admin_user_id, TenantRole::Admin).unwrap()
 }
 fn actor(scope: TenantScope) -> AuditContext {
     AuditContext {
@@ -40,6 +33,19 @@ fn actor(scope: TenantScope) -> AuditContext {
         credential_kind: CredentialKind::Jwt,
         actor_platform_role: PlatformRole::None,
         actor_tenant_role: Some(scope.tenant_role()),
+        request_id: Some(Uuid::new_v4()),
+    }
+}
+async fn platform_audit(db: &DatabaseConnection) -> AuditContext {
+    let root = User::find_by_email(db, "tenant-test-root@fixture.invalid")
+        .await
+        .unwrap()
+        .unwrap();
+    AuditContext {
+        actor_user_id: root.id,
+        credential_kind: CredentialKind::Jwt,
+        actor_platform_role: PlatformRole::Root,
+        actor_tenant_role: None,
         request_id: Some(Uuid::new_v4()),
     }
 }
@@ -55,9 +61,10 @@ fn request(t: Uuid, u: Uuid) -> CreateProduceAiKeyRequest {
 }
 struct Fixture {
     db: DatabaseConnection,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     user: TenantActor,
+    foreign_user: TenantActor,
     peer: TenantActor,
     operator: User,
     own: ProduceAiKey,
@@ -74,6 +81,7 @@ impl Fixture {
         let b = create_test_tenant(&db, "key-scope-b", &run).await;
         let user = create_test_user(&db, a.id, "key-owner", &run).await;
         let peer = create_test_user(&db, a.id, "key-peer", &run).await;
+        let foreign_user = create_test_user(&db, b.id, "key-foreign", &run).await;
         let operator = User::create(
             &db,
             &keycompute_db::CreateUserRequest {
@@ -91,26 +99,13 @@ impl Fixture {
         .await
         .unwrap();
         let operator = User::find_by_id(&db, operator.id).await.unwrap().unwrap();
-        let tx = db.begin().await.unwrap();
-        TenantMembership::create(
-            &tx,
-            &CreateTenantMembershipRequest {
-                tenant_id: b.id,
-                user_id: user.id,
-                tenant_role: TenantRole::Member,
-            },
-            &actor(admin(&b)),
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
         let own = create_test_api_key(&db, &request(a.id, user.id))
             .await
             .unwrap();
         let other = create_test_api_key(&db, &request(a.id, peer.id))
             .await
             .unwrap();
-        let foreign = create_test_api_key(&db, &request(b.id, user.id))
+        let foreign = create_test_api_key(&db, &request(b.id, foreign_user.id))
             .await
             .unwrap();
         Self {
@@ -118,6 +113,7 @@ impl Fixture {
             a,
             b,
             user,
+            foreign_user,
             peer,
             operator,
             own,
@@ -131,7 +127,7 @@ impl Fixture {
     }
 }
 #[tokio::test]
-async fn key_queries_bind_tenant_owner_and_current_actor_without_secret_projection() {
+async fn key_queries_bind_tenant_and_resource_owner_with_current_actor_without_secret_projection() {
     let mut f = Fixture::new().await;
     let personal = ProduceAiKey::list_owned(&f.db, f.user.scope(), true, 100, 0)
         .await
@@ -179,7 +175,7 @@ async fn key_queries_bind_tenant_owner_and_current_actor_without_secret_projecti
             .await
             .is_err()
     );
-    let forged = TenantScope::checked(f.a.id, f.b.owner_user_id, TenantRole::Admin).unwrap();
+    let forged = TenantScope::checked(f.a.id, f.b.admin_user_id, TenantRole::Admin).unwrap();
     assert_eq!(
         ProduceAiKey::count_in_tenant(&f.db, forged, None, true)
             .await
@@ -323,6 +319,7 @@ async fn stale_key_scopes_are_rejected_after_demotion_and_revocation() {
             .unwrap(),
         2
     );
+    let platform = platform_audit(&f.db).await;
     let tx = f.db.begin().await.unwrap();
     let lowered = TenantMembership::set_role(
         &tx,
@@ -330,7 +327,7 @@ async fn stale_key_scopes_are_rejected_after_demotion_and_revocation() {
         f.user.id,
         TenantRole::Member,
         elevated.authz_version,
-        &actor(admin(&f.a)),
+        &platform,
     )
     .await
     .unwrap();
@@ -392,6 +389,12 @@ async fn stale_key_scopes_are_rejected_after_demotion_and_revocation() {
         )
         .await
         .unwrap(),
+        0
+    );
+    assert_eq!(
+        ProduceAiKey::count_owned(&f.db, f.foreign_user.scope(), true)
+            .await
+            .unwrap(),
         1
     );
     f.guard.cleanup().await.unwrap();
@@ -631,6 +634,7 @@ async fn queued_key_mutation_rechecks_authority_after_concurrent_demotion() {
     .unwrap();
     tx.commit().await.unwrap();
     let stale = TenantScope::checked(f.a.id, f.user.id, TenantRole::Admin).unwrap();
+    let platform = platform_audit(&f.db).await;
     let gate = f.db.begin().await.unwrap();
     Tenant::find_by_id_for_update(&gate, f.a.id)
         .await
@@ -666,7 +670,7 @@ async fn queued_key_mutation_rechecks_authority_after_concurrent_demotion() {
         f.user.id,
         TenantRole::Member,
         elevated.authz_version,
-        &actor(admin(&f.a)),
+        &platform,
     )
     .await
     .unwrap();

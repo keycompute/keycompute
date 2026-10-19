@@ -208,15 +208,15 @@ impl Drop for TestDataGuard {
     }
 }
 
-/// An explicitly owned tenant fixture. Production tenants may be ownerless,
-/// but this fixture intentionally guarantees an owner for member-scoped tests.
+/// A tenant fixture with an explicit initial administrator.
+/// The fixture guarantees administrator authority for member-scoped tests.
 #[derive(Debug, Clone)]
-pub struct OwnedTenant {
-    pub owner_user_id: Uuid,
+pub struct TenantFixture {
+    pub admin_user_id: Uuid,
     tenant: Tenant,
 }
 
-impl std::ops::Deref for OwnedTenant {
+impl std::ops::Deref for TenantFixture {
     type Target = Tenant;
 
     fn deref(&self) -> &Self::Target {
@@ -229,24 +229,24 @@ pub async fn create_test_tenant(
     pool: &DatabaseConnection,
     suffix: &str,
     test_id: &str,
-) -> OwnedTenant {
-    // Every tenant fixture has a real global owner and an explicit active
-    // admin membership.  Keep both inserts in one transaction so the deferred
-    // owner invariant is checked only after the membership exists.
-    let owner = User::create(
+) -> TenantFixture {
+    // Every tenant fixture has an ordinary user with an explicit active
+    // admin membership. Keep both inserts in one transaction so
+    // the fixture cannot be observed before its membership exists.
+    let administrator = User::create(
         pool,
         &CreateUserRequest {
-            email: format!("test-owner-{}-{}@example.com", suffix, test_id),
-            name: Some(format!("Test Owner {}", suffix)),
+            email: format!("test-admin-{}-{}@example.com", suffix, test_id),
+            name: Some(format!("Test Administrator {}", suffix)),
         },
     )
     .await
-    .expect("failed to create global fixture owner");
+    .expect("failed to create global fixture administrator");
     let tx = pool
         .begin()
         .await
         .expect("tenant fixture transaction should start");
-    let tenant = Tenant::create_owned(
+    let tenant = Tenant::create_with_admin(
         &tx,
         &CreateTenantRequest {
             name: format!("Test Tenant {}", suffix),
@@ -255,9 +255,9 @@ pub async fn create_test_tenant(
             default_rpm_limit: Some(100),
             default_tpm_limit: Some(50000),
         },
-        owner.id,
+        administrator.id,
         &keycompute_db::AuditContext {
-            actor_user_id: owner.id,
+            actor_user_id: administrator.id,
             credential_kind: keycompute_types::CredentialKind::Jwt,
             actor_platform_role: keycompute_types::PlatformRole::None,
             actor_tenant_role: None,
@@ -265,14 +265,12 @@ pub async fn create_test_tenant(
         },
     )
     .await
-    .expect("failed to create owned test tenant");
+    .expect("failed to create tenant fixture");
     tx.commit()
         .await
         .expect("tenant fixture transaction should commit");
-    OwnedTenant {
-        owner_user_id: tenant
-            .owner_user_id
-            .expect("owned tenant fixture must retain its owner"),
+    TenantFixture {
+        admin_user_id: administrator.id,
         tenant,
     }
 }
@@ -386,6 +384,21 @@ pub async fn delete_user_by_email(
 }
 
 /// Inspect fixture members through the same scoped projection as tenant administration.
+async fn fixture_admin_user_id(
+    db: &impl ConnectionTrait,
+    tenant_id: Uuid,
+) -> Result<Uuid, keycompute_db::DbError> {
+    db.query_one(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT m.user_id FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.tenant_role='admin' AND m.status='active' AND u.status='active' ORDER BY m.joined_at,m.user_id LIMIT 1",
+        [tenant_id.into()],
+    ))
+    .await?
+    .map(|row| row.try_get_by_index(0).map_err(keycompute_db::DbError::from))
+    .transpose()?
+    .ok_or_else(|| keycompute_db::DbError::Other("fixture tenant has no active administrator".into()))
+}
+
 pub async fn list_test_members(
     db: &impl ConnectionTrait,
     tenant_id: Uuid,
@@ -393,10 +406,8 @@ pub async fn list_test_members(
     let tenant = Tenant::find_by_id(db, tenant_id)
         .await?
         .ok_or_else(|| keycompute_db::DbError::not_found("tenant", tenant_id))?;
-    let owner_user_id = tenant
-        .owner_user_id
-        .ok_or_else(|| keycompute_db::DbError::Other("fixture tenant has no owner".into()))?;
-    let scope = keycompute_types::TenantScope::checked(tenant.id, owner_user_id, TenantRole::Admin)
+    let admin_user_id = fixture_admin_user_id(db, tenant.id).await?;
+    let scope = keycompute_types::TenantScope::checked(tenant.id, admin_user_id, TenantRole::Admin)
         .map_err(keycompute_db::DbError::Other)?;
     keycompute_db::models::user::TenantMemberRecord::list_in_tenant(
         db,
@@ -445,12 +456,10 @@ pub async fn create_test_pricing(
             let tenant = Tenant::find_by_id(&tx, tenant_id)
                 .await?
                 .ok_or_else(|| keycompute_db::DbError::not_found("tenant", tenant_id))?;
-            let owner_user_id = tenant.owner_user_id.ok_or_else(|| {
-                keycompute_db::DbError::Other("fixture tenant has no owner".into())
-            })?;
-            let user = User::find_by_id(&tx, owner_user_id)
+            let admin_user_id = fixture_admin_user_id(&tx, tenant_id).await?;
+            let user = User::find_by_id(&tx, admin_user_id)
                 .await?
-                .ok_or_else(|| keycompute_db::DbError::not_found("owner", owner_user_id))?;
+                .ok_or_else(|| keycompute_db::DbError::not_found("admin", admin_user_id))?;
             let member = keycompute_db::TenantMembership::find(&tx, tenant_id, user.id)
                 .await?
                 .ok_or_else(|| keycompute_db::DbError::not_found("membership", user.id))?;
@@ -516,12 +525,10 @@ pub async fn delete_test_tenant_pricing(
     let tenant = Tenant::find_by_id(&tx, tenant_id)
         .await?
         .ok_or_else(|| keycompute_db::DbError::not_found("tenant", tenant_id))?;
-    let owner_user_id = tenant
-        .owner_user_id
-        .ok_or_else(|| keycompute_db::DbError::Other("fixture tenant has no owner".into()))?;
-    let user = User::find_by_id(&tx, owner_user_id)
+    let admin_user_id = fixture_admin_user_id(&tx, tenant_id).await?;
+    let user = User::find_by_id(&tx, admin_user_id)
         .await?
-        .ok_or_else(|| keycompute_db::DbError::not_found("owner", owner_user_id))?;
+        .ok_or_else(|| keycompute_db::DbError::not_found("admin", admin_user_id))?;
     let member = keycompute_db::TenantMembership::find(&tx, tenant_id, user.id)
         .await?
         .ok_or_else(|| keycompute_db::DbError::not_found("membership", user.id))?;

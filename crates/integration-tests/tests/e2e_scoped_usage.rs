@@ -7,12 +7,14 @@ use bigdecimal::BigDecimal;
 use chrono::{DateTime, Duration, Utc};
 use integration_tests::{
     common::generate_test_id,
-    db::{TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{
+        TenantActor, TenantFixture, TestDataGuard, create_test_pool, create_test_tenant,
+        create_test_user,
+    },
 };
 use keycompute_db::models::usage_log::{PlatformUsageScope, TenantUsageScope, UserUsageScope};
 use keycompute_db::{
-    AuditContext, CreateTenantMembershipRequest, CreateUsageLogRequest, DbRouter, Tenant,
-    TenantMembership, UsageLog, User,
+    AuditContext, CreateUsageLogRequest, DbRouter, TenantMembership, UsageLog, User,
 };
 use keycompute_server::{AppState, create_router};
 use keycompute_types::{
@@ -23,23 +25,28 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-fn admin(t: &Tenant) -> TenantScope {
-    TenantScope::checked(
-        t.id,
-        t.owner_user_id
-            .expect("usage fixture tenant must have an owner"),
-        TenantRole::Admin,
-    )
-    .unwrap()
+fn admin(t: &TenantFixture) -> TenantScope {
+    TenantScope::checked(t.id, t.admin_user_id, TenantRole::Admin).unwrap()
 }
-fn audit(t: &Tenant) -> AuditContext {
+fn audit(t: &TenantFixture) -> AuditContext {
     AuditContext {
-        actor_user_id: t
-            .owner_user_id
-            .expect("usage fixture tenant must have an owner"),
+        actor_user_id: t.admin_user_id,
         credential_kind: CredentialKind::Jwt,
         actor_platform_role: PlatformRole::None,
         actor_tenant_role: Some(TenantRole::Admin),
+        request_id: Some(Uuid::new_v4()),
+    }
+}
+async fn platform_audit(db: &DatabaseConnection) -> AuditContext {
+    let root = User::find_by_email(db, "tenant-test-root@fixture.invalid")
+        .await
+        .unwrap()
+        .unwrap();
+    AuditContext {
+        actor_user_id: root.id,
+        credential_kind: CredentialKind::Jwt,
+        actor_platform_role: PlatformRole::Root,
+        actor_tenant_role: None,
         request_id: Some(Uuid::new_v4()),
     }
 }
@@ -78,9 +85,10 @@ async fn usage(
 }
 struct Fixture {
     db: DatabaseConnection,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     user: TenantActor,
+    foreign_user: TenantActor,
     operator: User,
     own: UsageLog,
     other: UsageLog,
@@ -96,6 +104,7 @@ impl Fixture {
         let b = create_test_tenant(&db, "usage-scope-b", &run).await;
         let user = create_test_user(&db, a.id, "usage-shared", &run).await;
         let other_user = create_test_user(&db, a.id, "usage-other", &run).await;
+        let foreign_user = create_test_user(&db, b.id, "usage-foreign", &run).await;
         let operator = User::create(
             &db,
             &keycompute_db::CreateUserRequest {
@@ -113,27 +122,15 @@ impl Fixture {
         .await
         .unwrap();
         let operator = User::find_by_id(&db, operator.id).await.unwrap().unwrap();
-        let tx = db.begin().await.unwrap();
-        TenantMembership::create(
-            &tx,
-            &CreateTenantMembershipRequest {
-                tenant_id: b.id,
-                user_id: user.id,
-                tenant_role: TenantRole::Member,
-            },
-            &audit(&b),
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
         let own = usage(&db, a.id, user.id, 2, "CNY").await;
         let other = usage(&db, a.id, other_user.id, 5, "CNY").await;
-        let foreign = usage(&db, b.id, user.id, 7, "USD").await;
+        let foreign = usage(&db, b.id, foreign_user.id, 7, "USD").await;
         Self {
             db,
             a,
             b,
             user,
+            foreign_user,
             operator,
             own,
             other,
@@ -196,7 +193,7 @@ async fn detail_list_count_and_stats_keep_personal_and_tenant_scopes_separate() 
     );
     assert!(TenantUsageScope::new(f.user.scope()).is_err());
     let forged = TenantUsageScope::new(
-        TenantScope::checked(f.b.id, f.a.owner_user_id, TenantRole::Admin).unwrap(),
+        TenantScope::checked(f.b.id, f.a.admin_user_id, TenantRole::Admin).unwrap(),
     )
     .unwrap();
     assert_eq!(forged.count(&f.db, None, None).await.unwrap(), 0);
@@ -217,6 +214,7 @@ async fn stale_scopes_cannot_survive_demotion_suspension_or_tenant_deactivation(
         TenantUsageScope::new(TenantScope::checked(f.a.id, f.user.id, TenantRole::Admin).unwrap())
             .unwrap();
     assert_eq!(stale.count(&f.db, None, None).await.unwrap(), 2);
+    let platform = platform_audit(&f.db).await;
     let tx = f.db.begin().await.unwrap();
     let lowered = TenantMembership::set_role(
         &tx,
@@ -224,7 +222,7 @@ async fn stale_scopes_cannot_survive_demotion_suspension_or_tenant_deactivation(
         f.user.id,
         TenantRole::Member,
         elevated.authz_version,
-        &audit(&f.a),
+        &platform,
     )
     .await
     .unwrap();
@@ -247,8 +245,10 @@ async fn stale_scopes_cannot_survive_demotion_suspension_or_tenant_deactivation(
     tx.commit().await.unwrap();
     assert_eq!(personal.count(&f.db, None, None).await.unwrap(), 0);
     assert!(personal.find(&f.db, f.own.id).await.unwrap().is_none());
-    let in_b =
+    let forged_b =
         UserUsageScope::new(TenantScope::checked(f.b.id, f.user.id, TenantRole::Member).unwrap());
+    assert_eq!(forged_b.count(&f.db, None, None).await.unwrap(), 0);
+    let in_b = UserUsageScope::new(f.foreign_user.scope());
     assert_eq!(in_b.count(&f.db, None, None).await.unwrap(), 1);
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
@@ -257,7 +257,7 @@ async fn stale_scopes_cannot_survive_demotion_suspension_or_tenant_deactivation(
     ))
     .await
     .unwrap();
-    assert_eq!(in_b.count(&f.db, None, None).await.unwrap(), 0);
+    assert_eq!(in_b.count(&f.db, None, None).await.unwrap(), 1);
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE tenants SET status='inactive' WHERE id=$1",
@@ -370,28 +370,31 @@ async fn personal_http_usage_and_cache_follow_selected_membership() {
         .generate_identity_token(f.user.id, None, f.user.token_version, None, None, 3600)
         .unwrap();
     let context = state.auth.verify_token(&global).await.unwrap();
-    for (tenant, expected_id, cost) in [
-        (f.a.id, f.own.id, 2.0),
-        (f.b.id, f.foreign.id, 7.0),
-        (f.a.id, f.own.id, 2.0),
-    ] {
+    for _ in 0..2 {
         let token = state
             .auth
-            .select_tenant(&context, Some(tenant))
+            .select_tenant(&context, Some(f.a.id))
             .await
             .unwrap()
             .access_token;
         let path = format!(
             "/api/v1/usage?page=1&page_size=1&tenant_id={}&user_id={}",
-            f.b.id, f.a.owner_user_id
+            f.b.id, f.a.admin_user_id
         );
         let page = get(&state, &token, path).await;
         assert_eq!(page["total"], json!(1));
-        assert_eq!(page["records"][0]["id"], json!(expected_id));
+        assert_eq!(page["records"][0]["id"], json!(f.own.id));
         let stats = get(&state, &token, "/api/v1/usage/stats".into()).await;
         assert_eq!(stats["total_requests"], json!(1));
-        assert_eq!(stats["total_cost"].as_f64().unwrap(), cost);
+        assert_eq!(stats["total_cost"].as_f64().unwrap(), 2.0);
     }
+    assert!(
+        state
+            .auth
+            .select_tenant(&context, Some(f.b.id))
+            .await
+            .is_err()
+    );
     f.finish().await;
 }
 
@@ -456,10 +459,32 @@ async fn cached_personal_usage_is_not_returned_after_membership_revocation() {
         cache_hits,
         "rejected credentials must not reach the display cache"
     );
-    // A's revocation must neither reveal A's cached result nor disable B.
+    // A's revocation must neither reveal A's cached result nor disable an
+    // unrelated identity in B.
+    assert!(
+        state
+            .auth
+            .select_tenant(&context, Some(f.b.id))
+            .await
+            .is_err()
+    );
+    let foreign_global = state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_identity_token(
+            f.foreign_user.id,
+            None,
+            f.foreign_user.token_version,
+            None,
+            None,
+            3600,
+        )
+        .unwrap();
+    let foreign_context = state.auth.verify_token(&foreign_global).await.unwrap();
     let b_token = state
         .auth
-        .select_tenant(&context, Some(f.b.id))
+        .select_tenant(&foreign_context, Some(f.b.id))
         .await
         .unwrap()
         .access_token;

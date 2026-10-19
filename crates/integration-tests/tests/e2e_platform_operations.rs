@@ -147,12 +147,18 @@ impl Fixture {
             .unwrap()
     }
     async fn seed_usage(&self, tenant: Uuid, currency: &str, amount: i32) -> UsageLog {
-        let owner = keycompute_db::Tenant::find_by_id(&self.db, tenant)
+        let owner: Uuid = self
+            .db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT m.user_id FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.tenant_role='admin' AND m.status='active' AND u.status='active' ORDER BY m.joined_at,m.user_id LIMIT 1",
+                [tenant.into()],
+            ))
             .await
             .unwrap()
             .unwrap()
-            .owner_user_id
-            .expect("usage fixture tenant must have an owner");
+            .try_get_by_index(0)
+            .unwrap();
         let key = create_test_api_key(
             &self.db,
             &CreateProduceAiKeyRequest {

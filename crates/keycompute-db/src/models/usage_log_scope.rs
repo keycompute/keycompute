@@ -632,7 +632,7 @@ impl TenantUsageScope {
 mod reporting_tests {
     use super::*;
     #[test]
-    fn report_count_and_currency_totals_share_tenant_owner_and_time_predicates() {
+    fn report_count_and_currency_totals_share_tenant_member_and_time_predicates() {
         let scope = ReadScope::Tenant(
             TenantScope::checked(Uuid::new_v4(), Uuid::new_v4(), TenantRole::Admin).unwrap(),
         );

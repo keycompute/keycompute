@@ -40,11 +40,6 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("tenant.audit_action_profile", "修改资料", "Update profile"),
     ("tenant.audit_action_convert", "转换", "Convert"),
     (
-        "tenant.audit_action_transfer_owner",
-        "转移所有权",
-        "Transfer ownership",
-    ),
-    (
         "tenant.audit_action_health_reset",
         "重置健康状态",
         "Reset health state",
@@ -117,10 +112,16 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("tenant.audit_result_success", "成功", "Success"),
     ("tenant.audit_result_denied", "已拒绝", "Denied"),
     ("tenant.audit_result_failure", "失败", "Failure"),
+    ("tenant.audit_action_grant", "直接授权", "Grant access"),
     (
         "tenant.audit_technical_details",
         "技术详情",
         "Technical details",
+    ),
+    (
+        "tenant.audit_advanced_filters",
+        "高级筛选",
+        "Advanced filters",
     ),
     ("tenant.audit_request_id", "请求 ID", "Request ID"),
     ("tenant.audit_metadata", "审计元数据", "Audit metadata"),
@@ -217,7 +218,6 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ),
     ("tenant.slug", "标识", "Slug"),
     ("tenant.membership_role", "我的角色", "My role"),
-    ("tenant.role_owner", "所有者", "Owner"),
     ("tenant.role_admin", "管理员", "Admin"),
     ("tenant.role_member", "成员", "Member"),
     ("tenant.admin_get_started", "管理工作区", "Manage workspace"),
@@ -233,8 +233,8 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ),
     (
         "tenant.members_card",
-        "成员、邀请、角色与所有权",
-        "Members, invitations, roles, and ownership",
+        "成员、邀请与角色",
+        "Members, invitations, and roles",
     ),
     (
         "tenant.providers_card",
@@ -273,13 +273,6 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ),
     ("tenant.commerce_group", "工作区财务", "Workspace commerce"),
     ("tenant.config", "租户配置", "Tenant configuration"),
-    ("tenant.owner", "工作区所有者", "Workspace owner"),
-    ("tenant.owner_id", "所有者 ID", "Owner ID"),
-    (
-        "tenant.owner_unassigned",
-        "尚未分配；首位接受管理员邀请的普通用户将成为所有者",
-        "Unassigned; the first ordinary user to accept an administrator invitation becomes owner",
-    ),
     ("tenant.description", "描述", "Description"),
     ("tenant.save", "保存修改", "Save changes"),
     ("tenant.saved", "修改已保存。", "Changes saved."),
@@ -312,8 +305,8 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("tenant.members", "成员", "Members"),
     (
         "tenant.members_hint",
-        "管理当前租户的成员角色与状态。用户的平台角色不会随之改变。",
-        "Manage this tenant’s member roles and status without changing platform roles.",
+        "管理当前租户的普通成员。租户管理员同级，只有平台管理员可以修改管理员身份或状态。",
+        "Manage ordinary members in this tenant. Tenant administrators are peers; only platform administrators can change an administrator’s role or status.",
     ),
     ("tenant.invitations", "邀请", "Invitations"),
     (
@@ -349,6 +342,31 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "Choose a member or paste a member ID",
     ),
     (
+        "tenant.member_search_placeholder",
+        "按姓名或邮箱搜索有效成员",
+        "Search active members by name or email",
+    ),
+    (
+        "tenant.member_picker_results",
+        "成员搜索结果",
+        "Member search results",
+    ),
+    (
+        "tenant.member_picker_choose",
+        "从搜索结果中选择成员",
+        "Choose a member from the results",
+    ),
+    (
+        "tenant.member_picker_empty",
+        "没有匹配的有效成员",
+        "No active members match",
+    ),
+    (
+        "tenant.member_id_manual",
+        "成员 ID（可直接粘贴）",
+        "Member ID (paste directly)",
+    ),
+    (
         "tenant.member_id_hint",
         "可输入成员 ID；拥有成员管理权限时，可从当前工作区的有效成员建议中选择。",
         "Enter a member ID. Users with member-management access can choose from active workspace members.",
@@ -370,16 +388,25 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "Toggle admin / member",
     ),
     (
+        "tenant.promote_admin",
+        "设为租户管理员",
+        "Promote to tenant administrator",
+    ),
+    (
         "tenant.change_status",
         "暂停／恢复成员",
         "Suspend / restore member",
     ),
     ("tenant.remove", "移除成员", "Remove member"),
-    ("tenant.transfer", "转移拥有权", "Transfer ownership"),
     (
         "tenant.reinvite_required",
         "已移除，需重新邀请",
         "Removed; invite again to rejoin",
+    ),
+    (
+        "tenant.peer_admin_protected",
+        "租户管理员为同级角色，不能互相降级、暂停或移除；请由 root/operator 在平台租户页面处理。",
+        "Tenant administrators are peers and cannot demote, suspend, or remove one another. Use the platform tenant page as root/operator.",
     ),
     ("tenant.empty", "暂无记录", "No records"),
     (

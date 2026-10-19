@@ -5,11 +5,11 @@ use axum::{
 };
 use integration_tests::{
     common::generate_test_id,
-    db::{TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{TenantFixture, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_db::models::user::TenantMemberRecord;
 use keycompute_db::{
-    AuditContext, CreateTenantMembershipRequest, DbRouter, Tenant, TenantMembership, User,
+    AuditContext, CreateTenantMembershipFixture, DbRouter, TenantMembership, User,
 };
 use keycompute_server::{AppState, create_router};
 use keycompute_types::{
@@ -20,14 +20,8 @@ use sea_orm::{DatabaseConnection, TransactionTrait};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-fn scope(t: &Tenant) -> TenantScope {
-    TenantScope::checked(
-        t.id,
-        t.owner_user_id
-            .expect("member fixture tenant must have an owner"),
-        TenantRole::Admin,
-    )
-    .unwrap()
+fn scope(t: &TenantFixture) -> TenantScope {
+    TenantScope::checked(t.id, t.admin_user_id, TenantRole::Admin).unwrap()
 }
 fn actor(id: Uuid) -> AuditContext {
     AuditContext {
@@ -53,23 +47,33 @@ async fn root(db: &DatabaseConnection) -> User {
         .unwrap()
         .unwrap()
 }
-async fn add(db: &DatabaseConnection, t: &Tenant, user: Uuid, role: TenantRole) {
+async fn add(
+    db: &DatabaseConnection,
+    t: &TenantFixture,
+    user: Uuid,
+    role: TenantRole,
+) -> Result<(), keycompute_db::DbError> {
     let tx = db.begin().await.unwrap();
-    TenantMembership::create(
+    let result = TenantMembership::create_fixture(
         &tx,
-        &CreateTenantMembershipRequest {
+        &CreateTenantMembershipFixture {
             tenant_id: t.id,
             user_id: user,
             tenant_role: role,
         },
-        &actor(
-            t.owner_user_id
-                .expect("member fixture tenant must have an owner"),
-        ),
+        &actor(t.admin_user_id),
     )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
+    .await;
+    match result {
+        Ok(_) => {
+            tx.commit().await.unwrap();
+            Ok(())
+        }
+        Err(error) => {
+            tx.rollback().await.unwrap();
+            Err(error)
+        }
+    }
 }
 async fn security(db: &DatabaseConnection, who: &User, role: PlatformRole) {
     let r = root(db).await;
@@ -81,14 +85,14 @@ async fn security(db: &DatabaseConnection, who: &User, role: PlatformRole) {
 }
 
 #[tokio::test]
-async fn tenant_member_projection_preserves_memberships_and_excludes_global_identities() {
+async fn tenant_member_projection_enforces_one_tenant_and_excludes_global_identities() {
     let db = create_test_pool().await;
     let run = generate_test_id();
     let mut guard = TestDataGuard::new(db.clone(), run.clone());
     let a = create_test_tenant(&db, "member-a", &run).await;
     let b = create_test_tenant(&db, "member-b", &run).await;
     let user = create_test_user(&db, a.id, "shared", &run).await;
-    add(&db, &b, user.id, TenantRole::Admin).await;
+    assert!(add(&db, &b, user.id, TenantRole::Admin).await.is_err());
     let operator = User::create(
         &db,
         &keycompute_db::CreateUserRequest {
@@ -103,15 +107,14 @@ async fn tenant_member_projection_preserves_memberships_and_excludes_global_iden
         .await
         .unwrap()
         .unwrap();
-    let in_b = TenantMemberRecord::find_in_tenant(&db, scope(&b), user.id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(in_a.user_id, in_b.user_id);
     assert_eq!(in_a.tenant_role, "member");
-    assert_eq!(in_b.tenant_role, "admin");
     assert_eq!(in_a.tenant_id, a.id);
-    assert_eq!(in_b.tenant_id, b.id);
+    assert!(
+        TenantMemberRecord::find_in_tenant(&db, scope(&b), user.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         TenantMemberRecord::find_in_tenant(&db, scope(&a), operator.id)
             .await
@@ -129,7 +132,7 @@ async fn tenant_member_projection_preserves_memberships_and_excludes_global_iden
         assert!(json.get(field).is_none());
     }
     assert!(
-        TenantMemberRecord::find_in_tenant(&db, scope(&a), b.owner_user_id)
+        TenantMemberRecord::find_in_tenant(&db, scope(&a), b.admin_user_id)
             .await
             .unwrap()
             .is_none()
@@ -140,7 +143,7 @@ async fn tenant_member_projection_preserves_memberships_and_excludes_global_iden
             .await
             .is_err()
     );
-    let fabricated = TenantScope::checked(a.id, b.owner_user_id, TenantRole::Admin).unwrap();
+    let fabricated = TenantScope::checked(a.id, b.admin_user_id, TenantRole::Admin).unwrap();
     assert_eq!(
         TenantMemberRecord::count_in_tenant(&db, fabricated, None, None)
             .await
@@ -163,7 +166,7 @@ async fn platform_user_http_queries_require_global_identity_without_tenant_selec
     let mut guard = TestDataGuard::new(db.clone(), run.clone());
     let tenant = create_test_tenant(&db, "platform-member", &run).await;
     let root = root(&db).await;
-    let owner = User::find_by_id(&db, tenant.owner_user_id)
+    let owner = User::find_by_id(&db, tenant.admin_user_id)
         .await
         .unwrap()
         .unwrap();
@@ -194,7 +197,7 @@ async fn platform_user_http_queries_require_global_identity_without_tenant_selec
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/api/v1/users?search=owner-platform-member-{run}&page_size=1"
+                        "/api/v1/users?search=admin-platform-member-{run}&page_size=1"
                     ))
                     .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())

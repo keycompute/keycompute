@@ -5,7 +5,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use integration_tests::db::{
-    OwnedTenant, create_test_api_key, create_test_pool, create_test_tenant, create_test_user,
+    TenantFixture, create_test_api_key, create_test_pool, create_test_tenant, create_test_user,
 };
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::{CreateProduceAiKeyRequest, DbRouter, Tenant, TenantMembership, User};
@@ -20,7 +20,7 @@ use uuid::Uuid;
 struct Fixture {
     db: DatabaseConnection,
     state: AppState,
-    tenant: OwnedTenant,
+    tenant: TenantFixture,
     owner: Uuid,
     database_url: String,
 }
@@ -308,7 +308,7 @@ impl Fixture {
 
     async fn case(&self, operation: &str) {
         let id = self.key().await;
-        let admin = self.token(self.tenant.owner_user_id, 3600).await.0;
+        let admin = self.token(self.tenant.admin_user_id, 3600).await.0;
         let base = format!("/api/v1/tenants/{}", self.tenant.id);
         let (status, key) = self
             .request("GET", &format!("{base}/keys/{id}"), &admin, Value::Null)
@@ -332,37 +332,37 @@ impl Fixture {
                 "POST",
                 format!("{base}/keys/issuance"),
                 json!({"owner_user_id":self.owner,"name":"expires-during-request"}),
-                self.tenant.owner_user_id,
+                self.tenant.admin_user_id,
             ),
             "rotate" => (
                 "POST",
                 format!("{base}/keys/{id}/rotate"),
                 json!({"name":"expires-during-rotation"}),
-                self.tenant.owner_user_id,
+                self.tenant.admin_user_id,
             ),
             "patch" => (
                 "PATCH",
                 format!("{base}/keys/{id}"),
                 json!({"name":"must-roll-back","expected_updated_at":key["updated_at"]}),
-                self.tenant.owner_user_id,
+                self.tenant.admin_user_id,
             ),
             "revoke" => (
                 "POST",
                 format!("{base}/keys/{id}/revoke"),
                 json!({}),
-                self.tenant.owner_user_id,
+                self.tenant.admin_user_id,
             ),
             "delete" => (
                 "DELETE",
                 format!("{base}/keys/{id}"),
                 Value::Null,
-                self.tenant.owner_user_id,
+                self.tenant.admin_user_id,
             ),
             "cancel" => (
                 "POST",
                 format!("{base}/key-issuance/{intent}/cancel"),
                 json!({}),
-                self.tenant.owner_user_id,
+                self.tenant.admin_user_id,
             ),
             "decline" => (
                 "POST",

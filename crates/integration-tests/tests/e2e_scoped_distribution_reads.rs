@@ -26,8 +26,8 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    a: integration_tests::db::OwnedTenant,
-    b: integration_tests::db::OwnedTenant,
+    a: integration_tests::db::TenantFixture,
+    b: integration_tests::db::TenantFixture,
     member: Uuid,
     run: String,
 }
@@ -74,7 +74,7 @@ impl Fixture {
         let member = create_test_user(&db, a.id, "distribution-member", &run)
             .await
             .id;
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role) VALUES($1,$2,'member'),($1,$3,'member')",[b.id.into(),a.owner_user_id.into(),member.into()])).await.unwrap();
+        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role) VALUES($1,$2,'member'),($1,$3,'member')",[b.id.into(),a.admin_user_id.into(),member.into()])).await.unwrap();
         let mut state = AppState::with_pool(DbRouter::single(db.clone()));
         state.app_base_url = Some("https://fixture.invalid".into());
         Self {
@@ -89,7 +89,7 @@ impl Fixture {
     }
     fn admin(&self) -> DistributionScope {
         DistributionScope::Tenant(
-            TenantScope::checked(self.a.id, self.a.owner_user_id, TenantRole::Admin).unwrap(),
+            TenantScope::checked(self.a.id, self.a.admin_user_id, TenantRole::Admin).unwrap(),
         )
     }
     fn path(&self, suffix: &str) -> String {
@@ -132,13 +132,13 @@ impl Fixture {
     }
     async fn seed(&self) -> Vec<Uuid> {
         vec![
-            self.row(self.a.id, Some(self.a.owner_user_id), "CNY", 1)
+            self.row(self.a.id, Some(self.a.admin_user_id), "CNY", 1)
                 .await,
-            self.row(self.a.id, Some(self.a.owner_user_id), "USD", 2)
+            self.row(self.a.id, Some(self.a.admin_user_id), "USD", 2)
                 .await,
             self.row(self.a.id, Some(self.member), "CNY", 3).await,
             self.row(self.a.id, None, "CNY", 4).await,
-            self.row(self.b.id, Some(self.a.owner_user_id), "CNY", 900)
+            self.row(self.b.id, Some(self.a.admin_user_id), "CNY", 900)
                 .await,
         ]
     }
@@ -148,7 +148,7 @@ async fn tenant_personal_and_platform_lists_counts_totals_share_exact_scope() {
     let mut f = Fixture::new().await;
     let ids = f.seed().await;
     let q = RecordFilter::default();
-    let at = token(&f.state, &f.db, f.a.owner_user_id, Some(f.a.id)).await;
+    let at = token(&f.state, &f.db, f.a.admin_user_id, Some(f.a.id)).await;
     let (status, first) = get(&f.state, &at, &f.path("records?page_size=2")).await;
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(first["total"], 4);
@@ -187,7 +187,7 @@ async fn tenant_personal_and_platform_lists_counts_totals_share_exact_scope() {
             .total_earnings,
         BigDecimal::from(2)
     );
-    let owned = own(f.a.id, f.a.owner_user_id, TenantRole::Admin);
+    let owned = own(f.a.id, f.a.admin_user_id, TenantRole::Admin);
     assert_eq!(dao::record_count(&f.db, owned, &q).await.unwrap(), 2);
     assert!(dao::record(&f.db, owned, ids[2]).await.unwrap().is_none());
     assert!(
@@ -196,7 +196,7 @@ async fn tenant_personal_and_platform_lists_counts_totals_share_exact_scope() {
             .unwrap()
             .is_none()
     );
-    let other = own(f.b.id, f.a.owner_user_id, TenantRole::Member);
+    let other = own(f.b.id, f.a.admin_user_id, TenantRole::Member);
     assert_eq!(
         dao::record_stats(&f.db, other, &q).await.unwrap()[0].total_earnings,
         BigDecimal::from(900)
@@ -234,7 +234,7 @@ async fn tenant_personal_and_platform_lists_counts_totals_share_exact_scope() {
     }
     let f2 = RecordFilter {
         currency: Some("USD".into()),
-        beneficiary_id: Some(f.a.owner_user_id),
+        beneficiary_id: Some(f.a.admin_user_id),
         from: Some(Utc::now() - Duration::hours(1)),
         until: Some(Utc::now() + Duration::hours(1)),
         ..Default::default()
@@ -258,7 +258,7 @@ async fn forged_roles_stale_memberships_and_inference_credentials_never_read_rep
     let mut f = Fixture::new().await;
     f.seed().await;
     let member_token = token(&f.state, &f.db, f.member, Some(f.a.id)).await;
-    let admin_token = token(&f.state, &f.db, f.a.owner_user_id, Some(f.a.id)).await;
+    let admin_token = token(&f.state, &f.db, f.a.admin_user_id, Some(f.a.id)).await;
     for suffix in ["records", "rules", "stats"] {
         assert_eq!(
             get(&f.state, &member_token, &f.path(suffix)).await.0,
@@ -307,7 +307,7 @@ async fn forged_roles_stale_memberships_and_inference_credentials_never_read_rep
         &f.db,
         &keycompute_db::CreateProduceAiKeyRequest {
             tenant_id: f.a.id,
-            user_id: f.a.owner_user_id,
+            user_id: f.a.admin_user_id,
             name: "distribution-inference-only".into(),
             produce_ai_key_hash: keycompute_auth::ProduceAiKeyValidator::hash_key(&raw),
             produce_ai_key_preview: "test-only".into(),
@@ -409,12 +409,12 @@ async fn personal_earnings_cached_overviews_and_referral_amounts_do_not_cross_te
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "INSERT INTO user_referrals(user_id,level1_referrer_id) VALUES($1,$2)",
-        [f.member.into(), f.a.owner_user_id.into()],
+        [f.member.into(), f.a.admin_user_id.into()],
     ))
     .await
     .unwrap();
-    let a = token(&f.state, &f.db, f.a.owner_user_id, Some(f.a.id)).await;
-    let b = token(&f.state, &f.db, f.a.owner_user_id, Some(f.b.id)).await;
+    let a = token(&f.state, &f.db, f.a.admin_user_id, Some(f.a.id)).await;
+    let b = token(&f.state, &f.db, f.a.admin_user_id, Some(f.b.id)).await;
     let cache_hits_before = f.state.display_cache.metrics()["hit"].as_u64().unwrap();
     for _ in 0..2 {
         let (s, v) = get(&f.state, &a, "/api/v1/me/distribution/overview").await;
@@ -452,7 +452,7 @@ async fn personal_earnings_cached_overviews_and_referral_amounts_do_not_cross_te
             .unwrap(),
         BigDecimal::from(1)
     );
-    let scope = TenantScope::checked(f.a.id, f.a.owner_user_id, TenantRole::Admin).unwrap();
+    let scope = TenantScope::checked(f.a.id, f.a.admin_user_id, TenantRole::Admin).unwrap();
     let referrals = find_referral_display_page(&f.db, scope, 20, 0)
         .await
         .unwrap();
@@ -465,7 +465,7 @@ async fn personal_earnings_cached_overviews_and_referral_amounts_do_not_cross_te
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
-        [f.b.id.into(), f.a.owner_user_id.into()],
+        [f.b.id.into(), f.a.admin_user_id.into()],
     ))
     .await
     .unwrap();
@@ -527,7 +527,7 @@ async fn rule_reports_keep_literal_search_stable_pages_and_current_admin_checks(
     assert_eq!(rows.len(), 1);
     assert_eq!(dao::rule_count(&f.db, f.admin(), &filter).await.unwrap(), 1);
     assert_eq!(rows[0].tenant_id, f.a.id);
-    let at = token(&f.state, &f.db, f.a.owner_user_id, Some(f.a.id)).await;
+    let at = token(&f.state, &f.db, f.a.admin_user_id, Some(f.a.id)).await;
     let (_, first) = get(&f.state, &at, &f.path("rules?page_size=1")).await;
     let (_, second) = get(&f.state, &at, &f.path("rules?page_size=1&page=2")).await;
     assert_eq!(first["total"], 2);
@@ -535,7 +535,7 @@ async fn rule_reports_keep_literal_search_stable_pages_and_current_admin_checks(
     let foreign = dao::rules(
         &f.db,
         DistributionScope::Tenant(
-            TenantScope::checked(f.b.id, f.b.owner_user_id, TenantRole::Admin).unwrap(),
+            TenantScope::checked(f.b.id, f.b.admin_user_id, TenantRole::Admin).unwrap(),
         ),
         &filter,
         20,

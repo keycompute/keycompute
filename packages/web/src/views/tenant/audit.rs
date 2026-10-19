@@ -32,7 +32,7 @@ fn optional_uuid(value: &str) -> Option<Option<Uuid>> {
 
 pub(crate) fn action_label(i18n: crate::i18n::I18n, action: &str) -> String {
     let exact = match action {
-        "tenant.transfer_owner" => Some("tenant.audit_action_transfer_owner"),
+        "membership.grant" => Some("tenant.audit_action_grant"),
         "account.health_reset" => Some("tenant.audit_action_health_reset"),
         "account.probe_requested" | "passthrough_binding.probe_requested" => {
             Some("tenant.audit_action_probe")
@@ -207,7 +207,7 @@ fn TenantAuditPage(scope: WorkspaceScope, embedded: bool) -> Element {
         });
         page.set(1);
     };
-    rsx! {div {class:"page-container tenant-audit",
+    rsx! {div {class:if embedded{"tenant-audit embedded-panel"}else{"page-container tenant-audit"},
         if !embedded {
             ui::PageHeader {title:i18n.t("tenant.audit").to_string(),description:i18n.t("tenant.audit_hint").to_string()}
             WorkspaceLinks {}
@@ -216,16 +216,19 @@ fn TenantAuditPage(scope: WorkspaceScope, embedded: bool) -> Element {
             h2 { class: "section-title", {i18n.t("tenant.audit")} }
             p { class: "text-secondary", {i18n.t("tenant.audit_hint")} }
         }
-        form { class:"filter-panel", onsubmit:apply_filter,
-            div { class:"filter-grid tenant-audit-filter-grid",
-                div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-actor", {i18n.t("tenant.audit_actor_filter")} } input { id:"tenant-audit-actor", class:"input-field", maxlength:"36", value:"{actor_input}", oninput:move|event|actor_input.set(event.value()) } }
-                div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-request", {i18n.t("tenant.audit_request_filter")} } input { id:"tenant-audit-request", class:"input-field", maxlength:"36", value:"{request_input}", oninput:move|event|request_input.set(event.value()) } }
-                div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-action", {i18n.t("tenant.audit_action_filter")} } input { id:"tenant-audit-action", class:"input-field", maxlength:"128", value:"{action_input}", placeholder:"membership.update", oninput:move|event|action_input.set(event.value()) } }
-                div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-result", {i18n.t("tenant.result")} } select { id:"tenant-audit-result", class:"input-field", value:"{result_input}", onchange:move|event|result_input.set(event.value()), option { value:"", {i18n.t("tenant.audit_all_results")} } option { value:"success", {i18n.t("tenant.audit_result_success")} } option { value:"denied", {i18n.t("tenant.audit_result_denied")} } option { value:"failure", {i18n.t("tenant.audit_result_failure")} } } }
-                div { class:"filter-actions",
-                    button { class:"btn btn-primary", r#type:"submit", {i18n.t("tenant.audit_apply_filter")} }
-                    button { class:"btn btn-secondary", r#type:"button", onclick:move |_|{actor_input.set(String::new());request_input.set(String::new());action_input.set(String::new());result_input.set(String::new());filter_error.set(String::new());filter.set(AuditFilter::default());page.set(1);},{i18n.t("tenant.audit_clear_filter")} }
-                    button { class:"btn btn-secondary", r#type:"button", onclick:move |_|data.restart(), {i18n.t("tenant.reload")} }
+        details { class:"card audit-filter-disclosure",
+            summary { {i18n.t("tenant.audit_advanced_filters")} }
+            form { class:"filter-panel", onsubmit:apply_filter,
+                div { class:"filter-grid tenant-audit-filter-grid",
+                    div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-actor", {i18n.t("tenant.audit_actor_filter")} } input { id:"tenant-audit-actor", class:"input-field", maxlength:"36", value:"{actor_input}", oninput:move|event|actor_input.set(event.value()) } }
+                    div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-request", {i18n.t("tenant.audit_request_filter")} } input { id:"tenant-audit-request", class:"input-field", maxlength:"36", value:"{request_input}", oninput:move|event|request_input.set(event.value()) } }
+                    div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-action", {i18n.t("tenant.audit_action_filter")} } input { id:"tenant-audit-action", class:"input-field", maxlength:"128", value:"{action_input}", placeholder:"membership.update", oninput:move|event|action_input.set(event.value()) } }
+                    div { class:"form-field", label { class:"form-label", r#for:"tenant-audit-result", {i18n.t("tenant.result")} } select { id:"tenant-audit-result", class:"input-field", value:"{result_input}", onchange:move|event|result_input.set(event.value()), option { value:"", {i18n.t("tenant.audit_all_results")} } option { value:"success", {i18n.t("tenant.audit_result_success")} } option { value:"denied", {i18n.t("tenant.audit_result_denied")} } option { value:"failure", {i18n.t("tenant.audit_result_failure")} } } }
+                    div { class:"filter-actions",
+                        button { class:"btn btn-primary", r#type:"submit", {i18n.t("tenant.audit_apply_filter")} }
+                        button { class:"btn btn-secondary", r#type:"button", onclick:move |_|{actor_input.set(String::new());request_input.set(String::new());action_input.set(String::new());result_input.set(String::new());filter_error.set(String::new());filter.set(AuditFilter::default());page.set(1);},{i18n.t("tenant.audit_clear_filter")} }
+                        button { class:"btn btn-secondary", r#type:"button", onclick:move |_|data.restart(), {i18n.t("tenant.reload")} }
+                    }
                 }
             }
         }
@@ -237,8 +240,8 @@ fn TenantAuditPage(scope: WorkspaceScope, embedded: bool) -> Element {
                 div {class:"table-pagination-panel table-pagination-frame",
                     div {class:"table-container",tabindex:"0",table {class:"table",thead {tr {th {{i18n.t("tenant.time")}} th {{i18n.t("tenant.audit_scope")}} th {{i18n.t("tenant.actor")}} th {{i18n.t("tenant.action")}} th {{i18n.t("tenant.resource")}} th {{i18n.t("tenant.result")}}}}
                         tbody {for event in value.items.iter(){
-                            {let request_id=event.request_id.map(|id|id.to_string()).unwrap_or_else(||"—".into());let metadata=serde_json::to_string_pretty(&event.metadata).unwrap_or_else(|_|event.metadata.to_string());let tenant_role=event.tenant_role.map(|role|role.as_str()).unwrap_or("—");let actor_label=event.actor_name.as_deref().or(event.actor_email.as_deref()).unwrap_or("—");rsx!{
-                                tr {key:"{event.id}",
+                            {let request_id=event.request_id.map(|id|id.to_string()).unwrap_or_else(||"—".into());let metadata=serde_json::to_string_pretty(&event.metadata).unwrap_or_else(|_|event.metadata.to_string());let tenant_role=event.tenant_role.map(|role|role.as_str()).unwrap_or("—");let actor_label=event.actor_name.as_deref().or(event.actor_email.as_deref()).unwrap_or("—");rsx!{Fragment {key:"{event.id}",
+                                tr {
                                     td {{format_time(&event.created_at)}}
                                     td {span {class:"badge",{scope_label(i18n,&event.scope_type)}}}
                                     td {
@@ -248,15 +251,21 @@ fn TenantAuditPage(scope: WorkspaceScope, embedded: bool) -> Element {
                                     }
                                     td {{action_label(i18n,&event.action)}}
                                     td {{resource_label(i18n,&event.resource_type)} if let Some(id)=event.resource_id.as_deref(){p{TechnicalId{value:id.to_string()}}}else{p{"—"}}}
-                                    td {{result_label(i18n,&event.result)} details {summary {{i18n.t("tenant.audit_technical_details")}}
-                                        p{{i18n.t("tenant.audit_event_code")}} code {"{event.action}"}
-                                        p{{i18n.t("tenant.audit_credential")}} code {"{event.credential_kind}"}
-                                        p{{i18n.t("tenant.audit_platform_role")}} code {"{event.platform_role}"}
-                                        p{{i18n.t("tenant.audit_tenant_role")}} code {"{tenant_role}"}
-                                        p{{i18n.t("tenant.audit_request_id")}} code {"{request_id}"}
-                                        p{{i18n.t("tenant.audit_metadata")}} pre {"{metadata}"}
+                                    td {{result_label(i18n,&event.result)}}
+                                }
+                                tr {class:"audit-technical-row",
+                                    td {colspan:"6",details {summary {{i18n.t("tenant.audit_technical_details")}}
+                                        dl {class:"audit-detail-list",
+                                            dt{{i18n.t("tenant.audit_event_code")}} dd{code {"{event.action}"}}
+                                            dt{{i18n.t("tenant.audit_credential")}} dd{code {"{event.credential_kind}"}}
+                                            dt{{i18n.t("tenant.audit_platform_role")}} dd{code {"{event.platform_role}"}}
+                                            dt{{i18n.t("tenant.audit_tenant_role")}} dd{code {"{tenant_role}"}}
+                                            dt{{i18n.t("tenant.audit_request_id")}} dd{code {"{request_id}"}}
+                                            dt{{i18n.t("tenant.audit_metadata")}} dd{pre {"{metadata}"}}
+                                        }
                                     }}
                                 }
+                            }
                             }}
                         }}
                     }}

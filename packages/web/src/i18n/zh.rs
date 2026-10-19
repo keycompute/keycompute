@@ -767,7 +767,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "payment_orders.verification_tenant_hint",
-        "验证会为所选租户所有者创建并关闭一笔真实的 0.01 元订单。",
+        "验证会为所选租户的一名有效管理员创建并关闭一笔真实的 0.01 元订单；验证前请先设置租户管理员。",
     );
     m.insert("payment_orders.provider_switch", "运营开关");
     m.insert("payment_orders.provider_config", "配置状态");
@@ -1678,6 +1678,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.users", "用户数");
     m.insert("tenants.accounts", "渠道账号数");
     m.insert("tenants.manage", "管理租户");
+    m.insert("tenants.manage_access", "管理租户访问");
     m.insert(
         "tenants.enable_to_manage",
         "请先启用租户，再管理租户访问权限",
@@ -1685,7 +1686,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.access_title", "租户访问管理");
     m.insert(
         "tenants.access_hint",
-        "无需切换工作区即可授权；平台管理员不会显示在租户成员列表中。",
+        "无需切换工作区即可授权；平台管理员不会显示在租户成员列表中。现有租户管理员的降级、暂停或移除只能在此处理。",
     );
     m.insert("tenants.access_summary", "授权概览");
     m.insert("tenants.settings_title", "租户设置");
@@ -1694,15 +1695,17 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "tenants.platform_managed_mode",
         "平台代管租户 · 操作使用平台权限",
     );
+    m.insert("tenants.direct_grant_title", "设置租户管理员");
     m.insert(
-        "tenants.first_admin_owner_hint",
-        "该租户尚无所有者。首位接受管理员邀请的普通用户将自动成为所有者。",
+        "tenants.direct_grant_hint",
+        "选择已注册的有效普通用户并直接设为租户管理员，无需邀请。一个用户只能属于一个租户；已移除成员可在原租户重新授权。",
     );
-    m.insert(
-        "tenants.owner_clear_warning",
-        "此操作同时会清空当前所有者，请随后授权另一位管理员。",
-    );
+    m.insert("tenants.search_global_user", "搜索平台用户");
+    m.insert("tenants.no_global_user_matches", "没有匹配的有效普通用户");
+    m.insert("tenants.select_user_first", "请先选择一个用户");
+    m.insert("tenants.direct_grant_action", "设为租户管理员");
     m.insert("tenants.no_members_yet", "该租户尚未授权任何普通成员。");
+    m.insert("tenants.no_member_matches", "没有符合当前搜索条件的成员。");
     m.insert("tenants.disable", "停用");
     m.insert("tenants.enable", "启用");
     m.insert("tenants.disable_title", "停用租户");

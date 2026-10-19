@@ -1,27 +1,22 @@
 use crate::{
     hooks::use_i18n::use_i18n,
     router::Route,
-    services::api_client::user_error_message,
+    services::api_client::{get_client, user_error_message},
     stores::{auth_store::AuthStore, ui_store::UiStore, user_store::UserStore},
-    utils::{
-        resource::{KeyedResourceValue, current_keyed_value},
-        time::format_time,
-    },
+    utils::resource::{KeyedResourceValue, current_keyed_value},
     views::shared::accounts::NoPermissionView,
     views::tenant::{
         PlatformTenantAudit as TenantAuditPanel, PlatformTenantFinance as TenantFinancePanel,
         PlatformTenantFinancialControls as TenantFinancialControlsPanel,
         PlatformTenantKeys as TenantKeysPanel, PlatformTenantSettings as TenantSettingsPanel,
-        common::{self, OneTimeRecoveryLink, Pager, TechnicalId, WorkspaceScope},
+        common::{self, Pager, TechnicalId, WorkspaceScope},
         workspace_switcher::use_workspace_dirty_blocker,
     },
 };
 use client_api::{
-    MembershipStatus, TenantRole, UserStatus,
-    api::tenant_control::{
-        CreateInvitation, InvitationCreateResponse, InvitationOutcome, MemberPatch,
-        NotificationStatus, Page, TenantInvitation, TenantMember,
-    },
+    AdminApi, MembershipStatus, PlatformRole, TenantRole, UserStatus,
+    api::admin::{UserDetail, UserListResponse, UserQueryParams},
+    api::tenant_control::{GrantMember, MemberPatch, Page, TenantMember},
 };
 use dioxus::prelude::*;
 use uuid::Uuid;
@@ -31,7 +26,6 @@ const PAGE_SIZE: u32 = 20;
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AccessQuery {
     member_page: u32,
-    invitation_page: u32,
     member_search: String,
 }
 
@@ -39,7 +33,6 @@ impl Default for AccessQuery {
     fn default() -> Self {
         Self {
             member_page: 1,
-            invitation_page: 1,
             member_search: String::new(),
         }
     }
@@ -50,10 +43,6 @@ impl AccessQuery {
         self.member_page = page.max(1);
     }
 
-    fn set_invitation_page(&mut self, page: u32) {
-        self.invitation_page = page.max(1);
-    }
-
     fn set_member_search(&mut self, search: &str) {
         self.member_search = search.trim().to_owned();
         self.member_page = 1;
@@ -62,10 +51,8 @@ impl AccessQuery {
 
 #[derive(Clone)]
 struct AccessData {
-    context: client_api::api::tenant_control::TenantContext,
     active_members: i64,
     members: Page<TenantMember>,
-    invitations: Page<TenantInvitation>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -83,7 +70,6 @@ enum PlatformTenantSection {
 enum MemberAction {
     Role,
     Status,
-    Owner,
     Remove,
 }
 
@@ -92,7 +78,6 @@ impl MemberAction {
         match self {
             Self::Role => "tenant.change_role",
             Self::Status => "tenant.change_status",
-            Self::Owner => "tenant.transfer",
             Self::Remove => "tenant.remove",
         }
     }
@@ -118,45 +103,6 @@ fn user_status_label(i18n: crate::i18n::I18n, status: UserStatus) -> &'static st
         UserStatus::Active => "tenant.status_active",
         UserStatus::Suspended => "tenant.status_suspended",
     })
-}
-
-fn invitation_status_label(i18n: crate::i18n::I18n, status: &str) -> String {
-    let key = match status {
-        "pending" => Some("tenant.status_pending"),
-        "accepted" => Some("tenant.status_accepted"),
-        "revoked" => Some("tenant.status_revoked"),
-        "expired" => Some("tenant.status_expired"),
-        _ => None,
-    };
-    key.map(|key| i18n.t(key).to_owned())
-        .unwrap_or_else(|| status.to_owned())
-}
-
-fn notification_label(value: &NotificationStatus) -> &'static str {
-    match value {
-        NotificationStatus::Sent => "tenant.notification_sent",
-        NotificationStatus::Failed => "tenant.notification_failed",
-        NotificationStatus::Unconfigured => "tenant.notification_unconfigured",
-        NotificationStatus::NotApplicable => "tenant.notification_duplicate",
-    }
-}
-
-fn valid_email(value: &str) -> bool {
-    value.len() <= 255
-        && !value
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-        && value.split_once('@').is_some_and(|(local, domain)| {
-            !local.is_empty() && !domain.is_empty() && !domain.contains('@')
-        })
-}
-
-fn default_invitation_role(owner_user_id: Option<Uuid>) -> TenantRole {
-    if owner_user_id.is_none() {
-        TenantRole::Admin
-    } else {
-        TenantRole::Member
-    }
 }
 
 #[component]
@@ -267,20 +213,17 @@ fn PlatformTenantScopedPage(scope: WorkspaceScope, section: PlatformTenantSectio
                 Link { class: tab_class(section == PlatformTenantSection::FinancialControls), aria_current: if section == PlatformTenantSection::FinancialControls { "page" } else { "false" }, to: Route::PlatformTenantFinancialControls { tenant_id: tenant_id.clone() }, {i18n.t("tenant_financial_controls.title")} }
                 Link { class: tab_class(section == PlatformTenantSection::Audit), aria_current: if section == PlatformTenantSection::Audit { "page" } else { "false" }, to: Route::PlatformTenantAudit { tenant_id }, {i18n.t("tenant.audit")} }
             }
-            if let Some(Err(value)) = loaded_context.as_ref() {
-                div { class: "alert alert-error", role: "alert", {user_error_message(i18n, value)} }
-            }
-            match section {
-                PlatformTenantSection::Access => match loaded_context {
-                    None => rsx! { div { class: "content-loading", role: "status", span { class: "spinner", aria_hidden: "true" } span { {i18n.t("common.loading")} } } },
-                    Some(Err(_)) => rsx! {},
-                    Some(Ok(value)) => rsx! { PlatformTenantAccessPanel { scope, tenant_id: value.id, owner_user_id: value.owner_user_id, on_context_changed: move |_| context.restart() } },
+            match loaded_context {
+                None => rsx! { div { class: "content-loading", role: "status", span { class: "spinner", aria_hidden: "true" } span { {i18n.t("common.loading")} } } },
+                Some(Err(value)) => rsx! { div { class: "alert alert-error", role: "alert", {user_error_message(i18n, &value)} } },
+                Some(Ok(value)) => match section {
+                    PlatformTenantSection::Access => rsx! { PlatformTenantAccessPanel { scope, tenant_id: value.id, on_context_changed: move |_| context.restart() } },
+                    PlatformTenantSection::Settings => rsx! { TenantSettingsPanel { scope, on_context_changed: move |_| context.restart() } },
+                    PlatformTenantSection::Keys => rsx! { TenantKeysPanel { scope } },
+                    PlatformTenantSection::Finance => rsx! { TenantFinancePanel { scope } },
+                    PlatformTenantSection::FinancialControls => rsx! { TenantFinancialControlsPanel { scope } },
+                    PlatformTenantSection::Audit => rsx! { TenantAuditPanel { scope } },
                 },
-                PlatformTenantSection::Settings => rsx! { TenantSettingsPanel { scope, on_context_changed: move |_| context.restart() } },
-                PlatformTenantSection::Keys => rsx! { TenantKeysPanel { scope } },
-                PlatformTenantSection::Finance => rsx! { TenantFinancePanel { scope } },
-                PlatformTenantSection::FinancialControls => rsx! { TenantFinancialControlsPanel { scope } },
-                PlatformTenantSection::Audit => rsx! { TenantAuditPanel { scope } },
             }
         }
     }
@@ -290,23 +233,18 @@ fn PlatformTenantScopedPage(scope: WorkspaceScope, section: PlatformTenantSectio
 fn PlatformTenantAccessPanel(
     scope: WorkspaceScope,
     tenant_id: Uuid,
-    owner_user_id: Option<Uuid>,
     on_context_changed: EventHandler<()>,
 ) -> Element {
     let i18n = use_i18n();
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let mut ui = use_context::<UiStore>();
-    let initial_role = default_invitation_role(owner_user_id);
-    let mut email = use_signal(String::new);
-    let mut default_role = use_signal(move || initial_role);
-    let mut role = use_signal(move || initial_role);
-    let mut hours = use_signal(|| "24".to_owned());
     let mut busy = use_signal(|| false);
     let mut error = use_signal(String::new);
-    let mut created = use_signal(|| None::<InvitationCreateResponse>);
     let mut pending_member = use_signal(|| None::<(TenantMember, MemberAction)>);
-    let mut pending_invitation = use_signal(|| None::<TenantInvitation>);
+    let mut grant_search_input = use_signal(String::new);
+    let mut grant_search = use_signal(String::new);
+    let mut grant_selected = use_signal(|| None::<UserDetail>);
     let mut member_search_input = use_signal(String::new);
     let mut query = use_signal(AccessQuery::default);
     let mut data = use_resource(move || async move {
@@ -316,8 +254,7 @@ fn PlatformTenantAccessPanel(
             let request = request.clone();
             async move {
                 let api = scope.api()?;
-                let (context, active_page, members, invitations) = futures::try_join!(
-                    api.context(&token),
+                let (active_page, members) = futures::try_join!(
                     api.members_filtered(1, 1, None, Some(MembershipStatus::Active), &token),
                     api.members(
                         request.member_page,
@@ -325,13 +262,10 @@ fn PlatformTenantAccessPanel(
                         Some(&request.member_search),
                         &token,
                     ),
-                    api.invitations(request.invitation_page, PAGE_SIZE, &token),
                 )?;
                 Ok(AccessData {
-                    context,
                     active_members: active_page.total,
                     members,
-                    invitations,
                 })
             }
         })
@@ -340,110 +274,80 @@ fn PlatformTenantAccessPanel(
     });
     let current_key = (scope, query());
     let loaded = current_keyed_value(&current_key, data.state().cloned(), data());
-    let current_owner = loaded
-        .as_ref()
-        .and_then(|value| value.as_ref().ok())
-        .and_then(|value| value.context.owner_user_id);
-    use_effect(move || {
-        let loaded = current_keyed_value(&current_key, data.state().cloned(), data());
-        let Some(Ok(value)) = loaded else {
-            return;
-        };
-        let next_default = default_invitation_role(value.context.owner_user_id);
-        let previous_default = default_role();
-        if next_default != previous_default {
-            default_role.set(next_default);
-            if email().trim().is_empty() && !busy() && role() == previous_default {
-                role.set(next_default);
+    let grant_request_key = grant_search();
+    let grant_candidates = use_resource(move || {
+        let search = grant_search();
+        async move {
+            if search.is_empty() {
+                return KeyedResourceValue::new(search, Ok(None::<UserListResponse>));
             }
+            let request_key = search.clone();
+            let result = common::read(auth, users, scope, move |token| {
+                let params = UserQueryParams::new()
+                    .with_platform_role(PlatformRole::None)
+                    .with_status(UserStatus::Active)
+                    .only_tenant_unassigned()
+                    .with_search(search.clone())
+                    .with_page(1)
+                    .with_page_size(10);
+                async move {
+                    AdminApi::new(&get_client())
+                        .list_all_users(Some(&params), &token)
+                        .await
+                        .map(Some)
+                }
+            })
+            .await;
+            KeyedResourceValue::new(request_key, result)
         }
     });
+    let loaded_candidates = current_keyed_value(
+        &grant_request_key,
+        grant_candidates.state().cloned(),
+        grant_candidates(),
+    );
     use_workspace_dirty_blocker(move || {
-        busy()
-            || !email().trim().is_empty()
-            || role() != default_role()
-            || hours() != "24"
-            || pending_member().is_some()
-            || pending_invitation().is_some()
+        busy() || pending_member().is_some() || grant_selected().is_some()
     });
 
-    let create_invitation = move |_| {
+    let grant_existing_user = move |_| {
         if busy() {
             return;
         }
-        let email_value = email().trim().to_owned();
-        let Some(expires_in_seconds) = hours()
-            .parse::<i64>()
-            .ok()
-            .filter(|value| (1..=168).contains(value))
-            .and_then(|value| value.checked_mul(3600))
-        else {
-            error.set(i18n.t("tenant.invalid_duration").to_owned());
+        let Some(selected) = grant_selected() else {
+            error.set(i18n.t("tenants.select_user_first").to_owned());
             return;
         };
-        if !valid_email(&email_value) {
-            error.set(i18n.t("tenant.invalid_email").to_owned());
+        let Ok(user_id) = Uuid::parse_str(&selected.id) else {
+            error.set(i18n.t("common.invalid_request").to_owned());
             return;
-        }
-        let body = CreateInvitation {
-            email: email_value,
-            tenant_role: role(),
-            expires_in_seconds,
         };
+        let body = GrantMember { user_id };
         busy.set(true);
         error.set(String::new());
-        created.set(None);
         spawn(async move {
             let result = common::command(auth, users, scope, move |token| {
                 let body = body.clone();
-                async move { scope.api()?.create_invitation(&body, &token).await }
+                async move { scope.api()?.grant_member(&body, &token).await }
             })
             .await;
             if !scope.is_current(auth, users) {
                 return;
             }
             busy.set(false);
-            match result {
-                Ok(value) => {
-                    created.set(Some(value));
-                    email.set(String::new());
-                    role.set(default_role());
-                    hours.set("24".to_owned());
-                    query.write().set_invitation_page(1);
-                    data.restart();
-                    ui.show_success(i18n.t("tenant.saved"));
-                }
-                Err(value) => error.set(user_error_message(i18n, &value)),
-            }
-        });
-    };
-
-    let revoke_invitation = move |_| {
-        if busy() {
-            return;
-        }
-        let Some(invitation) = pending_invitation() else {
-            return;
-        };
-        busy.set(true);
-        error.set(String::new());
-        created.set(None);
-        spawn(async move {
-            let result = common::command(auth, users, scope, move |token| async move {
-                scope.api()?.revoke_invitation(invitation.id, &token).await
-            })
-            .await;
-            if !scope.is_current(auth, users) {
-                return;
-            }
-            busy.set(false);
-            pending_invitation.set(None);
             match result {
                 Ok(_) => {
+                    grant_selected.set(None);
+                    grant_search_input.set(String::new());
+                    grant_search.set(String::new());
                     data.restart();
+                    on_context_changed.call(());
                     ui.show_success(i18n.t("tenant.saved"));
                 }
-                Err(value) => error.set(user_error_message(i18n, &value)),
+                Err(value) => {
+                    error.set(user_error_message(i18n, &value));
+                    data.restart();
+                }
             }
         });
     };
@@ -463,9 +367,6 @@ fn PlatformTenantAccessPanel(
                 async move {
                     let api = scope.api()?;
                     match action {
-                        MemberAction::Owner => {
-                            api.transfer_ownership(member.user_id, &token).await?;
-                        }
                         MemberAction::Remove => {
                             api.remove_member(member.user_id, member.authz_version, &token)
                                 .await?;
@@ -537,46 +438,48 @@ fn PlatformTenantAccessPanel(
                     section { class: "section",
                         h2 { class: "section-title", {i18n.t("tenants.access_summary")} }
                         div { class: "section-body",
-                            dl { class: "tenant-overview-facts tenant-overview-facts-three",
+                            dl { class: "tenant-overview-facts",
                                 div { dt { {i18n.t("tenants.tenant_id")} } dd { TechnicalId { value: tenant_id.to_string() } } }
-                                div { dt { {i18n.t("tenant.owner")} } dd {
-                                    if let Some(owner) = value.context.owner_user_id { TechnicalId { value: owner.to_string() } }
-                                    else { span { class: "text-secondary", {i18n.t("tenant.owner_unassigned")} } }
-                                } }
                                 div { dt { {i18n.t("tenants.active_members")} } dd { "{value.active_members}" } }
                             }
                         }
                     }
-                    section { class: "section tenant-invite-card",
-                        h2 { class: "section-title", {i18n.t("tenant.invite")} }
-                        if value.context.owner_user_id.is_none() { p { class: "alert alert-info", {i18n.t("tenants.first_admin_owner_hint")} } }
-                        form { class: "section-body tenant-invite-form", onsubmit: create_invitation,
-                            div { class: "form-field",
-                                label { class: "form-label", r#for: "platform-invite-email", {i18n.t("tenant.email")} }
-                                input { id: "platform-invite-email", class: "input-field", r#type: "email", maxlength: "255", value: "{email}", disabled: busy(), oninput: move |event| email.set(event.value()) }
+                    section { class: "section tenant-direct-grant-card",
+                        h2 { class: "section-title", {i18n.t("tenants.direct_grant_title")} }
+                        div { class: "section-body",
+                            p { class: "text-secondary", {i18n.t("tenants.direct_grant_hint")} }
+                            form { class: "tenant-user-search", onsubmit: move |_| { grant_selected.set(None); grant_search.set(grant_search_input().trim().to_owned()); },
+                                div { class: "form-field filter-field-grow",
+                                    label { class: "form-label", r#for: "platform-grant-search", {i18n.t("tenants.search_global_user")} }
+                                    input { id: "platform-grant-search", class: "input-field", r#type: "search", maxlength: "255", value: "{grant_search_input}", disabled: busy(), placeholder: i18n.t("users.search_placeholder"), oninput: move |event| grant_search_input.set(event.value()) }
+                                }
+                                button { class: "btn btn-secondary", r#type: "submit", disabled: busy() || grant_search_input().trim().is_empty(), {i18n.t("tenant.search")} }
                             }
-                            div { class: "form-field",
-                                label { class: "form-label", r#for: "platform-invite-role", {i18n.t("tenant.role")} }
-                                select { id: "platform-invite-role", class: "input-field", value: "{role().as_str()}", disabled: busy(), onchange: move |event| if let Ok(value) = event.value().parse::<TenantRole>() { role.set(value); },
-                                    option { value: "admin", {i18n.t("tenant.role_admin")} }
-                                    option { value: "member", {i18n.t("tenant.role_member")} }
+                            match loaded_candidates.as_ref() {
+                                Some(Err(value)) => rsx! { div { class: "alert alert-error", role: "alert", {user_error_message(i18n, value)} } },
+                                Some(Ok(Some(result))) if result.users.is_empty() => rsx! { div { class: "empty-state compact-empty-state", h3 { class: "empty-title", {i18n.t("tenants.no_global_user_matches")} } } },
+                                Some(Ok(Some(result))) => rsx! { div { class: "tenant-user-results", role: "listbox", aria_label: i18n.t("tenants.search_global_user"),
+                                    for candidate in result.users.iter() {
+                                        {let selected=candidate.clone();let is_selected=grant_selected().as_ref().is_some_and(|value|value.id==candidate.id);rsx!{
+                                            button { key: "{candidate.id}", class: if is_selected { "tenant-user-option selected" } else { "tenant-user-option" }, r#type: "button", role: "option", aria_selected: is_selected, disabled: busy(), onclick: move |_| grant_selected.set(Some(selected.clone())),
+                                                span { strong { "{candidate.name.as_deref().unwrap_or(&candidate.email)}" } if candidate.name.is_some() { span { class: "text-secondary", "{candidate.email}" } } }
+                                                TechnicalId { value: candidate.id.clone() }
+                                            }
+                                        }}
+                                    }
+                                } },
+                                _ => rsx! {},
+                            }
+                            if let Some(selected) = grant_selected() {
+                                div { class: "tenant-grant-editor",
+                                    div { class: "selected-identity",
+                                        strong { "{selected.name.as_deref().unwrap_or(&selected.email)}" }
+                                        if selected.name.is_some() { span { class: "text-secondary", "{selected.email}" } }
+                                    }
+                                    span { class: "badge", {i18n.t("tenant.role_admin")} }
+                                    button { class: "btn btn-primary", r#type: "button", disabled: busy(), onclick: grant_existing_user, {i18n.t("tenants.direct_grant_action")} }
                                 }
                             }
-                            div { class: "form-field",
-                                label { class: "form-label", r#for: "platform-invite-duration", {i18n.t("tenant.duration_hours")} }
-                                input { id: "platform-invite-duration", class: "input-field", r#type: "number", min: "1", max: "168", value: "{hours}", disabled: busy(), oninput: move |event| hours.set(event.value()) }
-                            }
-                            button { class: "btn btn-primary", r#type: "submit", disabled: busy() || email().trim().is_empty(), {i18n.t("tenant.invite")} }
-                        }
-                    }
-                    if let Some(result) = created() {
-                        section { class: "alert alert-info", role: "status",
-                            p { {i18n.t(notification_label(&result.notification))} }
-                            if result.outcome == InvitationOutcome::AlreadyPending { p { {i18n.t("tenant.already_pending")} } }
-                            if let Some(link) = result.acceptance_link {
-                                OneTimeRecoveryLink { link, input_id: "platform-invite-recovery".to_string() }
-                            }
-                            button { class: "btn btn-secondary", r#type: "button", onclick: move |_| created.set(None), {i18n.t("tenant.hide")} }
                         }
                     }
                     section { class: "section",
@@ -597,9 +500,9 @@ fn PlatformTenantAccessPanel(
                             div { class: "table-container", table { class: "table",
                                 thead { tr { th { {i18n.t("tenant.user")} } th { {i18n.t("tenant.role")} } th { {i18n.t("tenant.membership_status")} } th { {i18n.t("tenant.user_status")} } th { {i18n.t("tenant.actions")} } } }
                                 tbody { for member in value.members.items.iter() {
-                                    {let role_member=member.clone();let status_member=member.clone();let owner_member=member.clone();let remove_member=member.clone();let is_owner=value.context.owner_user_id==Some(member.user_id);let removed=member.membership_status==MembershipStatus::Removed;rsx!{
+                                    {let role_member=member.clone();let status_member=member.clone();let remove_member=member.clone();let removed=member.membership_status==MembershipStatus::Removed;rsx!{
                                         tr { key: "{member.user_id}",
-                                            td { "{member.email}" if is_owner { span { class: "badge", {i18n.t("tenant.owner")} } } }
+                                            td { "{member.email}" }
                                             td { {tenant_role_label(i18n, member.tenant_role)} }
                                             td { {membership_status_label(i18n, member.membership_status)} }
                                             td { {user_status_label(i18n, member.user_status)} }
@@ -607,9 +510,6 @@ fn PlatformTenantAccessPanel(
                                                 if !removed {
                                                     button { class: "btn btn-secondary btn-sm", disabled: busy(), onclick: move |_| pending_member.set(Some((role_member.clone(), MemberAction::Role))), {i18n.t("tenant.change_role")} }
                                                     button { class: "btn btn-secondary btn-sm", disabled: busy(), onclick: move |_| pending_member.set(Some((status_member.clone(), MemberAction::Status))), {i18n.t("tenant.change_status")} }
-                                                    if !is_owner && member.tenant_role == TenantRole::Admin && member.membership_status == MembershipStatus::Active && member.user_status == UserStatus::Active {
-                                                        button { class: "btn btn-secondary btn-sm", disabled: busy(), onclick: move |_| pending_member.set(Some((owner_member.clone(), MemberAction::Owner))), {i18n.t("tenant.transfer")} }
-                                                    }
                                                     button { class: "btn btn-danger btn-sm", disabled: busy(), onclick: move |_| pending_member.set(Some((remove_member.clone(), MemberAction::Remove))), {i18n.t("tenant.remove")} }
                                                 }
                                             } }
@@ -617,29 +517,16 @@ fn PlatformTenantAccessPanel(
                                     }}
                                 } }
                             } }
-                            if value.members.items.is_empty() { div { class: "empty-state compact-empty-state", h3 { class: "empty-title", {i18n.t("tenants.no_members_yet")} } } }
+                            if value.members.items.is_empty() { div { class: "empty-state compact-empty-state", h3 { class: "empty-title", {if query().member_search.is_empty() { i18n.t("tenants.no_members_yet") } else { i18n.t("tenants.no_member_matches") }} } } }
                         }
                         Pager { page: query().member_page, total_pages: value.members.total_pages, total: value.members.total, on_page: move |page| query.write().set_member_page(page) }
-                    }
-                    section { class: "section",
-                        h2 { class: "section-title", {i18n.t("tenant.invitations")} }
-                        div { class: "table-pagination-panel table-pagination-frame",
-                            div { class: "table-container", table { class: "table",
-                                thead { tr { th { {i18n.t("tenant.email")} } th { {i18n.t("tenant.role")} } th { {i18n.t("table.status")} } th { {i18n.t("tenant.expires")} } th { {i18n.t("tenant.actions")} } } }
-                                tbody { for invitation in value.invitations.items.iter() { {let selected=invitation.clone();rsx!{tr { key: "{invitation.id}", td { "{invitation.email}" } td { {tenant_role_label(i18n, invitation.tenant_role)} } td { {invitation_status_label(i18n, &invitation.status)} } td { {format_time(&invitation.expires_at)} } td { if invitation.status == "pending" { button { class: "btn btn-danger btn-sm", disabled: busy(), onclick: move |_| pending_invitation.set(Some(selected.clone())), {i18n.t("tenant.revoke")} } } } }}} } }
-                            } }
-                            if value.invitations.items.is_empty() { div { class: "empty-state compact-empty-state", h3 { class: "empty-title", {i18n.t("tenant.empty")} } } }
-                        }
-                        Pager { page: query().invitation_page, total_pages: value.invitations.total_pages, total: value.invitations.total, on_page: move |page| query.write().set_invitation_page(page) }
                     }
                 },
             }
             if let Some((member, action)) = pending_member() {
-                {let owner_impact=current_owner==Some(member.user_id)&&action!=MemberAction::Owner;
-                 let current=match action {MemberAction::Role=>tenant_role_label(i18n,member.tenant_role),MemberAction::Status=>membership_status_label(i18n,member.membership_status),_=>""};
+                {let current=match action {MemberAction::Role=>tenant_role_label(i18n,member.tenant_role),MemberAction::Status=>membership_status_label(i18n,member.membership_status),_=>""};
                  let next=match action {MemberAction::Role=>tenant_role_label(i18n,if member.tenant_role==TenantRole::Admin{TenantRole::Member}else{TenantRole::Admin}),MemberAction::Status=>membership_status_label(i18n,if member.membership_status==MembershipStatus::Active{MembershipStatus::Suspended}else{MembershipStatus::Active}),_=>""};
                  let target=if matches!(action,MemberAction::Role|MemberAction::Status){format!("{} · {current} → {next}",member.email)}else{member.email.clone()};
-                 let target=if owner_impact{format!("{target} · {}",i18n.t("tenants.owner_clear_warning"))}else{target};
                  let danger=action==MemberAction::Remove||(action==MemberAction::Status&&member.membership_status==MembershipStatus::Active)||(action==MemberAction::Role&&member.tenant_role==TenantRole::Admin);
                  rsx!{
                 ui::ConfirmModal {
@@ -655,40 +542,23 @@ fn PlatformTenantAccessPanel(
                 }
                  }}
             }
-            if let Some(invitation) = pending_invitation() {
-                ui::ConfirmModal {
-                    open: true,
-                    title: i18n.t("tenant.revoke").to_owned(),
-                    message: invitation.email,
-                    confirm_text: i18n.t("tenant.revoke").to_owned(),
-                    cancel_text: i18n.t("form.cancel").to_owned(),
-                    danger: true,
-                    busy: busy(),
-                    oncancel: move |_| if !busy() { pending_invitation.set(None); },
-                    onconfirm: revoke_invitation,
-                }
-            }
     }}
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AccessQuery, PAGE_SIZE, default_invitation_role, valid_email};
+    use super::{AccessQuery, PAGE_SIZE};
     use crate::router::Route;
-    use client_api::TenantRole;
-    use uuid::Uuid;
 
     #[test]
     fn member_search_resets_only_the_member_page() {
         let mut query = AccessQuery::default();
         query.set_member_page(4);
-        query.set_invitation_page(3);
 
         query.set_member_search("  admin@example.com  ");
 
         assert_eq!(query.member_search, "admin@example.com");
         assert_eq!(query.member_page, 1);
-        assert_eq!(query.invitation_page, 3);
         assert_eq!(PAGE_SIZE, 20);
     }
 
@@ -696,29 +566,8 @@ mod tests {
     fn page_numbers_never_fall_below_one() {
         let mut query = AccessQuery::default();
         query.set_member_page(0);
-        query.set_invitation_page(0);
 
         assert_eq!(query.member_page, 1);
-        assert_eq!(query.invitation_page, 1);
-    }
-
-    #[test]
-    fn invitation_email_validation_matches_the_server_shape() {
-        assert!(valid_email("admin@keycompute.local"));
-        assert!(valid_email("a@b"));
-        assert!(!valid_email("missing-at.example"));
-        assert!(!valid_email("a@@b.example"));
-        assert!(!valid_email("a @b.example"));
-        assert!(!valid_email("a@b.example\0"));
-    }
-
-    #[test]
-    fn first_invitation_defaults_to_admin_only_until_an_owner_exists() {
-        assert_eq!(default_invitation_role(None), TenantRole::Admin);
-        assert_eq!(
-            default_invitation_role(Some(Uuid::from_u128(1))),
-            TenantRole::Member
-        );
     }
 
     #[test]

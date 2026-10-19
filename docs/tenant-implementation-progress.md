@@ -199,6 +199,11 @@ platform APIs are `/api/v1/platform/pricing/**`. Existing pricing URLs retain on
 the new platform authorization. Tenant payloads cannot set tenant ownership or
 platform scope. Current signed user/tenant/membership versions are rechecked
 under retained locks, including requests queued during administrator demotion.
+That demotion is now restricted to explicit root/operator platform-target
+administration; tenant administrators cannot mutate peer administrator
+memberships. This protection also covers invitation creation and acceptance, so
+an active or suspended administrator cannot be demoted or restored through an
+invitation side path. Removed rows are history and require a fresh grant.
 
 Mutations and both audit streams share a transaction. Nested savepoints roll
 back failures even when an outer caller catches the error and commits. Group

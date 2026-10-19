@@ -10,7 +10,7 @@ use axum::{
 };
 use integration_tests::{
     common::generate_test_id,
-    db::{OwnedTenant, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{TenantFixture, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_db::{DbRouter, Tenant, TenantMembership, User};
 use keycompute_server::{AppState, create_router};
@@ -24,10 +24,10 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    tenant: OwnedTenant,
-    owner: User,
+    tenant: TenantFixture,
+    administrator: User,
     member: User,
-    owner_token: String,
+    admin_token: String,
     member_token: String,
     run: String,
 }
@@ -38,23 +38,23 @@ impl Fixture {
         let run = generate_test_id();
         let guard = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "control", &run).await;
-        let owner = User::find_by_id(&db, tenant.owner_user_id)
+        let administrator = User::find_by_id(&db, tenant.admin_user_id)
             .await
             .unwrap()
             .unwrap();
         let member_actor = create_test_user(&db, tenant.id, "member", &run).await;
         let member = member_actor.user;
         let state = AppState::with_pool(DbRouter::single(db.clone()));
-        let owner_token = token(&state, &db, &tenant, &owner).await;
+        let admin_token = token(&state, &db, &tenant, &administrator).await;
         let member_token = token(&state, &db, &tenant, &member).await;
         Self {
             db,
             guard,
             state,
             tenant,
-            owner,
+            administrator,
             member,
-            owner_token,
+            admin_token,
             member_token,
             run,
         }
@@ -182,7 +182,7 @@ async fn member_operator_and_foreign_object_requests_are_denied_without_cross_te
                 "/api/v1/tenants/{}/members/{}",
                 f.tenant.id, foreign_member.id
             ),
-            Some(&f.owner_token),
+            Some(&f.admin_token),
             None,
         )
         .await;
@@ -192,7 +192,7 @@ async fn member_operator_and_foreign_object_requests_are_denied_without_cross_te
         .request(
             Method::GET,
             format!("/api/v1/tenants/{}/members/not-a-uuid", f.tenant.id),
-            Some(&f.owner_token),
+            Some(&f.admin_token),
             None,
         )
         .await;
@@ -211,7 +211,7 @@ async fn member_update_is_versioned_atomic_and_rejects_unknown_global_fields() {
         .request(
             Method::PATCH,
             format!("/api/v1/tenants/{}/members/{}", f.tenant.id, f.member.id),
-            Some(&f.owner_token),
+            Some(&f.admin_token),
             Some(json!({
                 "expected_authz_version": membership.authz_version,
                 "tenant_role": "admin",
@@ -234,7 +234,7 @@ async fn member_update_is_versioned_atomic_and_rejects_unknown_global_fields() {
         .request(
             Method::PATCH,
             format!("/api/v1/tenants/{}/members/{}", f.tenant.id, f.member.id),
-            Some(&f.owner_token),
+            Some(&f.admin_token),
             Some(json!({
                 "expected_authz_version": membership.authz_version,
                 "tenant_role": "admin",
@@ -254,7 +254,7 @@ async fn member_update_is_versioned_atomic_and_rejects_unknown_global_fields() {
         .request(
             Method::PATCH,
             format!("/api/v1/tenants/{}/members/{}", f.tenant.id, f.member.id),
-            Some(&f.owner_token),
+            Some(&f.admin_token),
             Some(json!({
                 "expected_authz_version": membership.authz_version,
                 "status": "suspended"
@@ -266,42 +266,93 @@ async fn member_update_is_versioned_atomic_and_rejects_unknown_global_fields() {
 }
 
 #[tokio::test]
-async fn last_admin_and_owner_protection_are_conflicts() {
+async fn tenant_administrators_are_peer_protected_but_platform_can_manage_them() {
     let mut f = Fixture::new().await;
-    let owner_membership = TenantMembership::find(&f.db, f.tenant.id, f.owner.id)
+    let administrator_membership = TenantMembership::find(&f.db, f.tenant.id, f.administrator.id)
         .await
         .unwrap()
         .unwrap();
     let (status, _) = f
         .request(
             Method::DELETE,
-            format!("/api/v1/tenants/{}/members/{}", f.tenant.id, f.owner.id),
-            Some(&f.owner_token),
+            format!(
+                "/api/v1/tenants/{}/members/{}",
+                f.tenant.id, f.administrator.id
+            ),
+            Some(&f.admin_token),
             Some(json!({
-                "expected_authz_version": owner_membership.authz_version
+                "expected_authz_version": administrator_membership.authz_version
             })),
         )
         .await;
-    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     promote_member_to_admin(&f.db, f.tenant.id, f.member.id).await;
     let member_membership = TenantMembership::find(&f.db, f.tenant.id, f.member.id)
         .await
         .unwrap()
         .unwrap();
-    let (status, _) = f
+    let tenant_path = format!("/api/v1/tenants/{}/members/{}", f.tenant.id, f.member.id);
+    for (method, body) in [
+        (
+            Method::PATCH,
+            json!({
+                "expected_authz_version": member_membership.authz_version,
+                "tenant_role": "member"
+            }),
+        ),
+        (
+            Method::PATCH,
+            json!({
+                "expected_authz_version": member_membership.authz_version,
+                "status": "suspended"
+            }),
+        ),
+        (
+            Method::DELETE,
+            json!({"expected_authz_version": member_membership.authz_version}),
+        ),
+    ] {
+        let (status, _) = f
+            .request(method, &tenant_path, Some(&f.admin_token), Some(body))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let unchanged = TenantMembership::find(&f.db, f.tenant.id, f.member.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.tenant_role, "admin");
+    assert_eq!(unchanged.status, "active");
+    assert_eq!(unchanged.authz_version, member_membership.authz_version);
+
+    let root = User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
+        .await
+        .unwrap()
+        .unwrap();
+    let root_token = f
+        .state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_identity_token(root.id, None, root.token_version, None, None, 3600)
+        .unwrap();
+    let (status, body) = f
         .request(
             Method::PATCH,
-            format!("/api/v1/tenants/{}/members/{}", f.tenant.id, f.member.id),
-            Some(&f.owner_token),
+            format!(
+                "/api/v1/platform/tenants/{}/control/members/{}",
+                f.tenant.id, f.member.id
+            ),
+            Some(&root_token),
             Some(json!({
-                "expected_authz_version": member_membership.authz_version,
-                "tenant_role": "member",
-                "status": "removed"
+                "expected_authz_version": unchanged.authz_version,
+                "tenant_role": "member"
             })),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["tenant_role"], "member");
     f.guard.cleanup().await.unwrap();
 }
 
@@ -394,7 +445,7 @@ async fn denied_member_command_keeps_cache_and_successful_change_invalidates_old
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(f.state.display_cache.metrics()["entries"], entries);
     let (status, _) = f
-        .request(Method::PATCH, &path, Some(&f.owner_token), Some(body))
+        .request(Method::PATCH, &path, Some(&f.admin_token), Some(body))
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(f.state.display_cache.metrics()["entries"], 0);
@@ -420,7 +471,7 @@ async fn membership_change_rolls_back_when_audit_insert_fails() {
          RAISE EXCEPTION 'isolated audit failure'; END IF; RETURN NEW; END $$; \
          CREATE TRIGGER {name} BEFORE INSERT ON tenant_audit_events \
          FOR EACH ROW EXECUTE FUNCTION {name}();",
-        f.owner.id,
+        f.administrator.id,
     ))
     .await
     .unwrap();
@@ -428,7 +479,7 @@ async fn membership_change_rolls_back_when_audit_insert_fails() {
         .request(
             Method::PATCH,
             format!("/api/v1/tenants/{}/members/{}", f.tenant.id, f.member.id),
-            Some(&f.owner_token),
+            Some(&f.admin_token),
             Some(json!({
                 "expected_authz_version":1,"tenant_role":"admin"
             })),
@@ -517,7 +568,7 @@ async fn bare_tenant_routes_reject_inference_keys_and_keep_personal_authority_na
         &f.db,
         &keycompute_db::CreateProduceAiKeyRequest {
             tenant_id: f.tenant.id,
-            user_id: f.owner.id,
+            user_id: f.administrator.id,
             name: "bare-control-test".into(),
             produce_ai_key_hash: keycompute_auth::ProduceAiKeyValidator::hash_key(&raw),
             produce_ai_key_preview: "test-only".into(),
@@ -531,7 +582,7 @@ async fn bare_tenant_routes_reject_inference_keys_and_keep_personal_authority_na
     for (credential, expected) in [
         (raw.as_str(), StatusCode::FORBIDDEN),
         (f.member_token.as_str(), StatusCode::FORBIDDEN),
-        (f.owner_token.as_str(), StatusCode::OK),
+        (f.admin_token.as_str(), StatusCode::OK),
     ] {
         let response = bare
             .clone()

@@ -391,9 +391,7 @@ pub fn OneTimeRecoveryLink(link: String, input_id: String) -> Element {
     }
 }
 
-/// Member ID input with tenant-scoped, active-member suggestions. UUID entry
-/// remains available for large tenants whose member is outside the first page,
-/// while the common case no longer requires copying an opaque identifier.
+/// Searchable tenant-member picker with an explicit UUID fallback.
 #[component]
 pub fn MemberIdField(
     scope: WorkspaceScope,
@@ -406,7 +404,10 @@ pub fn MemberIdField(
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let i18n = use_i18n();
+    let mut search_input = use_signal(String::new);
+    let mut search = use_signal(String::new);
     let suggestions = use_resource(move || {
+        let request_key = (scope, search());
         let can_list_members = users.info.read().as_ref().is_some_and(|user| {
             if scope.is_platform_target() {
                 user.can_manage_platform()
@@ -416,39 +417,71 @@ pub fn MemberIdField(
         });
         async move {
             if !can_list_members {
-                return Ok(None);
+                return (request_key, Ok(None));
             }
-            read(auth, users, scope, move |token| async move {
-                scope.api()?.members(1, 100, None, &token).await
+            let query = (!request_key.1.is_empty()).then_some(request_key.1.clone());
+            let result = read(auth, users, scope, move |token| {
+                let query = query.clone();
+                async move {
+                    scope
+                        .api()?
+                        .members_filtered(
+                            1,
+                            20,
+                            query.as_deref(),
+                            Some(client_api::MembershipStatus::Active),
+                            &token,
+                        )
+                        .await
+                }
             })
             .await
-            .map(Some)
+            .map(Some);
+            (request_key, result)
         }
     });
-    let list_id = format!("{input_id}-options");
+    let current_key = (scope, search());
+    let current_suggestions = suggestions()
+        .filter(|(key, _)| key == &current_key)
+        .map(|(_, result)| result);
+    let search_id = format!("{input_id}-search");
+    let select_id = format!("{input_id}-select");
 
     rsx! {
         div { class: "form-field member-id-field",
-            label { class: "form-label", r#for: "{input_id}", "{label}" }
+            span { class: "form-label", "{label}" }
+            div { class: "member-picker-search",
+                input {
+                    id: "{search_id}",
+                    class: "input-field",
+                    r#type: "search",
+                    maxlength: "255",
+                    value: "{search_input}",
+                    disabled,
+                    aria_label: i18n.t("tenant.member_search_placeholder"),
+                    placeholder: i18n.t("tenant.member_search_placeholder"),
+                    oninput: move |event| search_input.set(event.value()),
+                }
+                button { class: "btn btn-secondary", r#type: "button", disabled, onclick: move |_| search.set(search_input().trim().to_owned()), {i18n.t("tenant.search")} }
+            }
+            if let Some(Ok(Some(page))) = current_suggestions.as_ref() {
+                select { id: "{select_id}", class: "input-field", value: "{value}", disabled, aria_label: i18n.t("tenant.member_picker_results"), onchange: move |event| if !event.value().is_empty() { on_input.call(event.value()); },
+                    option { value: "", {i18n.t("tenant.member_picker_choose")} }
+                    for member in page.items.iter().filter(|member| member.user_status == client_api::UserStatus::Active) {
+                        option { value: "{member.user_id}", "{member.name.as_deref().unwrap_or(&member.email)} · {member.email}" }
+                    }
+                }
+                if page.items.is_empty() { small { class: "form-hint", {i18n.t("tenant.member_picker_empty")} } }
+            }
+            label { class: "form-label form-label-secondary", r#for: "{input_id}", {i18n.t("tenant.member_id_manual")} }
             input {
                 id: "{input_id}",
                 class: "input-field",
-                list: "{list_id}",
                 maxlength: "36",
                 value: "{value}",
                 disabled,
                 placeholder: i18n.t("tenant.member_id_placeholder"),
                 oninput: move |event| on_input.call(event.value()),
-            }
-            datalist { id: "{list_id}",
-                if let Some(Ok(Some(page))) = suggestions() {
-                    for member in page.items.iter().filter(|member| {
-                        member.membership_status == client_api::MembershipStatus::Active
-                            && member.user_status == client_api::UserStatus::Active
-                    }) {
-                        option { value: "{member.user_id}", "{member.email}" }
-                    }
-                }
             }
             small { class: "form-hint", {i18n.t("tenant.member_id_hint")} }
         }

@@ -41,7 +41,7 @@ fn require_billing_admin_permission(
 
 /// Platform payment reads and control commands are global administrator operations.
 /// They must not require a selected tenant just because payment orders carry
-/// tenant ownership in the data model.
+/// a tenant scope in the data model.
 fn require_global_billing_admin_permission(
     auth: &GlobalConsoleAuth,
 ) -> Result<keycompute_types::PlatformScope> {
@@ -975,24 +975,24 @@ pub async fn admin_verify_payment_provider(
         .as_deref()
         .ok_or_else(|| payment_internal_error("verify_provider", "database unavailable"))?;
     #[derive(FromQueryResult)]
-    struct TenantVerificationOwner {
-        owner_user_id: Uuid,
+    struct TenantVerificationMember {
+        user_id: Uuid,
     }
-    let owner = TenantVerificationOwner::find_by_statement(Statement::from_sql_and_values(
+    let member = TenantVerificationMember::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "SELECT t.owner_user_id FROM tenants t JOIN users u ON u.id=t.owner_user_id AND u.status='active' WHERE t.id=$1 AND t.status='active'",
+        "SELECT m.user_id FROM tenants t JOIN tenant_memberships m ON m.tenant_id=t.id AND m.status='active' AND m.tenant_role='admin' JOIN users u ON u.id=m.user_id AND u.status='active' WHERE t.id=$1 AND t.status='active' ORDER BY m.joined_at,m.user_id LIMIT 1",
         [tenant_id.into()],
     ))
     .one(pool.write_conn())
     .await
     .map_err(|error| payment_internal_error("verify_provider_target", error))?
-    .ok_or_else(|| ApiError::NotFound("Target tenant not found or inactive".into()))?;
+    .ok_or_else(|| ApiError::NotFound("Target tenant has no active administrator".into()))?;
     let registry = state
         .payment
         .as_ref()
         .ok_or_else(|| payment_internal_error("verify_provider", "payment registry unavailable"))?;
     registry
-        .verify_provider(method, tenant_id, owner.owner_user_id)
+        .verify_provider(method, tenant_id, member.user_id)
         .await
         .map_err(|error| match error {
             crate::payment_registry::RegistryError::UserTenantMismatch => {

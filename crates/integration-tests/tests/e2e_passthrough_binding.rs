@@ -1076,7 +1076,7 @@ async fn passthrough_probe_cas_rejects_stale_generation_and_changed_account_conf
 }
 
 #[tokio::test]
-async fn platform_account_has_no_tenant_owner_lifecycle() {
+async fn platform_account_has_no_tenant_assignment_lifecycle() {
     let mut f = Fixture::new().await;
     let owner = create_test_tenant(&f.db, "passthrough-owner", &f.run).await;
     f.db.execute(Statement::from_sql_and_values(

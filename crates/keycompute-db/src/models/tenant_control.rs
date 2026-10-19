@@ -15,7 +15,8 @@ use super::{
 use crate::DbError;
 use chrono::{DateTime, Duration, Utc};
 use keycompute_types::{
-    AuditResult, AuditScopeType, MembershipStatus, TenantInvitationStatus, TenantRole, TenantScope,
+    AuditResult, AuditScopeType, MembershipStatus, PlatformRole, TenantInvitationStatus,
+    TenantRole, TenantScope,
 };
 use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement};
 use serde::Serialize;
@@ -30,7 +31,6 @@ pub const MAX_TENANT_DESCRIPTION_BYTES: usize = 16 * 1024;
 #[derive(Debug, Clone, FromQueryResult, Serialize)]
 pub struct TenantContext {
     pub id: Uuid,
-    pub owner_user_id: Option<Uuid>,
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
@@ -125,6 +125,11 @@ pub struct MemberPatch {
     pub expected_authz_version: i64,
     pub tenant_role: Option<TenantRole>,
     pub status: Option<MembershipStatus>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GrantMember {
+    pub user_id: Uuid,
 }
 
 #[derive(Debug, Clone)]
@@ -342,7 +347,7 @@ pub async fn get_tenant_context(
     scope: TenantScope,
 ) -> Result<Option<TenantContext>, DbError> {
     let sql = format!(
-        "SELECT t.id,t.owner_user_id,t.name,t.slug,t.description,t.status,t.default_rpm_limit,t.default_tpm_limit,t.revision,t.authz_version,
+        "SELECT t.id,t.name,t.slug,t.description,t.status,t.default_rpm_limit,t.default_tpm_limit,t.revision,t.authz_version,
                 CASE WHEN u.platform_role IN ('root','operator') THEN 'admin' ELSE m.tenant_role END AS tenant_role,
                 CASE WHEN u.platform_role IN ('root','operator') THEN 0 ELSE m.authz_version END AS membership_authz_version
          FROM tenants t
@@ -383,6 +388,7 @@ pub async fn list_members(
                 OR LOWER(COALESCE(u.name,'')) LIKE '%' || LOWER($3) || '%' ESCAPE '\\'
                 OR u.id::text LIKE '%' || LOWER($3) || '%' ESCAPE '\\')
            AND ($4::text IS NULL OR m.status=$4)
+           AND ($4::text IS DISTINCT FROM 'active' OR u.status='active')
          ORDER BY LOWER(u.email),m.user_id
          LIMIT $5 OFFSET $6"
     );
@@ -426,7 +432,8 @@ pub async fn count_members(
            AND ($3::text IS NULL OR LOWER(u.email) LIKE '%' || LOWER($3) || '%' ESCAPE '\\'
                 OR LOWER(COALESCE(u.name,'')) LIKE '%' || LOWER($3) || '%' ESCAPE '\\'
                 OR u.id::text LIKE '%' || LOWER($3) || '%' ESCAPE '\\')
-           AND ($4::text IS NULL OR m.status=$4)"
+           AND ($4::text IS NULL OR m.status=$4)
+           AND ($4::text IS DISTINCT FROM 'active' OR u.status='active')"
     );
     Ok(Count::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
@@ -569,27 +576,16 @@ pub async fn update_member(
     let next_role = patch.tenant_role.unwrap_or(before.tenant_role()?);
     let next_status = patch.status.unwrap_or(before.membership_status()?);
     let platform_actor = authority.actor.actor_platform_role.is_platform_admin();
+    super::tenant_membership::require_mutable_membership_target(
+        &before,
+        authority.actor.actor_platform_role,
+    )?;
     if before.status == MembershipStatus::Removed.as_str()
         && (next_status != MembershipStatus::Removed || patch.tenant_role.is_some())
     {
         return Err(invariant(
             "removed membership requires a newly accepted invitation",
         ));
-    }
-    if tenant.owner_user_id == Some(user_id)
-        && (next_role != TenantRole::Admin || next_status != MembershipStatus::Active)
-    {
-        if !platform_actor {
-            return Err(invariant(
-                "the tenant owner must remain an active tenant administrator",
-            ));
-        }
-        tx.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE tenants SET owner_user_id=NULL WHERE id=$1 AND owner_user_id=$2",
-            [tenant.id.into(), user_id.into()],
-        ))
-        .await?;
     }
     if next_status == MembershipStatus::Active
         && next_role == TenantRole::Admin
@@ -662,6 +658,114 @@ pub async fn update_member(
     })
 }
 
+/// Add an existing ordinary identity to a tenant through an explicit platform
+/// administration action. Ordinary tenant administrators must use invitations.
+pub async fn grant_member(
+    tx: &DatabaseTransaction,
+    scope: TenantScope,
+    snapshot: TenantAuthzSnapshot,
+    request: &GrantMember,
+    actor: &AuditContext,
+) -> Result<TenantMember, DbError> {
+    if request.user_id.is_nil() {
+        return Err(invariant("member ID is required"));
+    }
+    let authority = revalidate_in_transaction(tx, scope, snapshot, actor).await?;
+    if !authority.actor.actor_platform_role.is_platform_admin() {
+        return Err(invariant(
+            "platform administrator required for direct tenant authorization",
+        ));
+    }
+    let tenant = Tenant::find_by_id_for_update(tx, authority.tenant_id)
+        .await?
+        .ok_or_else(|| DbError::not_found("Tenant", authority.tenant_id))?;
+    let target = User::find_by_id_for_update(tx, request.user_id)
+        .await?
+        .filter(|user| user.status == "active")
+        .ok_or_else(|| invariant("active member identity required"))?;
+    if target.platform_role()? != PlatformRole::None {
+        return Err(invariant(
+            "platform identities cannot receive tenant memberships",
+        ));
+    }
+    let existing = TenantMembership::find_any(tx, tenant.id, target.id).await?;
+    if existing
+        .as_ref()
+        .is_some_and(|membership| membership.status != MembershipStatus::Removed.as_str())
+    {
+        return Err(invariant(
+            "the user already belongs to this tenant; update the existing membership instead",
+        ));
+    }
+    if tx
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT 1 FROM tenant_memberships WHERE user_id=$1 AND tenant_id<>$2 AND status<>'removed' LIMIT 1",
+            [target.id.into(), tenant.id.into()],
+        ))
+        .await?
+        .is_some()
+    {
+        return Err(invariant("user_already_belongs_to_tenant"));
+    }
+    let membership = if existing.is_some() {
+        TenantMembership::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE tenant_memberships SET tenant_role=$3,status='active',invited_by=$4,joined_at=clock_timestamp(),removed_at=NULL WHERE tenant_id=$1 AND user_id=$2 AND status='removed' RETURNING *",
+            [
+                tenant.id.into(),
+                target.id.into(),
+                TenantRole::Admin.as_str().into(),
+                authority.actor.actor_user_id.into(),
+            ],
+        ))
+        .one(tx)
+        .await?
+    } else {
+        TenantMembership::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status,invited_by) VALUES($1,$2,$3,'active',$4) RETURNING *",
+            [
+                tenant.id.into(),
+                target.id.into(),
+                TenantRole::Admin.as_str().into(),
+                authority.actor.actor_user_id.into(),
+            ],
+        ))
+        .one(tx)
+        .await?
+    }
+    .ok_or_else(|| invariant("direct tenant authorization was not persisted"))?;
+    TenantAuditEvent::append(
+        tx,
+        AuditScopeType::Platform,
+        Some(tenant.id),
+        &authority.actor,
+        "membership.grant",
+        "tenant_membership",
+        Some(&target.id.to_string()),
+        AuditResult::Success,
+        serde_json::json!({
+            "user_id": target.id,
+            "tenant_role": membership.tenant_role,
+            "authz_version": membership.authz_version
+        }),
+    )
+    .await?;
+    Ok(TenantMember {
+        user_id: membership.user_id,
+        email: target.email,
+        name: target.name,
+        user_status: target.status,
+        tenant_role: membership.tenant_role,
+        membership_status: membership.status,
+        authz_version: membership.authz_version,
+        invited_by: membership.invited_by,
+        joined_at: membership.joined_at,
+        removed_at: membership.removed_at,
+    })
+}
+
 pub async fn remove_member(
     tx: &DatabaseTransaction,
     scope: TenantScope,
@@ -683,69 +787,6 @@ pub async fn remove_member(
         actor,
     )
     .await
-}
-
-pub async fn transfer_ownership(
-    tx: &DatabaseTransaction,
-    scope: TenantScope,
-    snapshot: TenantAuthzSnapshot,
-    new_owner_user_id: Uuid,
-    actor: &AuditContext,
-) -> Result<TenantContext, DbError> {
-    let authority = revalidate_in_transaction(tx, scope, snapshot, actor).await?;
-    let tenant = Tenant::find_by_id_for_update(tx, authority.tenant_id)
-        .await?
-        .ok_or_else(|| DbError::not_found("Tenant", authority.tenant_id))?;
-    let platform_actor = authority.actor.actor_platform_role.is_platform_admin();
-    if !platform_actor && tenant.owner_user_id != Some(scope.user_id()) {
-        return Err(invariant(
-            "only the current tenant owner may transfer ownership",
-        ));
-    }
-    let (new_owner, membership) = lock_target_membership(tx, tenant.id, new_owner_user_id).await?;
-    if new_owner.status != "active"
-        || membership.status != MembershipStatus::Active.as_str()
-        || membership.tenant_role()? != TenantRole::Admin
-    {
-        return Err(invariant(
-            "ownership target must be an active tenant administrator",
-        ));
-    }
-    if tenant.owner_user_id == Some(new_owner_user_id) {
-        return get_tenant_context(tx, scope)
-            .await?
-            .ok_or_else(|| invariant("tenant context disappeared"));
-    }
-    let updated = Tenant::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE tenants SET owner_user_id=$2 WHERE id=$1 RETURNING *",
-        [tenant.id.into(), new_owner_user_id.into()],
-    ))
-    .one(tx)
-    .await?
-    .ok_or_else(|| DbError::not_found("Tenant", tenant.id))?;
-    TenantAuditEvent::append(
-        tx,
-        if platform_actor {
-            AuditScopeType::Platform
-        } else {
-            AuditScopeType::Tenant
-        },
-        Some(tenant.id),
-        &authority.actor,
-        "tenant.transfer_owner",
-        "tenant",
-        Some(&tenant.id.to_string()),
-        AuditResult::Success,
-        serde_json::json!({
-            "previous_owner_user_id": tenant.owner_user_id,
-            "owner_user_id": updated.owner_user_id
-        }),
-    )
-    .await?;
-    get_tenant_context(tx, scope)
-        .await?
-        .ok_or_else(|| invariant("transferred tenant context disappeared"))
 }
 
 pub async fn list_invitations(

@@ -4,7 +4,8 @@ use super::user::normalized_email;
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use keycompute_types::{
-    AuditResult, AuditScopeType, CredentialKind, TenantInvitationStatus, TenantRole, TenantScope,
+    AuditResult, AuditScopeType, CredentialKind, MembershipStatus, TenantInvitationStatus,
+    TenantRole, TenantScope,
 };
 use rand::{RngCore, rngs::OsRng};
 use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement};
@@ -84,6 +85,23 @@ impl TenantInvitation {
             return Err(DbError::Other("invitation actor mismatch".into()));
         }
         let email = normalized_email(&req.email)?;
+        if let Some(existing) =
+            super::tenant_membership::TenantMembership::find_by_statement(
+                Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT m.* FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND lower(btrim(u.email))=$2",
+                    [req.tenant_id.into(), email.clone().into()],
+                ),
+            )
+            .one(tx)
+            .await?
+            && existing.membership_status()? != MembershipStatus::Removed
+        {
+            super::tenant_membership::require_mutable_membership_target(
+                &existing,
+                actor.actor_platform_role,
+            )?;
+        }
         let valid=tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
             "SELECT $1::timestamptz > clock_timestamp() AND $1 <= clock_timestamp()+INTERVAL '7 days' AS valid",
             [req.expires_at.into()],
@@ -92,6 +110,17 @@ impl TenantInvitation {
             return Err(DbError::Other(
                 "invitation expiry must be within seven days".into(),
             ));
+        }
+        if tx
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT 1 FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE lower(btrim(u.email))=$1 AND m.tenant_id<>$2 AND m.status<>'removed' LIMIT 1",
+                [email.clone().into(), req.tenant_id.into()],
+            ))
+            .await?
+            .is_some()
+        {
+            return Err(DbError::Other("user_already_belongs_to_tenant".into()));
         }
         Self::expire_locked(tx, req.tenant_id, &actor).await?;
         if let Some(existing)=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
@@ -198,11 +227,23 @@ impl TenantInvitation {
         if !verified || current_email != invitation.email {
             return Err(invalid());
         }
+        if tx
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT 1 FROM tenant_memberships WHERE user_id=$1 AND tenant_id<>$2 AND status<>'removed' LIMIT 1",
+                [user.into(), tenant.into()],
+            ))
+            .await?
+            .is_some()
+        {
+            return Err(DbError::Other("user_already_belongs_to_tenant".into()));
+        }
         let inviter = super::user::User::find_by_id(tx, invitation.invited_by)
             .await?
             .filter(|user| user.status == "active")
             .ok_or_else(invalid)?;
-        if !inviter.platform_role()?.is_platform_admin() {
+        let inviter_platform_role = inviter.platform_role()?;
+        if !inviter_platform_role.is_platform_admin() {
             super::tenant_membership::TenantMembership::find(tx, tenant, invitation.invited_by)
                 .await?
                 .filter(|member| member.status == "active" && member.tenant_role == "admin")
@@ -210,6 +251,14 @@ impl TenantInvitation {
         }
         let existing =
             super::tenant_membership::TenantMembership::find_any(tx, tenant, user).await?;
+        if let Some(existing) = &existing
+            && existing.membership_status()? != MembershipStatus::Removed
+        {
+            super::tenant_membership::require_mutable_membership_target(
+                existing,
+                inviter_platform_role,
+            )?;
+        }
         if let Some(existing) = &existing
             && existing.status == "active"
             && existing.tenant_role != invitation.tenant_role
@@ -231,16 +280,6 @@ impl TenantInvitation {
                 "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status,invited_by,joined_at,removed_at) VALUES($1,$2,$3,'active',$4,$5,NULL) ON CONFLICT(tenant_id,user_id) DO UPDATE SET tenant_role=EXCLUDED.tenant_role,status='active',invited_by=EXCLUDED.invited_by,joined_at=EXCLUDED.joined_at,removed_at=NULL WHERE tenant_memberships.status<>'active'",
                 [tenant.into(),user.into(),invitation.tenant_role.clone().into(),invitation.invited_by.into(),accepted.accepted_at.into()],
             )).await?;
-        }
-        if invitation.tenant_role == TenantRole::Admin.as_str() {
-            // The first accepted administrator becomes the ordinary owner.
-            // A later platform action may deliberately clear or reassign it.
-            tx.execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "UPDATE tenants SET owner_user_id=$2 WHERE id=$1 AND owner_user_id IS NULL",
-                [tenant.into(), user.into()],
-            ))
-            .await?;
         }
         let actor = AuditContext {
             actor_platform_role: current.platform_role()?,

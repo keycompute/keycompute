@@ -740,6 +740,18 @@ mod db_tests {
     use keycompute_db::{BeneficiaryScope, TenantDistributionRule, UpdateDistributionRuleRequest};
     use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
     use std::str::FromStr;
+    async fn admin_id(db: &DatabaseConnection, tenant_id: Uuid) -> Uuid {
+        db.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT m.user_id FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.tenant_role='admin' AND m.status='active' AND u.status='active' ORDER BY m.joined_at,m.user_id LIMIT 1",
+            [tenant_id.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap()
+    }
     async fn authority(
         db: &DatabaseConnection,
         tenant_id: Uuid,
@@ -751,15 +763,10 @@ mod db_tests {
             .await
             .unwrap()
             .unwrap();
-        let user = keycompute_db::User::find_by_id(
-            db,
-            tenant
-                .owner_user_id
-                .expect("distribution fixture tenant must have an owner"),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let user = keycompute_db::User::find_by_id(db, admin_id(db, tenant_id).await)
+            .await
+            .unwrap()
+            .unwrap();
         let member = keycompute_db::TenantMembership::find(db, tenant_id, user.id)
             .await
             .unwrap()
@@ -809,13 +816,9 @@ mod db_tests {
         db: &DatabaseConnection,
         tenant: Uuid,
     ) -> Result<Vec<TenantDistributionRule>, keycompute_db::DbError> {
-        let t = keycompute_db::Tenant::find_by_id(db, tenant)
-            .await?
-            .unwrap();
         let scope = keycompute_types::TenantScope::checked(
             tenant,
-            t.owner_user_id
-                .expect("distribution fixture tenant must have an owner"),
+            admin_id(db, tenant).await,
             keycompute_types::TenantRole::Admin,
         )
         .unwrap();

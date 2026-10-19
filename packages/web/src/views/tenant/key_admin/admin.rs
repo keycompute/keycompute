@@ -99,7 +99,7 @@ fn KeyWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
         data.state().cloned(),
         data(),
     );
-    rsx! {div{class:"page-container tenant-key-admin",
+    rsx! {div{class:if embedded{"tenant-key-admin embedded-panel"}else{"page-container tenant-key-admin"},
         if !embedded {
             ui::PageHeader{title:i18n.t("tenant_keys.title").to_string(),description:i18n.t("tenant_keys.hint").to_string()}
             WorkspaceLinks{}

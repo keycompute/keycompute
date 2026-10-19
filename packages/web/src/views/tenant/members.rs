@@ -7,8 +7,8 @@ use crate::{
     utils::resource::{KeyedResourceValue, current_keyed_value},
 };
 use client_api::{
-    ClientError, MembershipStatus, TenantRole, UserStatus,
-    api::tenant_control::{MemberPatch, Page, TenantContext, TenantMember},
+    ClientError, MembershipStatus, TenantRole,
+    api::tenant_control::{MemberPatch, Page, TenantMember},
 };
 use dioxus::prelude::*;
 
@@ -34,17 +34,20 @@ enum Action {
     Role,
     Suspend,
     Remove,
-    Transfer,
 }
 impl Action {
     fn label(self) -> &'static str {
         match self {
-            Self::Role => "tenant.change_role",
+            Self::Role => "tenant.promote_admin",
             Self::Suspend => "tenant.change_status",
             Self::Remove => "tenant.remove",
-            Self::Transfer => "tenant.transfer",
         }
     }
+}
+
+fn can_manage_member(member: &TenantMember) -> bool {
+    member.tenant_role == TenantRole::Member
+        && member.membership_status != MembershipStatus::Removed
 }
 #[derive(Clone)]
 struct Pending {
@@ -53,7 +56,6 @@ struct Pending {
 }
 #[derive(Clone)]
 struct MemberData {
-    context: TenantContext,
     page: Page<TenantMember>,
 }
 /// The router may reuse an Outlet VNode across AppShell remounts. A page-local
@@ -95,9 +97,8 @@ fn TenantMembersPage() -> Element {
                     let search = search.clone();
                     async move {
                         let api = scope.api()?;
-                        let context = api.context(&token).await?;
                         let page = api.members(page, PAGE_SIZE, Some(&search), &token).await?;
-                        Ok(MemberData { context, page })
+                        Ok(MemberData { page })
                     }
                 })
                 .await
@@ -126,10 +127,6 @@ fn TenantMembersPage() -> Element {
                 let api = scope.api()?;
                 let before = command.member;
                 let changed = match command.action {
-                    Action::Transfer => {
-                        api.transfer_ownership(before.user_id, &token).await?;
-                        true
-                    }
                     Action::Remove => {
                         let row = api
                             .remove_member(before.user_id, before.authz_version, &token)
@@ -139,13 +136,8 @@ fn TenantMembersPage() -> Element {
                     Action::Role | Action::Suspend => {
                         let patch = MemberPatch {
                             expected_authz_version: before.authz_version,
-                            tenant_role: (command.action == Action::Role).then_some(
-                                if before.tenant_role == TenantRole::Admin {
-                                    TenantRole::Member
-                                } else {
-                                    TenantRole::Admin
-                                },
-                            ),
+                            tenant_role: (command.action == Action::Role)
+                                .then_some(TenantRole::Admin),
                             status: (command.action == Action::Suspend).then_some(
                                 if before.membership_status == MembershipStatus::Active {
                                     MembershipStatus::Suspended
@@ -213,23 +205,22 @@ fn TenantMembersPage() -> Element {
                     div {class:"table-container",table {class:"table",thead {tr {th {{i18n.t("tenant.user")}} th {{i18n.t("tenant.role")}} th {{i18n.t("tenant.membership_status")}} th {{i18n.t("tenant.user_status")}} th {{i18n.t("tenant.actions")}}}}
                         tbody {
                             for member in value.page.items.iter() {
-                                {let role_member=member.clone();let suspend_member=member.clone();let remove_member=member.clone();let transfer_member=member.clone();
-                                    let owner=value.context.owner_user_id==Some(member.user_id);
+                                {let role_member=member.clone();let suspend_member=member.clone();let remove_member=member.clone();
                                     let removed=member.membership_status==MembershipStatus::Removed;
-                                    let can_transfer=scope.is_some_and(|s|Some(s.user_id)==value.context.owner_user_id) && !owner && member.membership_status==MembershipStatus::Active && member.user_status==UserStatus::Active && member.tenant_role==TenantRole::Admin;
+                                    let manageable=can_manage_member(member);
                                     rsx!{tr {key:"{member.user_id}",
-                                        td {"{member.email}" if owner {span {class:"badge",{i18n.t("tenant.owner")}}}}
+                                        td {"{member.email}"}
                                         td {{role_label(i18n, member.tenant_role)}}
                                         td {{status_label(i18n, member.membership_status.as_str())}}
                                         td {{status_label(i18n, member.user_status.as_str())}}
                                         td {
-                                            if !owner && !removed {
-                                                button {class:"btn btn-secondary btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:role_member.clone(),action:Action::Role})),{i18n.t("tenant.change_role")}}
+                                            if manageable {
+                                                button {class:"btn btn-secondary btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:role_member.clone(),action:Action::Role})),{i18n.t("tenant.promote_admin")}}
                                                 button {class:"btn btn-secondary btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:suspend_member.clone(),action:Action::Suspend})),{i18n.t("tenant.change_status")}}
                                                 button {class:"btn btn-danger btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:remove_member.clone(),action:Action::Remove})),{i18n.t("tenant.remove")}}
                                             }
-                                            if can_transfer {button {class:"btn btn-secondary btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:transfer_member.clone(),action:Action::Transfer})),{i18n.t("tenant.transfer")}}}
-                                            if removed {span {class:"text-secondary",{i18n.t("tenant.reinvite_required")}}}
+                                            if member.tenant_role == TenantRole::Admin {span {class:"text-secondary",{i18n.t("tenant.peer_admin_protected")}}}
+                                            else if removed {span {class:"text-secondary",{i18n.t("tenant.reinvite_required")}}}
                                         }
                                     }}
                                 }
@@ -243,4 +234,47 @@ fn TenantMembersPage() -> Element {
         }
         if let Some(command)=pending(){CommandDialog {title:i18n.t(command.action.label()).to_string(),target:command.member.email.clone(),busy:busy(),on_cancel:move |_|pending.set(None),on_confirm:confirm}}
     }}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_manage_member;
+    use client_api::api::tenant_control::TenantMember;
+    use client_api::{MembershipStatus, TenantRole, UserStatus};
+    use uuid::Uuid;
+
+    fn member(role: TenantRole, status: MembershipStatus) -> TenantMember {
+        TenantMember {
+            user_id: Uuid::new_v4(),
+            email: "member@example.com".into(),
+            name: None,
+            user_status: UserStatus::Active,
+            tenant_role: role,
+            membership_status: status,
+            authz_version: 1,
+            invited_by: None,
+            joined_at: "2026-10-19T00:00:00Z".into(),
+            removed_at: None,
+        }
+    }
+
+    #[test]
+    fn tenant_console_only_offers_mutations_for_current_regular_members() {
+        assert!(can_manage_member(&member(
+            TenantRole::Member,
+            MembershipStatus::Active
+        )));
+        assert!(can_manage_member(&member(
+            TenantRole::Member,
+            MembershipStatus::Suspended
+        )));
+        assert!(!can_manage_member(&member(
+            TenantRole::Member,
+            MembershipStatus::Removed
+        )));
+        assert!(!can_manage_member(&member(
+            TenantRole::Admin,
+            MembershipStatus::Active
+        )));
+    }
 }

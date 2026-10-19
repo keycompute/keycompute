@@ -12,6 +12,9 @@ pub struct UserQueryParams {
     pub platform_role: Option<PlatformRole>,
     /// Global user lifecycle filter.
     pub status: Option<UserStatus>,
+    /// Return only users without a current tenant membership.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_unassigned: Option<bool>,
     /// 搜索关键词（邮箱或名称）
     pub search: Option<String>,
     /// 页码（从 1 开始）
@@ -34,6 +37,11 @@ impl UserQueryParams {
 
     pub fn with_status(mut self, status: UserStatus) -> Self {
         self.status = Some(status);
+        self
+    }
+
+    pub fn only_tenant_unassigned(mut self) -> Self {
+        self.tenant_unassigned = Some(true);
         self
     }
 
@@ -62,6 +70,9 @@ impl UserQueryParams {
         }
         if let Some(status) = self.status {
             params.push(format!("status={}", encode_query_value(status.as_str())));
+        }
+        if let Some(tenant_unassigned) = self.tenant_unassigned {
+            params.push(format!("tenant_unassigned={tenant_unassigned}"));
         }
         if let Some(ref search) = self.search {
             params.push(format!("search={}", encode_query_value(search)));
@@ -385,15 +396,17 @@ mod tests {
     }
 
     #[test]
-    fn user_query_serializes_active_status_for_owner_searches() {
+    fn user_query_serializes_unassigned_tenant_admin_candidates() {
         let query = UserQueryParams::new()
+            .with_platform_role(PlatformRole::None)
             .with_status(UserStatus::Active)
-            .with_search("alice+owner@example.com")
+            .only_tenant_unassigned()
+            .with_search("alice+admin@example.com")
             .with_page(1)
             .with_page_size(8);
         assert_eq!(
             query.to_query_string(),
-            "status=active&search=alice%2Bowner%40example.com&page=1&page_size=8"
+            "platform_role=none&status=active&tenant_unassigned=true&search=alice%2Badmin%40example.com&page=1&page_size=8"
         );
     }
 }

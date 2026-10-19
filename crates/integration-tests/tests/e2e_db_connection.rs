@@ -97,7 +97,7 @@ mod tests {
         )
         .await
         .expect("Responses test owner should be created");
-        let tenant = keycompute_db::Tenant::create_owned(
+        let tenant = keycompute_db::Tenant::create_with_admin(
             &tx,
             &keycompute_db::CreateTenantRequest {
                 name: label.to_string(),
@@ -121,10 +121,10 @@ mod tests {
         tenant.id
     }
 
-    async fn tenant_owner(db: &impl ConnectionTrait, tenant: Uuid) -> Uuid {
+    async fn tenant_admin(db: &impl ConnectionTrait, tenant: Uuid) -> Uuid {
         db.query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT owner_user_id FROM tenants WHERE id=$1",
+            "SELECT m.user_id FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.tenant_role='admin' AND m.status='active' AND u.status='active' ORDER BY m.joined_at,m.user_id LIMIT 1",
             [tenant.into()],
         ))
         .await
@@ -172,7 +172,7 @@ mod tests {
         finished_at: chrono::DateTime<chrono::Utc>,
     ) {
         let tenant_id = create_responses_test_tenant(pool, "trace ownership fixture").await;
-        let user_id = tenant_owner(pool, tenant_id).await;
+        let user_id = tenant_admin(pool, tenant_id).await;
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO gateway_requests (
@@ -205,7 +205,7 @@ mod tests {
         let session_id = Uuid::new_v4();
         let lease_id = Uuid::new_v4();
         let tenant_id = create_responses_test_tenant(pool, "trace ownership fixture").await;
-        let user_id = tenant_owner(pool, tenant_id).await;
+        let user_id = tenant_admin(pool, tenant_id).await;
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO gateway_requests (
@@ -1804,7 +1804,7 @@ mod tests {
             idempotency_id,
             "connection-update-fingerprint",
             Uuid::new_v4(),
-            tenant_owner(&pool, tenant_id).await,
+            tenant_admin(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-test"),
@@ -2019,7 +2019,7 @@ mod tests {
             binding_id,
             "different-fingerprint",
             Uuid::new_v4(),
-            tenant_owner(&pool, tenant_id).await,
+            tenant_admin(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-other"),
@@ -2418,7 +2418,7 @@ mod tests {
         drop(concurrent_pool);
 
         let billing_request_id = Uuid::new_v4();
-        let user_id = tenant_owner(&pool, tenant_id).await;
+        let user_id = tenant_admin(&pool, tenant_id).await;
         let key_id = Uuid::new_v4();
         let (first_binding, first_inserted) = keycompute_db::ResponsesIdempotencyClaim::bind(
             &pool,
@@ -2440,7 +2440,7 @@ mod tests {
             "kc_idempotency_test",
             "fingerprint-b",
             Uuid::new_v4(),
-            tenant_owner(&pool, tenant_id).await,
+            tenant_admin(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-other"),
@@ -2502,7 +2502,7 @@ mod tests {
         let tenant_id =
             create_responses_test_tenant(&pool, "Responses idempotency identity quota test").await;
         let account = create_responses_test_account(&pool, tenant_id, "identity-quota", 0).await;
-        let user_id = tenant_owner(&pool, tenant_id).await;
+        let user_id = tenant_admin(&pool, tenant_id).await;
         let key_id = Uuid::new_v4();
         let first_token = Uuid::new_v4();
         let second_token = Uuid::new_v4();
@@ -2649,7 +2649,7 @@ mod tests {
         let account = create_responses_test_account(&pool, tenant_id, "rollback", 0).await;
         let binding_id = "kc_idempotency_rolled_back";
         let billing_request_id = Uuid::new_v4();
-        let user_id = tenant_owner(&pool, tenant_id).await;
+        let user_id = tenant_admin(&pool, tenant_id).await;
         let key_id = Uuid::new_v4();
         let txn = pool.begin().await.expect("claim transaction should begin");
         let (_, inserted) = keycompute_db::ResponsesIdempotencyClaim::bind(
@@ -2719,7 +2719,7 @@ mod tests {
             binding_id,
             "fingerprint",
             Uuid::new_v4(),
-            tenant_owner(&pool, tenant_id).await,
+            tenant_admin(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-test"),
@@ -2882,7 +2882,7 @@ mod tests {
             ambiguous_binding,
             "ambiguous-fingerprint",
             Uuid::new_v4(),
-            tenant_owner(&pool, tenant_id).await,
+            tenant_admin(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-test"),
@@ -2954,7 +2954,7 @@ mod tests {
                 binding_id,
                 &format!("fingerprint-{binding_id}"),
                 Uuid::new_v4(),
-                tenant_owner(&pool, tenant_id).await,
+                tenant_admin(&pool, tenant_id).await,
                 Uuid::new_v4(),
                 "openai",
                 Some("gpt-test"),
@@ -3052,7 +3052,7 @@ mod tests {
             oversized_binding,
             "fingerprint-oversized",
             Uuid::new_v4(),
-            tenant_owner(&pool, tenant_id).await,
+            tenant_admin(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-test"),
@@ -3892,7 +3892,7 @@ mod tests {
     async fn stale_request_reconciliation_uses_last_lifecycle_activity() {
         let pool = create_test_pool().await;
         let trace_tenant = create_responses_test_tenant(&pool, "trace fixture").await;
-        let trace_user = tenant_owner(&pool, trace_tenant).await;
+        let trace_user = tenant_admin(&pool, trace_tenant).await;
 
         let router = keycompute_db::DbRouter::single(pool.clone());
         let request_id = Uuid::new_v4();
@@ -3973,7 +3973,7 @@ mod tests {
     async fn repeated_terminal_completion_is_idempotent() {
         let pool = create_test_pool().await;
         let trace_tenant = create_responses_test_tenant(&pool, "trace fixture").await;
-        let trace_user = tenant_owner(&pool, trace_tenant).await;
+        let trace_user = tenant_admin(&pool, trace_tenant).await;
 
         let router = keycompute_db::DbRouter::single(pool.clone());
         // This test checks persistent idempotency, not the production 250 ms
@@ -4578,7 +4578,7 @@ mod tests {
     async fn unrelated_intermediate_writes_do_not_block_request_flush() {
         let pool = create_test_pool().await;
         let trace_tenant = create_responses_test_tenant(&pool, "trace fixture").await;
-        let trace_user = tenant_owner(&pool, trace_tenant).await;
+        let trace_user = tenant_admin(&pool, trace_tenant).await;
 
         // This test measures request-local worker isolation, not connection
         // establishment latency. Keep enough ready connections for the lock

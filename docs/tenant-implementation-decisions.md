@@ -14,9 +14,10 @@ Membership role column: `tenant_role`; provenance: `invited_by`, `joined_at`,
 `platform_role`, `tenant_role`, and redacted `metadata`.
 API-key and invitation revocation keep their distinct revoked semantics.
 Tenant state remains `active/inactive`. `tenants.authz_version` changes only for
-authorization-bearing owner/status changes; editable tenant configuration uses the
+authorization-bearing status changes; editable tenant configuration uses the
 independent monotonic `tenants.revision`.
-User identity is global; a console identity may have no selected tenant.
+User identity is global; a console identity may have no selected tenant, and an
+ordinary user may have at most one non-removed tenant membership.
 Tenant APIs use `/api/v1/tenants/{tenant_id}/**`. The path selector must equal
 the current verified membership tenant; it never grants membership.
 Platform APIs use `/api/v1/platform/**`. Personal `/api/v1/me/**` never widens
@@ -25,15 +26,19 @@ its ownership range for an administrator. Inference retains `/v1/**`,
 
 ## Administrative invariants
 
-The owner must be an active tenant admin. A transaction cannot commit a tenant
-with no active admin. Membership mutations serialize on the tenant parent;
-deferred validation permits atomic creation and ownership transfer. Suspension
-of a global user must not invalidate these invariants in any owned tenant.
+Tenants have no owner field or owner role. They may start with no members and may
+have multiple peer administrators. Membership mutations serialize on the tenant
+parent, and a partial unique index prevents one user from holding current
+memberships in multiple tenants even under concurrent grants or acceptance.
+Tenant-scoped commands may promote an ordinary member, but cannot mutate an
+existing administrator's role or lifecycle state, including the actor's own.
+Only an audited root/operator platform-target command may do so.
 Removed membership rows retain historical resource and accounting references.
 Tenant administration never changes platform roles or original resource owners.
 Secrets can be replaced or revoked, not retrieved as original plaintext.
-Operator authority is an explicit operational allowlist, not inherited tenant
-administration. Root-sensitive access requires an explicit action and audit.
+Root/operator have implicit administration over every tenant through explicit
+platform-target routes but are never persisted as members. Root-sensitive access
+requires an explicit action and audit.
 
 ## Async acceptance and financial ownership
 

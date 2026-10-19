@@ -341,6 +341,9 @@ pub fn user_error_message(i18n: crate::i18n::I18n, err: &client_api::error::Clie
     if message.trim().is_empty() {
         return localize_error(i18n, err);
     }
+    if message == "peer_tenant_administrator_protected" {
+        return i18n.t("tenant.peer_admin_protected").to_string();
+    }
 
     match err {
         ClientError::TenantSelectionRequired(_) => localize_error(i18n, err),
@@ -374,6 +377,16 @@ mod tests {
             assert!(!message.contains("tenant_id"));
             assert!(!message.contains("deserialize"));
         }
+    }
+
+    #[test]
+    fn peer_administrator_protection_has_localized_copy() {
+        let error = ClientError::Forbidden("peer_tenant_administrator_protected".into());
+        let zh = user_error_message(I18n::new(Lang::Zh), &error);
+        let en = user_error_message(I18n::new(Lang::En), &error);
+        assert!(zh.contains("不能互相"));
+        assert!(en.contains("cannot demote"));
+        assert!(!zh.contains("peer_tenant_administrator_protected"));
     }
 
     #[test]
