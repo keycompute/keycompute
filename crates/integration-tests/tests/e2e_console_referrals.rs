@@ -63,13 +63,8 @@ impl Fixture {
         let db = create_test_pool().await;
         let seed = generate_test_id();
         let guard = TestDataGuard::new(db.clone(), seed.clone());
-        let owner = create_test_tenant(&db, "ref-owner", &seed).await;
         let tenant = create_test_tenant(&db, "referred", &seed).await.id;
-        let beneficiary = create_test_user(&db, owner.id, "referrer", &seed).await;
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
-            [tenant.into(),beneficiary.id.into()],
-        )).await.unwrap();
+        let beneficiary = create_test_user(&db, tenant, "referrer", &seed).await;
         let mut referred_ids = Vec::new();
         for n in 1..=count {
             let user = User::create(
@@ -224,9 +219,9 @@ async fn independent_aggregates_preserve_precise_money_and_do_not_multiply_rows_
             .filter(|r| r.user_id != u)
             .all(|r| r.total_consumption == 0 && r.earnings == 0)
     );
-    assert_ne!(
+    assert_eq!(
         f.beneficiary.tenant_id, f.tenant,
-        "legitimate cross-tenant referral must remain visible"
+        "personal referral earnings use the beneficiary's current tenant"
     );
     let unrelated = find_referral_display_page(&f.db, display_scope(f.tenant, f.users[2]), 20, 0)
         .await

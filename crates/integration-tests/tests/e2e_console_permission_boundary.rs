@@ -274,7 +274,7 @@ async fn personal_billing_scopes_records_counts_totals_and_models_identically() 
     let peer = create_test_user(&db, tenant.id, "bill-peer", &run).await;
     db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','removed')",
         [other_tenant.id.into(), user.id.into()],
     ))
     .await

@@ -919,11 +919,11 @@ async fn inference_credentials_foreign_owners_and_stale_versions_cannot_reuse_co
             .unwrap()
             .is_empty()
     );
-    f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",[f.b.id.into(),f.member.id.into()])).await.unwrap();
-    let rejected = f.registration(f.b.id, f.member.id).await;
+    let foreign_member = create_test_user(&f.db, f.b.id, "node-control-foreign", &f.run).await;
+    let rejected = f.registration(f.b.id, foreign_member.id).await;
     rejected.reject(&f.db, f.b.admin_user_id).await.unwrap();
-    // A member can belong to two tenants; the first tenant still cannot erase
-    // the other tenant's rejected registration through its personal URL.
+    // A member cannot erase another tenant member's rejected registration
+    // through its personal URL, even when the registration UUID is known.
     assert_eq!(
         call(
             create_router(f.state.clone()),

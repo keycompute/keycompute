@@ -6,7 +6,7 @@ use integration_tests::{
 };
 use keycompute_db::{CreateUserRequest, TenantMembership, UpdateUserRequest, User};
 use keycompute_types::{MembershipStatus, PlatformRole, TenantRole};
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
 #[tokio::test]
 async fn test_user_crud() {
@@ -63,38 +63,58 @@ async fn test_user_crud() {
 }
 
 #[tokio::test]
-async fn test_two_memberships_keep_roles_and_global_identity_independent() {
+async fn test_one_current_membership_preserves_history_and_global_identity() {
     let pool = create_test_pool().await;
     let run = generate_test_id();
     let first = create_test_tenant(&pool, "membership-one", &run).await;
     let second = create_test_tenant(&pool, "membership-two", &run).await;
-    let actor = create_test_user(&pool, first.id, "multi-membership", &run).await;
-    let tx = pool.begin().await.unwrap();
-    tx.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'admin','active')",
-        [second.id.into(), actor.id.into()],
-    )).await.unwrap();
-    tx.commit().await.unwrap();
+    let actor = create_test_user(&pool, first.id, "single-membership", &run).await;
+    let duplicate = pool
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'admin','active')",
+            [second.id.into(), actor.id.into()],
+        ))
+        .await;
+    assert!(
+        duplicate.is_err(),
+        "a user cannot have current memberships in two tenants"
+    );
     let rows = TenantMembership::list_active_for_user(&pool, actor.id)
         .await
         .unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tenant_id, first.id);
+    assert_eq!(rows[0].tenant_role().unwrap(), TenantRole::Member);
+
+    pool.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
+        [first.id.into(), actor.id.into()],
+    ))
+    .await
+    .unwrap();
+    pool.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'admin','active')",
+        [second.id.into(), actor.id.into()],
+    ))
+    .await
+    .unwrap();
+    let rows = TenantMembership::list_active_for_user(&pool, actor.id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tenant_id, second.id);
+    assert_eq!(rows[0].tenant_role().unwrap(), TenantRole::Admin);
     assert_eq!(
-        rows.iter()
-            .find(|m| m.tenant_id == first.id)
+        TenantMembership::find_any(&pool, first.id, actor.id)
+            .await
             .unwrap()
-            .tenant_role()
-            .unwrap(),
-        TenantRole::Member
-    );
-    assert_eq!(
-        rows.iter()
-            .find(|m| m.tenant_id == second.id)
             .unwrap()
-            .tenant_role()
+            .membership_status()
             .unwrap(),
-        TenantRole::Admin
+        MembershipStatus::Removed
     );
     assert_eq!(
         User::find_by_id(&pool, actor.id)

@@ -631,7 +631,7 @@ async fn advertised_native_response_budget_is_enforced() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn node_tasks_use_explicit_tenant_for_multi_membership_users() {
+async fn node_tasks_keep_explicit_tenant_when_a_user_moves_tenants() {
     let mut a = Fixture::new(true).await;
     let mut b = Fixture::new(true).await;
     let first = a
@@ -666,6 +666,24 @@ async fn node_tasks_use_explicit_tenant_for_multi_membership_users() {
         .unwrap();
     assert_eq!(unchanged.status, "queued");
     assert!(unchanged.assigned_node_id.is_none());
+    keycompute_db::UserNodeGatewayToken::create_with_id(
+        &a.pool,
+        Uuid::new_v4(),
+        a.node.tenant_id,
+        a.caller_id,
+        &Uuid::new_v4().to_string(),
+        "test-preview",
+    )
+    .await
+    .unwrap();
+    a.pool
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
+            [a.node.tenant_id.into(), a.caller_id.into()],
+        ))
+        .await
+        .unwrap();
     a.pool.execute(Statement::from_sql_and_values(DbBackend::Postgres,
         "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
         [b.node.tenant_id.into(),a.caller_id.into()],
@@ -709,22 +727,27 @@ async fn node_tasks_use_explicit_tenant_for_multi_membership_users() {
             .claim_task(first.id, a.node.id, a.session.id)
             .await
             .unwrap()
+            .is_none(),
+        "queued work from the previous tenant must lose execution authority"
+    );
+    assert!(
+        NodeTask::find_queued_with_invalid_authority_by_id(&a.pool, first.id)
+            .await
+            .unwrap()
             .is_some()
     );
-    // Independent registration applications are allowed per tenant, not per
-    // global user, and cannot collapse to an arbitrary first membership.
-    for tenant in [a.node.tenant_id, b.node.tenant_id] {
-        keycompute_db::UserNodeGatewayToken::create_with_id(
-            &a.pool,
-            Uuid::new_v4(),
-            tenant,
-            a.caller_id,
-            &Uuid::new_v4().to_string(),
-            "test-preview",
-        )
-        .await
-        .unwrap();
-    }
+    // A prior tenant's registration remains historical while the current
+    // tenant can create an independent registration for the moved user.
+    keycompute_db::UserNodeGatewayToken::create_with_id(
+        &a.pool,
+        Uuid::new_v4(),
+        b.node.tenant_id,
+        a.caller_id,
+        &Uuid::new_v4().to_string(),
+        "test-preview",
+    )
+    .await
+    .unwrap();
     b._cleanup.cleanup().await.unwrap();
     a._cleanup.cleanup().await.unwrap();
 }

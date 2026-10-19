@@ -184,18 +184,25 @@ async fn payment_dao_lists_counts_and_details_share_the_same_explicit_scope() {
     let mut guard = TestDataGuard::new(db.clone(), run.clone());
     let a = create_test_tenant(&db, "payment-dao-a", &run).await;
     let b = create_test_tenant(&db, "payment-dao-b", &run).await;
-    let user = create_test_user(&db, a.id, "payment-dao-user", &run).await;
+    let user = create_test_user(&db, b.id, "payment-dao-user", &run).await;
     let peer = create_test_user(&db, a.id, "payment-dao-peer", &run).await;
+    let same_user_foreign = order(&db, b.id, user.id).await;
     db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role) VALUES($1,$2,'member')",
+        "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
         [b.id.into(), user.id.into()],
+    ))
+    .await
+    .unwrap();
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
+        [a.id.into(), user.id.into()],
     ))
     .await
     .unwrap();
     let own = order(&db, a.id, user.id).await;
     let other = order(&db, a.id, peer.id).await;
-    let same_user_foreign = order(&db, b.id, user.id).await;
     let self_scope = TenantScope::checked(a.id, user.id, TenantRole::Member).unwrap();
     let admin_scope = TenantScope::checked(a.id, a.admin_user_id, TenantRole::Admin).unwrap();
     assert_eq!(

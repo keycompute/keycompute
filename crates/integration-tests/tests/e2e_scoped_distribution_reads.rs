@@ -74,7 +74,9 @@ impl Fixture {
         let member = create_test_user(&db, a.id, "distribution-member", &run)
             .await
             .id;
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role) VALUES($1,$2,'member'),($1,$3,'member')",[b.id.into(),a.admin_user_id.into(),member.into()])).await.unwrap();
+        // Historical memberships keep immutable foreign-tenant ledger rows
+        // representable without granting either user a second current tenant.
+        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','removed'),($1,$3,'member','removed')",[b.id.into(),a.admin_user_id.into(),member.into()])).await.unwrap();
         let mut state = AppState::with_pool(DbRouter::single(db.clone()));
         state.app_base_url = Some("https://fixture.invalid".into());
         Self {
@@ -197,9 +199,11 @@ async fn tenant_personal_and_platform_lists_counts_totals_share_exact_scope() {
             .is_none()
     );
     let other = own(f.b.id, f.a.admin_user_id, TenantRole::Member);
-    assert_eq!(
-        dao::record_stats(&f.db, other, &q).await.unwrap()[0].total_earnings,
-        BigDecimal::from(900)
+    assert!(
+        dao::record_stats(&f.db, other, &q)
+            .await
+            .unwrap()
+            .is_empty()
     );
     let root = User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
         .await
@@ -211,6 +215,15 @@ async fn tenant_personal_and_platform_lists_counts_totals_share_exact_scope() {
         f.a.id,
     );
     assert_eq!(dao::record_count(&f.db, platform, &q).await.unwrap(), 4);
+    let platform_b = DistributionScope::Platform(
+        PlatformScope::checked(root.id, PlatformRole::Root).unwrap(),
+        f.b.id,
+    );
+    assert_eq!(
+        dao::record_stats(&f.db, platform_b, &q).await.unwrap()[0].total_earnings,
+        BigDecimal::from(900),
+        "platform reporting retains historical tenant ledger rows"
+    );
     let one = dao::records(&f.db, platform, &q, 1, 0).await.unwrap();
     assert_eq!(one.len(), 1);
     assert_eq!(one[0].tenant_id, f.a.id);
@@ -414,7 +427,26 @@ async fn personal_earnings_cached_overviews_and_referral_amounts_do_not_cross_te
     .await
     .unwrap();
     let a = token(&f.state, &f.db, f.a.admin_user_id, Some(f.a.id)).await;
-    let b = token(&f.state, &f.db, f.a.admin_user_id, Some(f.b.id)).await;
+    let user = User::find_by_id(&f.db, f.a.admin_user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let raw = f
+        .state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_identity_token(user.id, None, user.token_version, None, None, 3600)
+        .unwrap();
+    let context = f.state.auth.verify_token(&raw).await.unwrap();
+    assert!(
+        f.state
+            .auth
+            .select_tenant(&context, Some(f.b.id))
+            .await
+            .is_err(),
+        "historical membership cannot select a second tenant"
+    );
     let cache_hits_before = f.state.display_cache.metrics()["hit"].as_u64().unwrap();
     for _ in 0..2 {
         let (s, v) = get(&f.state, &a, "/api/v1/me/distribution/overview").await;
@@ -431,16 +463,6 @@ async fn personal_earnings_cached_overviews_and_referral_amounts_do_not_cross_te
     assert!(
         f.state.display_cache.metrics()["hit"].as_u64().unwrap() > cache_hits_before,
         "test must exercise a real cached overview"
-    );
-    let (s, v) = get(&f.state, &b, "/api/v1/me/distribution/overview").await;
-    assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(
-        v["earnings"]["total_earnings"]
-            .as_str()
-            .unwrap()
-            .parse::<BigDecimal>()
-            .unwrap(),
-        BigDecimal::from(900)
     );
     let (_, earnings) = get(&f.state, &a, "/api/v1/me/distribution/earnings").await;
     assert_eq!(earnings["currency"], "CNY");
@@ -462,19 +484,6 @@ async fn personal_earnings_cached_overviews_and_referral_amounts_do_not_cross_te
         BigDecimal::from(30)
     );
     assert_eq!(referrals.referrals[0].earnings, BigDecimal::from(1));
-    f.db.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
-        [f.b.id.into(), f.a.admin_user_id.into()],
-    ))
-    .await
-    .unwrap();
-    assert_eq!(
-        get(&f.state, &b, "/api/v1/me/distribution/overview")
-            .await
-            .0,
-        StatusCode::UNAUTHORIZED
-    );
     assert_eq!(
         get(&f.state, &a, "/api/v1/me/distribution/overview")
             .await
