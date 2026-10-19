@@ -60,11 +60,31 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        let rollback_owner = User::create(
+            &pool,
+            &keycompute_db::CreateUserRequest {
+                email: format!("transaction-rollback-owner-{run}@example.com"),
+                name: None,
+            },
+        )
+        .await
+        .unwrap();
+        let rollback_audit = keycompute_db::AuditContext {
+            actor_user_id: rollback_owner.id,
+            credential_kind: keycompute_types::CredentialKind::Jwt,
+            actor_platform_role: keycompute_types::PlatformRole::None,
+            actor_tenant_role: None,
+            request_id: None,
+        };
         let rolled_back = pool.begin().await.unwrap();
-        let aborted =
-            Tenant::create_with_admin(&rolled_back, &request("rollback"), owner.id, &audit)
-                .await
-                .unwrap();
+        let aborted = Tenant::create_with_admin(
+            &rolled_back,
+            &request("rollback"),
+            rollback_owner.id,
+            &rollback_audit,
+        )
+        .await
+        .unwrap();
         assert!(
             Tenant::find_by_id(&rolled_back, aborted.id)
                 .await
@@ -79,7 +99,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            keycompute_db::TenantMembership::find_any(&pool, aborted.id, owner.id)
+            keycompute_db::TenantMembership::find_any(&pool, aborted.id, rollback_owner.id)
                 .await
                 .unwrap()
                 .is_none()
