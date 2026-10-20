@@ -37,11 +37,9 @@ fn PricingWorkspace(identity: PricingIdentity) -> Element {
 
 use client_api::api::admin::{CreatePricingRequest, PricingQueryParams, PricingTarget};
 use dioxus::prelude::*;
-use gloo_timers::future::TimeoutFuture;
 use ui::{Badge, BadgeVariant, ConfirmModal, PageHeader, Pagination, Table, TableHead};
 
 const PAGE_SIZE: usize = 20;
-const SEARCH_DEBOUNCE_MS: u32 = 300;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PricingListQuery {
@@ -76,7 +74,10 @@ impl PricingListQuery {
     }
 }
 
-use crate::hooks::use_i18n::use_i18n;
+use crate::hooks::{
+    use_debounced_search::{SEARCH_MAX_LENGTH, use_debounced_search},
+    use_i18n::use_i18n,
+};
 use crate::i18n::I18n;
 use crate::services::{
     api_client::with_auto_refresh,
@@ -133,16 +134,14 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
     // 刷新触发器
     let mut refresh_tick = use_signal(|| 0u32);
     let mut search = use_signal(String::new);
+    let debounced_search = use_debounced_search(search);
     let mut query = use_signal(PricingListQuery::default);
 
     use_effect(move || {
-        let next_search = search();
-        spawn(async move {
-            TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
-            if search() == next_search && query.read().search != next_search {
-                query.write().commit_search(next_search);
-            }
-        });
+        let next_search = debounced_search();
+        if query.peek().search != next_search {
+            query.write().commit_search(next_search);
+        }
     });
 
     let pricing_list = use_resource(move || {
@@ -211,7 +210,9 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
                         input {
                             class: "input-field",
                             r#type: "search",
+                            aria_label: i18n.t("pricing.search_placeholder"),
                             placeholder: "{i18n.t(\"pricing.search_placeholder\")}",
+                            maxlength: SEARCH_MAX_LENGTH,
                             value: "{search}",
                             oninput: move |e| search.set(e.value()),
                         }

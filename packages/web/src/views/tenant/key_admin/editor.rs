@@ -202,7 +202,7 @@ fn OwnerPicker(
     let mut filter = use_signal(String::new);
     let mut page = use_signal(|| 1u32);
     let mut selected_member = use_signal(|| None::<(String, String)>);
-    let data = use_resource(move || {
+    let mut data = use_resource(move || {
         let q = (filter(), page());
         let key = (scope, q.clone());
         async move {
@@ -226,11 +226,24 @@ fn OwnerPicker(
         }
     });
     let loaded = current_keyed_value(&(scope, (filter(), page())), data.state().cloned(), data());
+    let apply_search = move |event: Event<FormData>| {
+        event.prevent_default();
+        let next = search().trim().to_owned();
+        let same_filter = filter() == next;
+        if same_filter && page() == 1 {
+            data.restart();
+        } else {
+            page.set(1);
+            if !same_filter {
+                filter.set(next);
+            }
+        }
+    };
     rsx! {section{class:"key-owner-picker",
         label{class:"form-label",r#for:"key-owner-search",{i18n.t("tenant_keys.search_member")}}
-        div{class:"key-owner-search-row",
+        form{class:"key-owner-search-row",onsubmit:apply_search,
             input{id:"key-owner-search",class:"input-field",r#type:"search",placeholder:i18n.t("tenant_keys.search_placeholder"),value:"{search}",maxlength:"255",disabled,oninput:move|e|search.set(e.value())}
-            button{class:"btn btn-secondary",disabled,onclick:move |_|{filter.set(search().trim().into());page.set(1);},{i18n.t("tenant_keys.search_member")}}
+            button{class:"btn btn-secondary",r#type:"submit",disabled,{i18n.t("tenant_keys.search_member")}}
         }
         match loaded{
             None=>rsx!{p{{i18n.t("common.loading")}}},

@@ -120,7 +120,7 @@ fn Accounts(scope: WorkspaceScope) -> Element {
     let mut command_error = use_signal(String::new);
     super::workspace_switcher::use_workspace_dirty_blocker(move || delete_candidate().is_some());
     let key = (page(), applied(), tick());
-    let r = use_resource(move || {
+    let mut r = use_resource(move || {
         let key = (page(), applied(), tick());
         async move {
             let search = key.1.clone();
@@ -144,7 +144,77 @@ fn Accounts(scope: WorkspaceScope) -> Element {
         .map(|x| (x.total_pages, x.total))
         .unwrap_or((1, 0));
     let delete_open = use_memo(move || delete_candidate().is_some());
-    rsx! {div{class:"resource-panel",div{class:"toolbar",input{class:"input-field",r#type:"search",aria_label:i.t("tenant_providers.search_placeholder"),placeholder:i.t("tenant_providers.search_placeholder"),value:"{q}",oninput:move|e|q.set(e.value())} button{class:"btn btn-secondary",onclick:move |_|{applied.set(q());page.set(1)},{i.t("tenant_providers.apply")}} button{class:"btn btn-primary",onclick:move |_|edit.set(Some(None)),{i.t("tenant_providers.add_account")}}} if !command_error().is_empty(){p{class:"alert alert-error",role:"alert","{command_error}"}} match d{None=>rsx!{p{role:"status",{i.t("common.loading")}}},Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(i, &e)}}},Some(Ok(_))if rows.is_empty()=>rsx!{div{class:"empty-state bordered-empty-state",h3{class:"empty-title",{i.t("tenant_providers.empty_accounts")}}}},Some(Ok(_))=>rsx!{div{class:"table-container",table{class:"data-table",thead{tr{th{{i.t("tenant_providers.name")}} th{{i.t("tenant_providers.provider")}} th{{i.t("tenant_providers.models")}} th{{i.t("common.status")}} th{{i.t("tenant_providers.limits")}} th{{i.t("tenant_providers.priority")}} th{{i.t("tenant_providers.pool")}} th{{i.t("common.actions")}}}} tbody{for row in rows{AccountRow{key:"{row.id}",scope,row,onedit:move|v|edit.set(Some(Some(v))),ondelete:move|v|{command_error.set(String::new());delete_candidate.set(Some(v))},changed:move |_|tick+=1}}}}} Pager{page:page(),total_pages:totals.0,total:totals.1,on_page:move|v|page.set(v)}}} if let Some(v)=edit(){AccountEditor{scope,existing:v,onclose:move |_|edit.set(None),saved:move |_|{edit.set(None);tick+=1}}} ui::ConfirmModal{open:delete_open,title:i.t("tenant_providers.delete_account_title").to_string(),message:delete_candidate().map(|row|i.t_with_args("tenant_providers.delete_account_confirm",&[("name",row.name.as_str())])).unwrap_or_default(),confirm_text:i.t("form.delete").to_string(),cancel_text:i.t("form.cancel").to_string(),danger:true,busy:deleting(),oncancel:move |_|delete_candidate.set(None),onconfirm:move |_|{let Some(row)=delete_candidate()else{return};if deleting(){return} deleting.set(true);spawn(async move{match account_control(a,u,scope,row.id,AccountAction::Delete).await{Ok(_)=>{delete_candidate.set(None);tick+=1},Err(e)=>{delete_candidate.set(None);command_error.set(user_error_message(i,&e));}}deleting.set(false);});}}}}
+    let apply_search = move |event: Event<FormData>| {
+        event.prevent_default();
+        let next = q().trim().to_owned();
+        let same_search = applied() == next;
+        if same_search && page() == 1 {
+            r.restart();
+        } else {
+            page.set(1);
+            if !same_search {
+                applied.set(next);
+            }
+        }
+    };
+    rsx! {
+        div { class: "resource-panel",
+            form { class: "toolbar", onsubmit: apply_search,
+                input { class: "input-field", r#type: "search", aria_label: i.t("tenant_providers.search_placeholder"), placeholder: i.t("tenant_providers.search_placeholder"), maxlength: "255", value: "{q}", oninput: move |e| q.set(e.value()) }
+                button { class: "btn btn-secondary", r#type: "submit", {i.t("tenant_providers.apply")} }
+                button { class: "btn btn-primary", r#type: "button", onclick: move |_| edit.set(Some(None)), {i.t("tenant_providers.add_account")} }
+            }
+            if !command_error().is_empty() { p { class: "alert alert-error", role: "alert", "{command_error}" } }
+            match d {
+                None => rsx! { p { role: "status", {i.t("common.loading")} } },
+                Some(Err(e)) => rsx! { p { class: "alert alert-error", role: "alert", {user_error_message(i, &e)} } },
+                Some(Ok(_)) if rows.is_empty() => rsx! { div { class: "empty-state bordered-empty-state", h3 { class: "empty-title", {i.t("tenant_providers.empty_accounts")} } } },
+                Some(Ok(_)) => rsx! {
+                    div { class: "table-container",
+                        table { class: "data-table",
+                            thead { tr {
+                                th { {i.t("tenant_providers.name")} }
+                                th { {i.t("tenant_providers.provider")} }
+                                th { {i.t("tenant_providers.models")} }
+                                th { {i.t("common.status")} }
+                                th { {i.t("tenant_providers.limits")} }
+                                th { {i.t("tenant_providers.priority")} }
+                                th { {i.t("tenant_providers.pool")} }
+                                th { {i.t("common.actions")} }
+                            } }
+                            tbody { for row in rows {
+                                AccountRow { key: "{row.id}", scope, row, onedit: move |v| edit.set(Some(Some(v))), ondelete: move |v| { command_error.set(String::new()); delete_candidate.set(Some(v)); }, changed: move |_| tick += 1 }
+                            } }
+                        }
+                    }
+                    Pager { page: page(), total_pages: totals.0, total: totals.1, on_page: move |v| page.set(v) }
+                },
+            }
+        }
+        if let Some(v) = edit() { AccountEditor { scope, existing: v, onclose: move |_| edit.set(None), saved: move |_| { edit.set(None); tick += 1; } } }
+        ui::ConfirmModal {
+            open: delete_open,
+            title: i.t("tenant_providers.delete_account_title").to_string(),
+            message: delete_candidate().map(|row| i.t_with_args("tenant_providers.delete_account_confirm", &[("name", row.name.as_str())])).unwrap_or_default(),
+            confirm_text: i.t("form.delete").to_string(),
+            cancel_text: i.t("form.cancel").to_string(),
+            danger: true,
+            busy: deleting(),
+            oncancel: move |_| delete_candidate.set(None),
+            onconfirm: move |_| {
+                let Some(row) = delete_candidate() else { return };
+                if deleting() { return }
+                deleting.set(true);
+                spawn(async move {
+                    match account_control(a, u, scope, row.id, AccountAction::Delete).await {
+                        Ok(_) => { delete_candidate.set(None); tick += 1; }
+                        Err(e) => { delete_candidate.set(None); command_error.set(user_error_message(i, &e)); }
+                    }
+                    deleting.set(false);
+                });
+            },
+        }
+    }
 }
 async fn account_control(
     a: AuthStore,
@@ -517,7 +587,7 @@ fn BindingEditor(
     let mut option_query = use_signal(String::new);
     let mut option_applied = use_signal(String::new);
     let option_key = (option_page(), option_applied());
-    let options = use_resource(move || {
+    let mut options = use_resource(move || {
         let key = (option_page(), option_applied());
         async move {
             let search = key.1.clone();
@@ -591,5 +661,62 @@ fn BindingEditor(
             }
         });
     };
-    rsx! {div{class:"modal-backdrop",div{class:"modal modal-wide",role:"dialog",aria_modal:"true",aria_label:i.t("tenant_providers.binding_editor"),div{class:"modal-header",h2{{i.t("tenant_providers.binding_editor")}}} div{class:"modal-body",div{class:"toolbar",input{class:"input-field",r#type:"search",placeholder:i.t("tenant_providers.options_search"),aria_label:i.t("tenant_providers.options_search"),value:"{option_query}",oninput:move|event|option_query.set(event.value())} button{class:"btn btn-secondary",r#type:"button",onclick:move |_|{option_applied.set(option_query());option_page.set(1)},{i.t("tenant_providers.apply")}}} label{{i.t("tenant_providers.account")} select{class:"input-field",value:"{selected}",onchange:move|event|{let value=event.value();selected_account.set(selectable_accounts.iter().find(|row|row.id.to_string()==value).map(|row|(value.clone(),format!("{} · {}",row.name,row.provider))));selected.set(value);},option{value:"",disabled:true,{i.t("tenant_providers.select_account")}} if !selected().is_empty()&&!selected_is_listed{option{value:"{selected}",selected:true,"{selected_label.clone().unwrap_or_else(||selected())}"}} for row in rows.iter(){option{value:"{row.id}","{row.name} · {row.provider}"}}}} Pager{page:option_page(),total_pages:option_totals.0,total:option_totals.1,on_page:move|value|option_page.set(value)} label{{i.t("tenant_providers.selected_account_id")} input{class:"input-field",value:"{selected}",maxlength:"36",oninput:move|event|{let value=event.value();if selected_account.peek().as_ref().is_some_and(|(id,_)|id!=&value){selected_account.set(None);}selected.set(value);}}} label{class:"checkbox-field",input{r#type:"checkbox",checked:pool(),onchange:move|e|pool.set(e.checked())}{i.t("tenant_providers.pool")}} p{class:"form-hint",{i.t("tenant_providers.binding_hint")}} if let Some(Err(error))=option_data{p{class:"alert alert-error",role:"alert",{user_error_message(i,&error)}}} if !err().is_empty(){p{class:"alert alert-error",role:"alert","{err}"}}} div{class:"modal-footer",button{class:"btn btn-secondary",disabled:busy(),onclick:move |_|onclose.call(()),{i.t("form.cancel")}} button{class:"btn btn-primary",disabled:busy(),onclick:submit,{i.t("form.save")}}}}}}
+    let apply_option_search = move |event: Event<FormData>| {
+        event.prevent_default();
+        let next = option_query().trim().to_owned();
+        let same_search = option_applied() == next;
+        if same_search && option_page() == 1 {
+            options.restart();
+        } else {
+            option_page.set(1);
+            if !same_search {
+                option_applied.set(next);
+            }
+        }
+    };
+    rsx! {
+        div { class: "modal-backdrop",
+            div { class: "modal modal-wide", role: "dialog", aria_modal: "true", aria_label: i.t("tenant_providers.binding_editor"),
+                div { class: "modal-header", h2 { {i.t("tenant_providers.binding_editor")} } }
+                div { class: "modal-body",
+                    form { class: "toolbar", onsubmit: apply_option_search,
+                        input { class: "input-field", r#type: "search", placeholder: i.t("tenant_providers.options_search"), aria_label: i.t("tenant_providers.options_search"), maxlength: "255", value: "{option_query}", oninput: move |event| option_query.set(event.value()) }
+                        button { class: "btn btn-secondary", r#type: "submit", {i.t("tenant_providers.apply")} }
+                    }
+                    label { {i.t("tenant_providers.account")}
+                        select { class: "input-field", value: "{selected}", onchange: move |event| {
+                            let value = event.value();
+                            selected_account.set(selectable_accounts.iter().find(|row| row.id.to_string() == value).map(|row| (value.clone(), format!("{} · {}", row.name, row.provider))));
+                            selected.set(value);
+                        },
+                            option { value: "", disabled: true, {i.t("tenant_providers.select_account")} }
+                            if !selected().is_empty() && !selected_is_listed { option { value: "{selected}", selected: true, "{selected_label.clone().unwrap_or_else(|| selected())}" } }
+                            for row in rows.iter() { option { value: "{row.id}", "{row.name} · {row.provider}" } }
+                        }
+                    }
+                    Pager { page: option_page(), total_pages: option_totals.0, total: option_totals.1, on_page: move |value| option_page.set(value) }
+                    label { {i.t("tenant_providers.selected_account_id")}
+                        input { class: "input-field", value: "{selected}", maxlength: "36", oninput: move |event| {
+                            let value = event.value();
+                            if selected_account.peek().as_ref().is_some_and(|(id, _)| id != &value) { selected_account.set(None); }
+                            selected.set(value);
+                        } }
+                    }
+                    label { class: "checkbox-field", input { r#type: "checkbox", checked: pool(), onchange: move |e| pool.set(e.checked()) } {i.t("tenant_providers.pool")} }
+                    p { class: "form-hint", {i.t("tenant_providers.binding_hint")} }
+                    match option_data.as_ref() {
+                        None => rsx! { p { role: "status", {i.t("common.loading")} } },
+                        Some(Err(error)) => rsx! { p { class: "alert alert-error", role: "alert", {user_error_message(i, error)} } },
+                        Some(Ok(_)) if rows.is_empty() => rsx! { p { class: "form-hint", {i.t("tenant_providers.empty_accounts")} } },
+                        _ => rsx! {},
+                    }
+                    if !err().is_empty() { p { class: "alert alert-error", role: "alert", "{err}" } }
+                }
+                div { class: "modal-footer",
+                    button { class: "btn btn-secondary", r#type: "button", disabled: busy(), onclick: move |_| onclose.call(()), {i.t("form.cancel")} }
+                    button { class: "btn btn-primary", r#type: "button", disabled: busy(), onclick: submit, {i.t("form.save")} }
+                }
+            }
+        }
+    }
 }

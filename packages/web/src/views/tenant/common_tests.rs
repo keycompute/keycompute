@@ -246,6 +246,29 @@ fn technical_ids_keep_the_full_value_in_the_accessible_dom() {
 }
 
 #[test]
+fn member_picker_owns_enter_and_exposes_remote_search_states() {
+    let source = include_str!("common.rs");
+    let component = source
+        .split_once("pub fn MemberIdField")
+        .expect("member picker component")
+        .1
+        .split_once("#[component]")
+        .expect("bounded member picker source")
+        .0;
+    assert!(component.contains("should_submit_member_search(event.key(), event.is_composing())"));
+    assert!(component.contains("event.prevent_default()"));
+    assert!(component.contains("user_error_message(i18n, error)"));
+    assert!(component.contains("i18n.t(\"common.loading\")"));
+}
+
+#[test]
+fn member_picker_does_not_submit_an_ime_composition_enter() {
+    assert!(should_submit_member_search(Key::Enter, false));
+    assert!(!should_submit_member_search(Key::Enter, true));
+    assert!(!should_submit_member_search(Key::Escape, false));
+}
+
+#[test]
 fn tenant_css_overrides_shared_grid_and_modal_rules_with_specific_selectors() {
     let css = include_str!("../../../assets/main.css");
     for selector in [

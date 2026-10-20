@@ -59,17 +59,29 @@ fn PricingWorkspace(scope: WorkspaceScope) -> Element {
     let key = (scope, query(), generation());
     let loaded = current_keyed_value(&key, data.state().cloned(), data());
     let mut open = move |op| operation.set(Some(op));
+    let apply_search = move |event: Event<FormData>| {
+        event.prevent_default();
+        let next = Query {
+            search: search().trim().to_owned(),
+            page: 1,
+        };
+        if query() == next {
+            data.restart();
+        } else {
+            query.set(next);
+        }
+    };
     rsx! {div {class:"page-container tenant-pricing-admin",
         ui::PageHeader{title:i18n.t("tenant_pricing.title").to_string(),description:i18n.t("tenant_pricing.hint").to_string()}
         WorkspaceLinks{}
         WorkspaceContext{}
-        section {class:"filter-panel",aria_label:i18n.t("tenant_pricing.search"),
+        form {class:"filter-panel",aria_label:i18n.t("tenant_pricing.search"),onsubmit:apply_search,
             div{class:"filter-grid tenant-pricing-filter-grid",
                 div{class:"form-field",label {r#for:"tenant-pricing-search",{i18n.t("tenant_pricing.search")}}input {id:"tenant-pricing-search",class:"input-field",r#type:"search",value:"{search}",maxlength:"255",oninput:move|e|search.set(e.value())}}
                 div{class:"filter-actions",
-                    button {class:"btn btn-primary",onclick:move |_|query.set(Query{search:search().trim().into(),page:1}),{i18n.t("tenant_pricing.search")}}
-                    button {class:"btn btn-ghost",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
-                    button {class:"btn btn-secondary",onclick:move |_|open(Operation::Create),{i18n.t("tenant_pricing.create")}}
+                    button {class:"btn btn-primary",r#type:"submit",{i18n.t("tenant_pricing.search")}}
+                    button {class:"btn btn-ghost",r#type:"button",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
+                    button {class:"btn btn-secondary",r#type:"button",onclick:move |_|open(Operation::Create),{i18n.t("tenant_pricing.create")}}
                 }
             }
         }

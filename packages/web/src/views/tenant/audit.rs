@@ -182,7 +182,8 @@ fn TenantAuditPage(scope: WorkspaceScope, embedded: bool) -> Element {
         }
     });
     let loaded = current_keyed_value(&(scope, filter(), page()), data.state().cloned(), data());
-    let apply_filter = move |_| {
+    let apply_filter = move |event: Event<FormData>| {
+        event.prevent_default();
         let Some(actor_user_id) = optional_uuid(&actor_input()) else {
             filter_error.set(i18n.t("tenant.audit_invalid_filter").to_owned());
             return;

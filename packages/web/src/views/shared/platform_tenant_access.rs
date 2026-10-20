@@ -275,7 +275,7 @@ fn PlatformTenantAccessPanel(
     let current_key = (scope, query());
     let loaded = current_keyed_value(&current_key, data.state().cloned(), data());
     let grant_request_key = grant_search();
-    let grant_candidates = use_resource(move || {
+    let mut grant_candidates = use_resource(move || {
         let search = grant_search();
         async move {
             if search.is_empty() {
@@ -448,7 +448,12 @@ fn PlatformTenantAccessPanel(
                         h2 { class: "section-title", {i18n.t("tenants.direct_grant_title")} }
                         div { class: "section-body",
                             p { class: "text-secondary", {i18n.t("tenants.direct_grant_hint")} }
-                            form { class: "tenant-user-search", onsubmit: move |_| { grant_selected.set(None); grant_search.set(grant_search_input().trim().to_owned()); },
+                            form { class: "tenant-user-search", onsubmit: move |event: Event<FormData>| {
+                                event.prevent_default();
+                                grant_selected.set(None);
+                                let next = grant_search_input().trim().to_owned();
+                                if grant_search() == next { grant_candidates.restart(); } else { grant_search.set(next); }
+                            },
                                 div { class: "form-field filter-field-grow",
                                     label { class: "form-label", r#for: "platform-grant-search", {i18n.t("tenants.search_global_user")} }
                                     input { id: "platform-grant-search", class: "input-field", r#type: "search", maxlength: "255", value: "{grant_search_input}", disabled: busy(), placeholder: i18n.t("users.search_placeholder"), oninput: move |event| grant_search_input.set(event.value()) }
@@ -456,6 +461,7 @@ fn PlatformTenantAccessPanel(
                                 button { class: "btn btn-secondary", r#type: "submit", disabled: busy() || grant_search_input().trim().is_empty(), {i18n.t("tenant.search")} }
                             }
                             match loaded_candidates.as_ref() {
+                                None if !grant_request_key.is_empty() => rsx! { div { class: "content-loading", role: "status", span { class: "spinner", aria_hidden: "true" } span { {i18n.t("common.loading")} } } },
                                 Some(Err(value)) => rsx! { div { class: "alert alert-error", role: "alert", {user_error_message(i18n, value)} } },
                                 Some(Ok(Some(result))) if result.users.is_empty() => rsx! { div { class: "empty-state compact-empty-state", h3 { class: "empty-title", {i18n.t("tenants.no_global_user_matches")} } } },
                                 Some(Ok(Some(result))) => rsx! { div { class: "tenant-user-results", role: "listbox", aria_label: i18n.t("tenants.search_global_user"),
@@ -484,7 +490,16 @@ fn PlatformTenantAccessPanel(
                     }
                     section { class: "section",
                         h2 { class: "section-title", {i18n.t("tenant.members")} }
-                        form { class: "card filter-panel tenant-member-filter", onsubmit: move |_| query.write().set_member_search(&member_search_input()),
+                        form { class: "card filter-panel tenant-member-filter", onsubmit: move |event: Event<FormData>| {
+                            event.prevent_default();
+                            let next = member_search_input().trim().to_owned();
+                            let current = query();
+                            if current.member_search == next && current.member_page == 1 {
+                                data.restart();
+                            } else {
+                                query.write().set_member_search(&next);
+                            }
+                        },
                             div { class: "filter-grid filter-grid-health",
                                 div { class: "form-field filter-field-grow",
                                     label { class: "form-label", r#for: "platform-member-search", {i18n.t("tenant.search")} }

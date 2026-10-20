@@ -1,7 +1,7 @@
 use crate::{
     hooks::use_i18n::use_i18n,
     router::Route,
-    services::api_client::{get_client, with_auto_refresh},
+    services::api_client::{get_client, user_error_message, with_auto_refresh},
     stores::{
         auth_store::AuthStore,
         ui_store::UiStore,
@@ -392,6 +392,10 @@ pub fn OneTimeRecoveryLink(link: String, input_id: String) -> Element {
 }
 
 /// Searchable tenant-member picker with an explicit UUID fallback.
+fn should_submit_member_search(key: Key, is_composing: bool) -> bool {
+    key == Key::Enter && !is_composing
+}
+
 #[component]
 pub fn MemberIdField(
     scope: WorkspaceScope,
@@ -406,7 +410,7 @@ pub fn MemberIdField(
     let i18n = use_i18n();
     let mut search_input = use_signal(String::new);
     let mut search = use_signal(String::new);
-    let suggestions = use_resource(move || {
+    let mut suggestions = use_resource(move || {
         let request_key = (scope, search());
         let can_list_members = users.info.read().as_ref().is_some_and(|user| {
             if scope.is_platform_target() {
@@ -461,17 +465,33 @@ pub fn MemberIdField(
                     aria_label: i18n.t("tenant.member_search_placeholder"),
                     placeholder: i18n.t("tenant.member_search_placeholder"),
                     oninput: move |event| search_input.set(event.value()),
+                    onkeydown: move |event| if should_submit_member_search(event.key(), event.is_composing()) {
+                        event.prevent_default();
+                        let next = search_input().trim().to_owned();
+                        if search() == next { suggestions.restart(); } else { search.set(next); }
+                    },
                 }
-                button { class: "btn btn-secondary", r#type: "button", disabled, onclick: move |_| search.set(search_input().trim().to_owned()), {i18n.t("tenant.search")} }
+                button { class: "btn btn-secondary", r#type: "button", disabled, onclick: move |_| {
+                    let next = search_input().trim().to_owned();
+                    if search() == next { suggestions.restart(); } else { search.set(next); }
+                }, {i18n.t("tenant.search")} }
             }
-            if let Some(Ok(Some(page))) = current_suggestions.as_ref() {
-                select { id: "{select_id}", class: "input-field", value: "{value}", disabled, aria_label: i18n.t("tenant.member_picker_results"), onchange: move |event| if !event.value().is_empty() { on_input.call(event.value()); },
-                    option { value: "", {i18n.t("tenant.member_picker_choose")} }
-                    for member in page.items.iter().filter(|member| member.user_status == client_api::UserStatus::Active) {
-                        option { value: "{member.user_id}", "{member.name.as_deref().unwrap_or(&member.email)} · {member.email}" }
+            match current_suggestions.as_ref() {
+                None => rsx! { small { role: "status", {i18n.t("common.loading")} } },
+                Some(Err(error)) => rsx! { div { class: "alert alert-error", role: "alert", {user_error_message(i18n, error)} } },
+                Some(Ok(None)) => rsx! {},
+                Some(Ok(Some(page))) => {
+                    let eligible = page.items.iter().filter(|member| member.user_status == client_api::UserStatus::Active).collect::<Vec<_>>();
+                    rsx! {
+                        select { id: "{select_id}", class: "input-field", value: "{value}", disabled, aria_label: i18n.t("tenant.member_picker_results"), onchange: move |event| if !event.value().is_empty() { on_input.call(event.value()); },
+                            option { value: "", {i18n.t("tenant.member_picker_choose")} }
+                            for member in eligible.iter() {
+                                option { value: "{member.user_id}", "{member.name.as_deref().unwrap_or(&member.email)} · {member.email}" }
+                            }
+                        }
+                        if eligible.is_empty() { small { class: "form-hint", {i18n.t("tenant.member_picker_empty")} } }
                     }
-                }
-                if page.items.is_empty() { small { class: "form-hint", {i18n.t("tenant.member_picker_empty")} } }
+                },
             }
             label { class: "form-label form-label-secondary", r#for: "{input_id}", {i18n.t("tenant.member_id_manual")} }
             input {

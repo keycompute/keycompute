@@ -1,14 +1,12 @@
 use super::model_list::{ModelListEntry, ModelListModal};
 use client_api::api::admin::AccountTestResponse;
 use dioxus::prelude::*;
-use gloo_timers::future::TimeoutFuture;
 use ui::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, PageHeader, Pagination, Table,
     TableHead,
 };
 
 const PAGE_SIZE: usize = 20;
-const SEARCH_DEBOUNCE_MS: u32 = 300;
 const ACCOUNT_PRIORITY_MIN: i32 = 0;
 const ACCOUNT_PRIORITY_MAX: i32 = 10;
 const ACCOUNT_RATE_LIMIT_MIN: i32 = 1;
@@ -72,7 +70,10 @@ impl AccountListQuery {
     }
 }
 
-use crate::hooks::use_i18n::use_i18n;
+use crate::hooks::{
+    use_debounced_search::{SEARCH_MAX_LENGTH, use_debounced_search},
+    use_i18n::use_i18n,
+};
 use crate::i18n::I18n;
 use crate::services::{account_service, api_client::with_auto_refresh, debug_service};
 use crate::stores::auth_store::AuthStore;
@@ -305,6 +306,7 @@ fn AdminAccountsView() -> Element {
     let mut saving = use_signal(|| false);
     let mut error_msg = use_signal(String::new);
     let mut search = use_signal(String::new);
+    let debounced_search = use_debounced_search(search);
     let mut query = use_signal(AccountListQuery::default);
 
     // 全局重置健康状态
@@ -340,13 +342,10 @@ fn AdminAccountsView() -> Element {
     let mut selected_account_models = use_signal(Vec::<ModelListEntry>::new);
 
     use_effect(move || {
-        let next_search = search();
-        spawn(async move {
-            TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
-            if search() == next_search && query.read().search != next_search {
-                query.write().commit_search(next_search);
-            }
-        });
+        let next_search = debounced_search();
+        if query.peek().search != next_search {
+            query.write().commit_search(next_search);
+        }
     });
 
     let mut accounts = use_resource(move || {
@@ -584,6 +583,7 @@ fn AdminAccountsView() -> Element {
                             r#type: "search",
                             aria_label: i18n.t("accounts.search_placeholder"),
                             placeholder: "{i18n.t(\"accounts.search_placeholder\")}",
+                            maxlength: SEARCH_MAX_LENGTH,
                             value: "{search}",
                             oninput: move |event| *search.write() = event.value(),
                         }
@@ -1428,8 +1428,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn account_search_is_debounced_and_resets_the_database_page() {
-        assert!((250..=500).contains(&SEARCH_DEBOUNCE_MS));
+    fn account_search_resets_the_database_page() {
         let mut query = AccountListQuery {
             search: "old".to_string(),
             page: 5,

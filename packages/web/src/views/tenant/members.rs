@@ -112,6 +112,19 @@ fn TenantMembersPage() -> Element {
     });
     let key = (scope, page(), search());
     let loaded = current_keyed_value(&key, data.state().cloned(), data());
+    let apply_search = move |event: Event<FormData>| {
+        event.prevent_default();
+        let next = search_input().trim().to_owned();
+        let same_search = search() == next;
+        if same_search && page() == 1 {
+            data.restart();
+        } else {
+            page.set(1);
+            if !same_search {
+                search.set(next);
+            }
+        }
+    };
     let confirm = move |_| {
         if busy() {
             return;
@@ -185,15 +198,15 @@ fn TenantMembersPage() -> Element {
         WorkspaceLinks {}
         WorkspaceContext {}
         if !error().is_empty(){div {class:"alert alert-error",role:"alert","{error}"}}
-        div {class:"card filter-panel tenant-member-filter",
+        form {class:"card filter-panel tenant-member-filter",onsubmit:apply_search,
             div {class:"filter-grid filter-grid-health",
                 div {class:"form-field filter-field-grow",
                     label {class:"form-label",r#for:"member-search",{i18n.t("tenant.search")}}
                     input {id:"member-search",class:"input-field",r#type:"search",value:"{search_input}",maxlength:"255",oninput:move |e|search_input.set(e.value())}
                 }
                 div {class:"filter-actions",
-                    button {class:"btn btn-primary",onclick:move |_|{search.set(search_input().trim().into());page.set(1);},{i18n.t("tenant.search")}}
-                    button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
+                    button {class:"btn btn-primary",r#type:"submit",disabled:busy(),{i18n.t("tenant.search")}}
+                    button {class:"btn btn-secondary",r#type:"button",disabled:busy(),onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
                 }
             }
         }

@@ -7,7 +7,6 @@ use client_api::{
 };
 use client_api::{PlatformRole, UserStatus};
 use dioxus::prelude::*;
-use gloo_timers::future::TimeoutFuture;
 #[cfg(any(target_arch = "wasm32", test))]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,7 +15,10 @@ use ui::{
     Pagination, Table, TableHead,
 };
 
-use crate::hooks::use_i18n::use_i18n;
+use crate::hooks::{
+    use_debounced_search::{SEARCH_MAX_LENGTH, use_debounced_search},
+    use_i18n::use_i18n,
+};
 use crate::router::Route;
 use crate::services::api_client::{get_client, user_error_message, with_auto_refresh};
 use crate::stores::auth_store::AuthStore;
@@ -28,7 +30,6 @@ use crate::utils::time::format_time;
 
 const PAGE_SIZE: usize = 20;
 const BALANCE_RESERVATION_PAGE_SIZE: u64 = 20;
-const SEARCH_DEBOUNCE_MS: u32 = 300;
 #[cfg(any(target_arch = "wasm32", test))]
 const MANUAL_BALANCE_OPERATION_STORAGE_PREFIX: &str = "keyc_admin_balance_operations_v3:";
 const MANUAL_BALANCE_OPERATION_STORAGE_VERSION: u8 = 3;
@@ -1197,6 +1198,7 @@ fn AdminUsersView() -> Element {
     let auth_store = use_context::<AuthStore>();
     let mut ui_store = use_context::<UiStore>();
     let mut search = use_signal(String::new);
+    let debounced_search = use_debounced_search(search);
     let mut query = use_signal(UserListQuery::default);
     let current_user = user_store.info.read().clone();
     let can_current_user_manage_roles = current_user
@@ -1253,13 +1255,10 @@ fn AdminUsersView() -> Element {
     let mut balance_reservation_page_size = use_signal(|| BALANCE_RESERVATION_PAGE_SIZE);
 
     use_effect(move || {
-        let next_search = search();
-        spawn(async move {
-            TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
-            if search() == next_search && query.read().search != next_search {
-                query.write().commit_search(next_search);
-            }
-        });
+        let next_search = debounced_search();
+        if query.peek().search != next_search {
+            query.write().commit_search(next_search);
+        }
     });
 
     let mut users_resource = use_resource(move || {
@@ -1844,6 +1843,7 @@ fn AdminUsersView() -> Element {
                             r#type: "search",
                             aria_label: i18n.t("users.search_placeholder"),
                             placeholder: "{i18n.t(\"users.search_placeholder\")}",
+                            maxlength: SEARCH_MAX_LENGTH,
                             value: "{search}",
                             oninput: move |e| {
                                 *search.write() = e.value();
@@ -2548,12 +2548,11 @@ mod search_tests {
         ManualBalanceBindingState, ManualBalanceOperationIdentity,
         ManualBalanceOperationPersistence, ManualBalanceOperationScope,
         ManualBalanceOperationStorageError, ManualBalanceOperationTracker, PAGE_SIZE,
-        PersistedManualBalanceBinding, SEARCH_DEBOUNCE_MS, UserListQuery,
-        current_balance_details_result, finalize_manual_balance_binding_in_snapshot,
-        is_conflict_error, manual_balance_binding_from_snapshot,
-        manual_balance_operation_api_namespace, normalize_manual_balance_reason,
-        persist_manual_balance_binding_in_snapshot, rotate_manual_balance_binding_in_snapshot,
-        user_can_manage_platform_users,
+        PersistedManualBalanceBinding, UserListQuery, current_balance_details_result,
+        finalize_manual_balance_binding_in_snapshot, is_conflict_error,
+        manual_balance_binding_from_snapshot, manual_balance_operation_api_namespace,
+        normalize_manual_balance_reason, persist_manual_balance_binding_in_snapshot,
+        rotate_manual_balance_binding_in_snapshot, user_can_manage_platform_users,
     };
     use crate::utils::resource::KeyedResourceValue;
     use client_api::{
@@ -3273,11 +3272,6 @@ mod search_tests {
             .unwrap()
             .unwrap();
         assert_eq!(retry.idempotency_key, TEST_KEY_2);
-    }
-
-    #[test]
-    fn admin_search_uses_a_short_debounce() {
-        assert!((250..=500).contains(&SEARCH_DEBOUNCE_MS));
     }
 
     #[test]

@@ -133,7 +133,8 @@ fn FinanceWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
         detail.set(None);
         error.set(String::new());
     };
-    let apply = move |_| {
+    let apply = move |event: Event<FormData>| {
+        event.prevent_default();
         let mut next = query();
         let result = (|| {
             next.owner = types::owner(&owner())?;

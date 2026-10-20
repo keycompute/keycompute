@@ -113,8 +113,25 @@ pub(super) fn ResourceTable(scope: NodeAdminScope, kind: Kind) -> Element {
         }
     });
     let loaded = current_keyed_value(&(scope, kind, filter()), data.state().cloned(), data());
+    let apply_filter = move |event: Event<FormData>| {
+        event.prevent_default();
+        let mut next = draft();
+        next.search = next.search.trim().to_owned();
+        next.page = 1;
+        if next.query(kind).is_err() {
+            error.set(i18n.t("tenant_nodes.invalid_query").into());
+            return;
+        }
+        details.set(None);
+        error.set(String::new());
+        if filter() == next {
+            data.restart();
+        } else {
+            filter.set(next);
+        }
+    };
     rsx! {section {class:"tenant-node-resources",
-        div {class:"card filter-panel tenant-node-filters",
+        form {class:"card filter-panel tenant-node-filters",onsubmit:apply_filter,
             div {class:"filter-grid filter-grid-nodes",
                 if let NodeAdminScope::Tenant(tenant_scope)=scope {
                     MemberIdField {scope:tenant_scope,input_id:"node-owner".to_string(),label:i18n.t("tenant_nodes.owner").to_string(),value:draft().owner,on_input:move |value|draft.write().owner=value}
@@ -137,9 +154,7 @@ pub(super) fn ResourceTable(scope: NodeAdminScope, kind: Kind) -> Element {
                 }
                 if kind==Kind::Tasks{label {class:"checkbox-field",input {id:"node-archived",r#type:"checkbox",checked:draft().archived,onchange:move |e|draft.write().archived=e.checked()} span {{i18n.t("tenant_nodes.archived_only")}}}}
                 div {class:"filter-actions",
-                    button {class:"btn btn-primary",r#type:"button",onclick:move |_|{let mut next=draft();next.page=1;if next.query(kind).is_err(){error.set(i18n.t("tenant_nodes.invalid_query").into());return;}
-                        details.set(None);error.set(String::new());if filter()==next{data.restart();}else{filter.set(next);}
-                    },{i18n.t("operations.apply")}}
+                    button {class:"btn btn-primary",r#type:"submit",{i18n.t("operations.apply")}}
                     button {class:"btn btn-secondary",r#type:"button",onclick:move |_|{details.set(None);data.restart();},{i18n.t("tenant.reload")}}
                 }
             }

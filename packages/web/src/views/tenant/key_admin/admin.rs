@@ -116,7 +116,10 @@ fn KeyWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
             if !embedded { Link{class:"btn btn-ghost",to:Route::OwnerKeyIssuance{},{i18n.t("tenant_keys.my_requests")}} }
             button{class:"btn btn-primary",onclick:move |_|operation.set(Some(Operation::Request)),{i18n.t("tenant_keys.request")}}
         }
-        form{class:"filter-panel",aria_label:i18n.t("tenant_keys.filter"),onsubmit:move |_|match types::owner_filter(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;operation.set(None);error.set(String::new());},Err(e)=>error.set(user_error_message(i18n, &e))},
+        form{class:"filter-panel",aria_label:i18n.t("tenant_keys.filter"),onsubmit:move |event: Event<FormData>|{
+            event.prevent_default();
+            match types::owner_filter(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;operation.set(None);error.set(String::new());},Err(e)=>error.set(user_error_message(i18n, &e))}
+        },
             div{class:"filter-grid tenant-key-filter-grid",
                 MemberIdField{scope,input_id:"tenant-key-owner".to_string(),label:i18n.t("tenant_keys.owner").to_string(),value:owner(),on_input:move|value|owner.set(value)}
                 if query().tab==Tab::Keys{label{class:"checkbox-field",input{r#type:"checkbox",checked:query().revoked,onchange:move|e|{query.write().revoked=e.checked();query.write().page=1;}}{i18n.t("tenant_keys.include_revoked")}}}

@@ -8,7 +8,10 @@ use client_api::api::admin::{
 use dioxus::prelude::*;
 use ui::{Button, ButtonVariant};
 
-use crate::hooks::use_i18n::use_i18n;
+use crate::hooks::{
+    use_debounced_search::{SEARCH_MAX_LENGTH, use_debounced_search_page},
+    use_i18n::use_i18n,
+};
 use crate::services::api_client::user_error_message;
 use crate::services::{account_service, api_client::with_auto_refresh, tenant_service};
 use crate::stores::auth_store::AuthStore;
@@ -30,14 +33,16 @@ fn runtime_health_key(status: Option<&str>) -> &'static str {
 pub fn PassthroughBindings() -> Element {
     let i = use_i18n();
     let auth = use_context::<AuthStore>();
-    let mut page = use_signal(|| 1u32);
-    let mut query = use_signal(String::new);
+    let mut query_input = use_signal(String::new);
+    let mut search_page = use_debounced_search_page(query_input);
     let mut refresh = use_signal(|| 0u32);
     let mut editor = use_signal(|| None::<Option<PassthroughBindingInfo>>);
     let session = (auth.state)().session_id;
-    let list_key = (query(), page(), refresh(), session);
+    let current_query = search_page();
+    let list_key = (current_query.0.clone(), current_query.1, refresh(), session);
     let resource = use_resource(move || {
-        let key = (query(), page(), refresh(), (auth.state)().session_id);
+        let query = search_page();
+        let key = (query.0, query.1, refresh(), (auth.state)().session_id);
         async move {
             let params = PassthroughBindingQueryParams::new()
                 .with_page(key.1)
@@ -55,6 +60,7 @@ pub fn PassthroughBindings() -> Element {
     let page_data = data.as_ref().and_then(|r| r.as_ref().ok());
     let rows = page_data.map(|p| p.bindings.clone()).unwrap_or_default();
     let total_pages = page_data.map(|p| p.total_pages.max(1)).unwrap_or(1);
+    let page = current_query.1;
     let editor_key = editor()
         .as_ref()
         .and_then(|v| v.as_ref().map(|b| b.id.clone()))
@@ -72,7 +78,7 @@ pub fn PassthroughBindings() -> Element {
                 }
             }
             div { class: "toolbar",
-                input { class: "input-field", r#type: "search", value: "{query}", placeholder: i.t("common.search"), aria_label: i.t("common.search"), oninput: move |e| { query.set(e.value()); page.set(1); } }
+                input { class: "input-field", r#type: "search", value: "{query_input}", maxlength: SEARCH_MAX_LENGTH, placeholder: i.t("common.search"), aria_label: i.t("common.search"), oninput: move |e| query_input.set(e.value()) }
                 button { class: "btn btn-secondary", r#type: "button", onclick: move |_| refresh += 1, {i.t("common.refresh")} }
             }
             match data {
@@ -91,9 +97,9 @@ pub fn PassthroughBindings() -> Element {
                         }
                     }
                     div { class: "table-pagination",
-                        button { class: "btn btn-ghost btn-sm", disabled: page() <= 1, onclick: move |_| page -= 1, {i.t("table.previous")} }
+                        button { class: "btn btn-ghost btn-sm", disabled: page <= 1, onclick: move |_| search_page.write().1 -= 1, {i.t("table.previous")} }
                         span { "{page} / {total_pages}" }
-                        button { class: "btn btn-ghost btn-sm", disabled: page() >= total_pages, onclick: move |_| page += 1, {i.t("table.next")} }
+                        button { class: "btn btn-ghost btn-sm", disabled: page >= total_pages, onclick: move |_| search_page.write().1 += 1, {i.t("table.next")} }
                     }
                 },
             }
@@ -224,15 +230,21 @@ fn PassthroughBindingEditor(
     let original = existing.clone();
     let mut pool_enabled =
         use_signal(move || original.as_ref().map(|v| v.pool_enabled).unwrap_or(false));
-    let mut account_query = use_signal(String::new);
-    let mut account_page = use_signal(|| 1u32);
-    let mut tenant_query = use_signal(String::new);
-    let mut tenant_page = use_signal(|| 1u32);
+    let mut account_query_input = use_signal(String::new);
+    let mut account_search_page = use_debounced_search_page(account_query_input);
+    let mut tenant_query_input = use_signal(String::new);
+    let mut tenant_search_page = use_debounced_search_page(tenant_query_input);
     let mut pending = use_signal(|| false);
     let mut error = use_signal(String::new);
-    let account_key = (account_query(), account_page(), (auth.state)().session_id);
+    let account_query = account_search_page();
+    let account_key = (
+        account_query.0.clone(),
+        account_query.1,
+        (auth.state)().session_id,
+    );
     let accounts = use_resource(move || {
-        let key = (account_query(), account_page(), (auth.state)().session_id);
+        let query = account_search_page();
+        let key = (query.0, query.1, (auth.state)().session_id);
         async move {
             let params = PassthroughAccountOptionsQuery::new()
                 .with_search(key.0.clone())
@@ -246,9 +258,15 @@ fn PassthroughBindingEditor(
             KeyedResourceValue::new(key, result)
         }
     });
-    let tenant_key = (tenant_query(), tenant_page(), (auth.state)().session_id);
+    let tenant_query = tenant_search_page();
+    let tenant_key = (
+        tenant_query.0.clone(),
+        tenant_query.1,
+        (auth.state)().session_id,
+    );
     let tenants = use_resource(move || {
-        let key = (tenant_query(), tenant_page(), (auth.state)().session_id);
+        let query = tenant_search_page();
+        let key = (query.0, query.1, (auth.state)().session_id);
         async move {
             let params = client_api::api::tenant::TenantQueryParams::new()
                 .with_search(key.0.clone())
@@ -300,10 +318,12 @@ fn PassthroughBindingEditor(
         .as_ref()
         .and_then(|r| r.as_ref().ok())
         .map_or(1, |p| p.total_pages.max(1));
+    let account_page = account_query.1;
     let tenant_pages = tenant_data
         .as_ref()
         .and_then(|r| r.as_ref().ok())
         .map_or(1, |p| p.total_pages.max(1));
+    let tenant_page = tenant_query.1;
     let account_options_for_change = account_choices.clone();
     let tenant_options_for_change = tenant_choices.clone();
     let original = existing.clone();
@@ -368,7 +388,7 @@ fn PassthroughBindingEditor(
                     if !error().is_empty(){div{class:"alert alert-error",role:"alert","{error}"}}
                     div {class:"form-group",
                         label {class:"form-label",r#for:"pt-account-choice",{i.t("passthrough.account")}}
-                        input {class:"input-field",r#type:"search",aria_label:i.t("passthrough.search_account"),placeholder:i.t("passthrough.search_account"),value:"{account_query}",disabled:pending(),oninput:move|e|{account_query.set(e.value());account_page.set(1);}}
+                        input {class:"input-field",r#type:"search",aria_label:i.t("passthrough.search_account"),placeholder:i.t("passthrough.search_account"),maxlength:SEARCH_MAX_LENGTH,value:"{account_query_input}",disabled:pending(),oninput:move|e|account_query_input.set(e.value())}
                         select {id:"pt-account-choice",class:"input-field",aria_label:i.t("passthrough.choose_account"),value:"{account_id}",disabled:pending(),onchange:move|e|{
                             let value=e.value();
                             if value.is_empty(){account_id.set(String::new());remembered_account.set(None);}
@@ -379,9 +399,9 @@ fn PassthroughBindingEditor(
                             for option in &account_choices {option{key:"{option.id}",value:"{option.id}",selected:option.id==account_id(),"{option.name}"}}
                         }
                         div {class:"picker-pagination",
-                            button{class:"btn btn-ghost btn-sm",r#type:"button",disabled:pending()||account_page()<=1,onclick:move|_|account_page-=1,{i.t("table.previous")}}
+                            button{class:"btn btn-ghost btn-sm",r#type:"button",disabled:pending()||account_page<=1,onclick:move|_|account_search_page.write().1-=1,{i.t("table.previous")}}
                             small {"{account_page} / {account_pages}"}
-                            button{class:"btn btn-ghost btn-sm",r#type:"button",disabled:pending()||account_page()>=account_pages,onclick:move|_|account_page+=1,{i.t("table.next")}}
+                            button{class:"btn btn-ghost btn-sm",r#type:"button",disabled:pending()||account_page>=account_pages,onclick:move|_|account_search_page.write().1+=1,{i.t("table.next")}}
                         }
                         match &account_data {
                             None=>rsx!{small{role:"status",{i.t("common.loading")}}},
@@ -398,7 +418,7 @@ fn PassthroughBindingEditor(
                     }
                     div{class:"form-group",
                         label{class:"form-label",r#for:"pt-tenant-choice",{i.t("passthrough.tenant")}}
-                        input{class:"input-field",r#type:"search",aria_label:i.t("passthrough.search_tenant"),placeholder:i.t("passthrough.search_tenant"),value:"{tenant_query}",disabled:pending(),oninput:move|e|{tenant_query.set(e.value());tenant_page.set(1);}}
+                        input{class:"input-field",r#type:"search",aria_label:i.t("passthrough.search_tenant"),placeholder:i.t("passthrough.search_tenant"),maxlength:SEARCH_MAX_LENGTH,value:"{tenant_query_input}",disabled:pending(),oninput:move|e|tenant_query_input.set(e.value())}
                         select{id:"pt-tenant-choice",class:"input-field",aria_label:i.t("passthrough.choose_tenant"),value:"{tenant_id}",disabled:pending(),onchange:move|e|{
                             let value=e.value();
                             if value.is_empty(){tenant_id.set(String::new());remembered_tenant.set(None);}
@@ -409,9 +429,9 @@ fn PassthroughBindingEditor(
                             for option in &tenant_choices {option{key:"{option.id}",value:"{option.id}",selected:option.id==tenant_id(),"{option.name}"}}
                         }
                         div{class:"picker-pagination",
-                            button{class:"btn btn-ghost btn-sm",r#type:"button",disabled:pending()||tenant_page()<=1,onclick:move|_|tenant_page-=1,{i.t("table.previous")}}
+                            button{class:"btn btn-ghost btn-sm",r#type:"button",disabled:pending()||tenant_page<=1,onclick:move|_|tenant_search_page.write().1-=1,{i.t("table.previous")}}
                             small{"{tenant_page} / {tenant_pages}"}
-                            button{class:"btn btn-ghost btn-sm",r#type:"button",disabled:pending()||tenant_page()>=tenant_pages,onclick:move|_|tenant_page+=1,{i.t("table.next")}}
+                            button{class:"btn btn-ghost btn-sm",r#type:"button",disabled:pending()||tenant_page>=tenant_pages,onclick:move|_|tenant_search_page.write().1+=1,{i.t("table.next")}}
                         }
                         match &tenant_data {
                             None=>rsx!{small{role:"status",{i.t("common.loading")}}},

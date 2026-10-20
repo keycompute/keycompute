@@ -2,14 +2,12 @@ use client_api::api::tenant::{
     CreateTenantRequest, TenantInfo, TenantQueryParams, UpdateTenantRequest,
 };
 use dioxus::prelude::*;
-use gloo_timers::future::TimeoutFuture;
 use ui::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ConfirmModal, PageHeader, Pagination,
     Table, TableHead,
 };
 
 const PAGE_SIZE: usize = 20;
-const SEARCH_DEBOUNCE_MS: u32 = 300;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct TenantListQuery {
@@ -39,7 +37,10 @@ impl TenantListQuery {
 }
 
 use crate::app::UserBootstrap;
-use crate::hooks::use_i18n::use_i18n;
+use crate::hooks::{
+    use_debounced_search::{SEARCH_MAX_LENGTH, use_debounced_search},
+    use_i18n::use_i18n,
+};
 use crate::router::Route;
 use crate::services::{
     api_client::{user_error_message, with_auto_refresh},
@@ -91,6 +92,7 @@ pub fn Tenants() -> Element {
     }
 
     let mut search = use_signal(String::new);
+    let debounced_search = use_debounced_search(search);
     let mut query = use_signal(TenantListQuery::new);
     let mut show_create = use_signal(|| false);
     let mut delete_candidate = use_signal(|| None::<TenantInfo>);
@@ -106,13 +108,10 @@ pub fn Tenants() -> Element {
     });
 
     use_effect(move || {
-        let next_search = search();
-        spawn(async move {
-            TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
-            if search() == next_search && query.read().search != next_search {
-                query.write().commit_search(next_search);
-            }
-        });
+        let next_search = debounced_search();
+        if query.peek().search != next_search {
+            query.write().commit_search(next_search);
+        }
     });
 
     let mut tenants = use_resource(move || {
@@ -157,7 +156,9 @@ pub fn Tenants() -> Element {
                         input {
                             class: "input-field",
                             r#type: "search",
+                            aria_label: i18n.t("tenants.search_placeholder"),
                             placeholder: "{i18n.t(\"tenants.search_placeholder\")}",
+                            maxlength: SEARCH_MAX_LENGTH,
                             value: "{search}",
                             oninput: move |e| {
                                 *search.write() = e.value();
@@ -586,7 +587,7 @@ fn TenantCreateModal(
 
 #[cfg(test)]
 mod tests {
-    use super::{PAGE_SIZE, SEARCH_DEBOUNCE_MS, TenantListQuery, can_delete_tenant};
+    use super::{PAGE_SIZE, TenantListQuery, can_delete_tenant};
     use client_api::api::tenant::TenantInfo;
 
     fn tenant(user_count: i64, account_count: i64) -> TenantInfo {
@@ -602,11 +603,6 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
-    }
-
-    #[test]
-    fn tenant_search_uses_a_short_debounce() {
-        assert!((250..=500).contains(&SEARCH_DEBOUNCE_MS));
     }
 
     #[test]

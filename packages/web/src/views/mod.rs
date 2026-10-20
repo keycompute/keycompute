@@ -19,6 +19,149 @@ pub use home::Home;
 pub use usage::Usage;
 
 #[cfg(test)]
+mod search_interaction_tests {
+    fn compact(value: &str) -> String {
+        value
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect()
+    }
+
+    fn assert_search_form_contract(
+        name: &str,
+        source: &str,
+        start: &str,
+        end: &str,
+        handler: Option<&str>,
+    ) {
+        let source = compact(source);
+        let start = compact(start);
+        let end = compact(end);
+        let form_body = source
+            .split_once(&start)
+            .unwrap_or_else(|| panic!("{name} search form start marker is missing"))
+            .1
+            .split_once(&end)
+            .unwrap_or_else(|| panic!("{name} search form end marker is missing"))
+            .0;
+        let form = format!("{start}{form_body}");
+        assert!(
+            form.contains("r#type:\"submit\""),
+            "{name} has no explicit submit button"
+        );
+        if let Some(handler) = handler {
+            assert!(
+                form.contains(&format!("onsubmit:{handler}")),
+                "{name} is not bound to {handler}"
+            );
+            assert!(
+                source.contains(&format!(
+                    "let{handler}=move|event:Event<FormData>|{{event.prevent_default();"
+                )),
+                "{name} handler permits native navigation"
+            );
+        } else {
+            assert!(
+                form.contains("onsubmit:move|event:Event<FormData>|{event.prevent_default();"),
+                "{name} inline handler permits native navigation"
+            );
+        }
+    }
+
+    #[test]
+    fn every_submitted_search_prevents_navigation_and_supports_enter() {
+        for (name, source, start, end, handler) in [
+            (
+                "operations health",
+                include_str!("operations/health.rs"),
+                "form { class: \"card filter-panel operations-filters\"",
+                "if !error().is_empty()",
+                Some("apply_filter"),
+            ),
+            (
+                "platform tenant direct grant",
+                include_str!("shared/platform_tenant_access.rs"),
+                "form { class: \"tenant-user-search\"",
+                "match loaded_candidates.as_ref()",
+                None,
+            ),
+            (
+                "platform tenant members",
+                include_str!("shared/platform_tenant_access.rs"),
+                "form { class: \"card filter-panel tenant-member-filter\"",
+                "div { class: \"table-pagination-panel table-pagination-frame\"",
+                None,
+            ),
+            (
+                "tenant audit",
+                include_str!("tenant/audit.rs"),
+                "form { class:\"filter-panel\", onsubmit:apply_filter",
+                "if !filter_error().is_empty()",
+                Some("apply_filter"),
+            ),
+            (
+                "tenant finance",
+                include_str!("tenant/finance/mod.rs"),
+                "form{class:\"filter-panel\",aria_label:i18n.t(\"tenant_finance.apply\"),onsubmit:apply",
+                "div{class:\"data-meta-row\"",
+                Some("apply"),
+            ),
+            (
+                "tenant key filters",
+                include_str!("tenant/key_admin/admin.rs"),
+                "form{class:\"filter-panel\",aria_label:i18n.t(\"tenant_keys.filter\")",
+                "div{class:\"data-meta-row\"",
+                None,
+            ),
+            (
+                "tenant key owner",
+                include_str!("tenant/key_admin/editor.rs"),
+                "form{class:\"key-owner-search-row\"",
+                "match loaded",
+                Some("apply_search"),
+            ),
+            (
+                "tenant members",
+                include_str!("tenant/members.rs"),
+                "form {class:\"card filter-panel tenant-member-filter\"",
+                "match loaded",
+                Some("apply_search"),
+            ),
+            (
+                "tenant nodes",
+                include_str!("tenant/node_admin/table.rs"),
+                "form {class:\"card filter-panel tenant-node-filters\"",
+                "match loaded",
+                Some("apply_filter"),
+            ),
+            (
+                "tenant pricing",
+                include_str!("tenant/pricing_admin/mod.rs"),
+                "form {class:\"filter-panel\",aria_label:i18n.t(\"tenant_pricing.search\")",
+                "match loaded",
+                Some("apply_search"),
+            ),
+            (
+                "tenant provider accounts",
+                include_str!("tenant/provider_admin/mod.rs"),
+                "form { class: \"toolbar\", onsubmit: apply_search",
+                "if !command_error().is_empty()",
+                Some("apply_search"),
+            ),
+            (
+                "tenant provider binding options",
+                include_str!("tenant/provider_admin/mod.rs"),
+                "form { class: \"toolbar\", onsubmit: apply_option_search",
+                "label { {i.t(\"tenant_providers.account\")} ",
+                Some("apply_option_search"),
+            ),
+        ] {
+            assert_search_form_contract(name, source, start, end, handler);
+        }
+    }
+}
+
+#[cfg(test)]
 mod pagination_layout_tests {
     /// 全部含分页页脚的视图源文件（路径相对于本文件所在目录）。
     ///

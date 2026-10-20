@@ -80,10 +80,29 @@ pub(super) fn HealthPanel(scope: OperationsScope) -> Element {
         }
     });
     let loaded = current_keyed_value(&(scope, filter()), data.state().cloned(), data());
+    let apply_filter = move |event: Event<FormData>| {
+        event.prevent_default();
+        let next = Filter {
+            search: search().trim().into(),
+            status: status(),
+            offset: 0,
+        };
+        if next.query().is_none() {
+            error.set(i18n.t("operations.invalid_search").into());
+            return;
+        }
+        error.set(String::new());
+        selected.set(None);
+        if filter() == next {
+            data.restart();
+        } else {
+            filter.set(next);
+        }
+    };
 
     rsx! {
         section { class: "operations-health",
-            div { class: "card filter-panel operations-filters",
+            form { class: "card filter-panel operations-filters", onsubmit: apply_filter,
                 div { class: "filter-grid filter-grid-health",
                     div { class: "form-field filter-field-grow",
                         label { class: "form-label", r#for: "operations-search",
@@ -116,21 +135,7 @@ pub(super) fn HealthPanel(scope: OperationsScope) -> Element {
                     div { class: "filter-actions",
                         button {
                             class: "btn btn-primary",
-                            r#type: "button",
-                            onclick: move |_| {
-                                let next = Filter {
-                                    search: search().trim().into(),
-                                    status: status(),
-                                    offset: 0,
-                                };
-                                if next.query().is_none() {
-                                    error.set(i18n.t("operations.invalid_search").into());
-                                    return;
-                                }
-                                error.set(String::new());
-                                selected.set(None);
-                                if filter() == next { data.restart(); } else { filter.set(next); }
-                            },
+                            r#type: "submit",
                             {i18n.t("operations.apply")}
                         }
                         button {

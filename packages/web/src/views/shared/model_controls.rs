@@ -1,7 +1,10 @@
 //! Shared language and tenant context for the three-mode administration flow.
 use crate::services::api_client::user_error_message;
 use crate::{
-    hooks::use_i18n::use_i18n,
+    hooks::{
+        use_debounced_search::{SEARCH_MAX_LENGTH, use_debounced_search_page},
+        use_i18n::use_i18n,
+    },
     i18n::I18n,
     services::{api_client::with_auto_refresh, tenant_service},
     stores::auth_store::AuthStore,
@@ -36,10 +39,11 @@ pub fn TenantPicker(
 ) -> Element {
     let i = use_i18n();
     let auth = use_context::<AuthStore>();
-    let mut search = use_signal(String::new);
-    let mut page = use_signal(|| 1u32);
+    let mut search_input = use_signal(String::new);
+    let mut search_page = use_debounced_search_page(search_input);
     let request = use_resource(move || {
-        let key = (search(), page(), (auth.state)().session_id);
+        let query = search_page();
+        let key = (query.0, query.1, (auth.state)().session_id);
         async move {
             let query = client_api::api::tenant::TenantQueryParams::new()
                 .with_search(key.0.clone())
@@ -53,9 +57,11 @@ pub fn TenantPicker(
             KeyedResourceValue::new(key, result)
         }
     });
-    let key = (search(), page(), (auth.state)().session_id);
+    let query = search_page();
+    let key = (query.0.clone(), query.1, (auth.state)().session_id);
     use_effect(move || {
-        let current = (search(), page(), (auth.state)().session_id);
+        let query = search_page();
+        let current = (query.0, query.1, (auth.state)().session_id);
         if let Some(Ok(data)) = current_keyed_value(&current, request.state().cloned(), request())
             && let Some(t) = data.tenants.iter().find(|v| v.id == selected())
             && label() != t.name
@@ -73,6 +79,7 @@ pub fn TenantPicker(
         .as_ref()
         .and_then(|v| v.as_ref().ok())
         .map_or(0, |v| v.total_pages);
+    let page = query.1;
     let selected_in_page = active_rows
         .iter()
         .find(|v| v.id == selected())
@@ -83,7 +90,7 @@ pub fn TenantPicker(
             label {class:"form-label", {i.t("models.consumer_tenant")} }
             strong {class:"kc-context-name", "{displayed_name}" }
             div {class:"kc-picker-controls",
-                input {class:"input-field",r#type:"search",aria_label:i.t("models.search_tenant"),placeholder:i.t("models.search_tenant"),value:"{search}",disabled,oninput:move|e|{search.set(e.value());page.set(1);}}
+                input {class:"input-field",r#type:"search",aria_label:i.t("models.search_tenant"),placeholder:i.t("models.search_tenant"),maxlength:SEARCH_MAX_LENGTH,value:"{search_input}",disabled,oninput:move|e|search_input.set(e.value())}
                 select {class:"input-field",aria_label:i.t("models.choose_tenant"),value:"{selected}",disabled,onchange:move|e|{
                     if let Some(t)=active_rows.iter().find(|v|v.id==e.value()) {selected.set(t.id.clone());label.set(t.name.clone());onchange.call(());}
                 },
@@ -91,9 +98,9 @@ pub fn TenantPicker(
                     if selected().is_empty() {option {value:"",{i.t("models.choose_tenant")}}}
                     if let Some(Ok(data))=&result {for tenant in &data.tenants {option {value:"{tenant.id}","{tenant.name}"}}}
                 }
-                button {class:"btn btn-ghost btn-sm",disabled:disabled||page()<=1,r#type:"button",onclick:move|_|{page-=1;},{i.t("table.previous")}}
+                button {class:"btn btn-ghost btn-sm",disabled:disabled||page<=1,r#type:"button",onclick:move|_|search_page.write().1-=1,{i.t("table.previous")}}
                 span {"{page} / {pages.max(1)}"}
-                button {class:"btn btn-ghost btn-sm",disabled:disabled||page()>=pages,r#type:"button",onclick:move|_|{page+=1;},{i.t("table.next")}}
+                button {class:"btn btn-ghost btn-sm",disabled:disabled||page>=pages,r#type:"button",onclick:move|_|search_page.write().1+=1,{i.t("table.next")}}
             }
             match result {
                 Some(Err(e))=>rsx!{div{class:"alert alert-error",role:"alert",{user_error_message(i, &e)}}},
