@@ -2582,6 +2582,10 @@ mod tests {
                 vec!["messages".to_string()],
             ),
         ] {
+            let upstream_api_key_encrypted =
+                keycompute_runtime::encrypt_api_key(&format!("local-tpm-{provider}-test-key"))
+                    .expect("protocol account key should be encrypted")
+                    .into_inner();
             keycompute_db::Account::create(
                 &pool,
                 &keycompute_db::CreateAccountRequest {
@@ -2589,7 +2593,7 @@ mod tests {
                     provider: provider.to_string(),
                     name,
                     endpoint: format!("https://{provider}.invalid/v1"),
-                    upstream_api_key_encrypted: "plain-test-key".to_string(),
+                    upstream_api_key_encrypted,
                     upstream_api_key_preview: "plain****".to_string(),
                     rpm_limit: Some(100),
                     tpm_limit: Some(10),
