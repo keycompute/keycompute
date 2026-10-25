@@ -188,6 +188,10 @@ async fn revoked_member_wallet_is_private_but_remains_inspectable_by_its_tenant_
 #[tokio::test]
 async fn wallet_admin_and_platform_projections_recheck_current_role_and_lifecycle() {
     let mut f = Fixture::new().await;
+    let root = User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
+        .await
+        .unwrap()
+        .unwrap();
     let tx = f.db.begin().await.unwrap();
     let elevated = TenantMembership::set_role(
         &tx,
@@ -195,7 +199,7 @@ async fn wallet_admin_and_platform_projections_recheck_current_role_and_lifecycl
         f.other.id,
         TenantRole::Admin,
         1,
-        &actor(f.a.admin_user_id),
+        &platform_actor(root.id),
     )
     .await
     .unwrap();
@@ -206,10 +210,6 @@ async fn wallet_admin_and_platform_projections_recheck_current_role_and_lifecycl
             .await
             .is_ok()
     );
-    let root = User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
-        .await
-        .unwrap()
-        .unwrap();
     let tx = f.db.begin().await.unwrap();
     TenantMembership::set_role(
         &tx,

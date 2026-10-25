@@ -31,14 +31,12 @@ fn status_label(i18n: crate::i18n::I18n, status: &str) -> String {
 const PAGE_SIZE: u32 = 20;
 #[derive(Clone, Copy, PartialEq)]
 enum Action {
-    Role,
     Suspend,
     Remove,
 }
 impl Action {
     fn label(self) -> &'static str {
         match self {
-            Self::Role => "tenant.promote_admin",
             Self::Suspend => "tenant.change_status",
             Self::Remove => "tenant.remove",
         }
@@ -146,18 +144,15 @@ fn TenantMembersPage() -> Element {
                             .await?;
                         row.user_id == scope.user_id && row.authz_version != before.authz_version
                     }
-                    Action::Role | Action::Suspend => {
+                    Action::Suspend => {
                         let patch = MemberPatch {
                             expected_authz_version: before.authz_version,
-                            tenant_role: (command.action == Action::Role)
-                                .then_some(TenantRole::Admin),
-                            status: (command.action == Action::Suspend).then_some(
-                                if before.membership_status == MembershipStatus::Active {
-                                    MembershipStatus::Suspended
-                                } else {
-                                    MembershipStatus::Active
-                                },
-                            ),
+                            tenant_role: None,
+                            status: Some(if before.membership_status == MembershipStatus::Active {
+                                MembershipStatus::Suspended
+                            } else {
+                                MembershipStatus::Active
+                            }),
                         };
                         let row = api.patch_member(before.user_id, &patch, &token).await?;
                         row.user_id == scope.user_id && row.authz_version != before.authz_version
@@ -218,7 +213,7 @@ fn TenantMembersPage() -> Element {
                     div {class:"table-container",table {class:"table",thead {tr {th {{i18n.t("tenant.user")}} th {{i18n.t("tenant.role")}} th {{i18n.t("tenant.membership_status")}} th {{i18n.t("tenant.user_status")}} th {{i18n.t("tenant.actions")}}}}
                         tbody {
                             for member in value.page.items.iter() {
-                                {let role_member=member.clone();let suspend_member=member.clone();let remove_member=member.clone();
+                                {let suspend_member=member.clone();let remove_member=member.clone();
                                     let removed=member.membership_status==MembershipStatus::Removed;
                                     let manageable=can_manage_member(member);
                                     rsx!{tr {key:"{member.user_id}",
@@ -228,7 +223,6 @@ fn TenantMembersPage() -> Element {
                                         td {{status_label(i18n, member.user_status.as_str())}}
                                         td {
                                             if manageable {
-                                                button {class:"btn btn-secondary btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:role_member.clone(),action:Action::Role})),{i18n.t("tenant.promote_admin")}}
                                                 button {class:"btn btn-secondary btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:suspend_member.clone(),action:Action::Suspend})),{i18n.t("tenant.change_status")}}
                                                 button {class:"btn btn-danger btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:remove_member.clone(),action:Action::Remove})),{i18n.t("tenant.remove")}}
                                             }

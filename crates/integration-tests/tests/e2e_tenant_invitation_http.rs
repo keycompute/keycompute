@@ -166,6 +166,25 @@ async fn invitation_create_reports_notification_state_and_never_lists_secret() {
 }
 
 #[tokio::test]
+async fn tenant_invitation_cannot_grant_administrator_role() {
+    let mut f = InvitationFixture::new().await;
+    let (status, _) = f
+        .request(
+            Method::POST,
+            format!("/api/v1/tenants/{}/invitations", f.tenant.id),
+            &f.inviter_token,
+            Some(json!({
+                "email": f.invitee.email,
+                "tenant_role": "admin",
+                "expires_in_seconds": 3600
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    f.guard.cleanup().await.unwrap();
+}
+
+#[tokio::test]
 async fn invitation_acceptance_is_one_time_and_email_verified() {
     let mut f = InvitationFixture::new().await;
     let (_, created) = f

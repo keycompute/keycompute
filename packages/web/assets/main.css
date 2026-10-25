@@ -1920,11 +1920,39 @@ input, textarea, select {
   border-radius: 4px;
 }
 
+.cached-key-secret {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 0;
+}
+
+.kc-api-reveal-confirm {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  flex: 1 0 100%;
+  gap: 8px;
+  align-items: center;
+  min-width: 360px;
+  padding-top: 4px;
+}
+
+.kc-api-reveal-confirm .form-input {
+  min-width: 0;
+  height: 36px;
+}
+
 @media (max-width: 780px) {
   .kc-api-header,
   .kc-api-actions,
   .kc-api-table-meta {
     align-items: flex-start;
+  }
+
+  .kc-api-reveal-confirm {
+    grid-template-columns: 1fr;
+    min-width: 220px;
   }
 
   .kc-api-success-panel {

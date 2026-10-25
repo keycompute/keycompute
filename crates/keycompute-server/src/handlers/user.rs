@@ -19,13 +19,17 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{Duration, Utc};
-use keycompute_auth::{PasswordHasher, PasswordValidator, ProduceAiKeyValidator};
+use keycompute_auth::{
+    DEFAULT_LOCK_DURATION_MINUTES, DEFAULT_MAX_FAILED_ATTEMPTS, PasswordHasher, PasswordValidator,
+    ProduceAiKeyValidator,
+};
 use keycompute_db::models::{
     api_key::{CreateProduceAiKeyRequest, ProduceAiKey},
     usage_log::UserUsageScope,
     user::User,
     user_credential::UserCredential,
 };
+use keycompute_ratelimit::{RateLimitConfig, RateLimitKey};
 use rust_decimal::prelude::ToPrimitive;
 use sea_orm::TransactionTrait;
 use serde::{Deserialize, Serialize};
@@ -46,7 +50,7 @@ pub async fn get_current_user(
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProfileRequest {
     pub name: Option<String>,
@@ -259,6 +263,7 @@ pub struct ApiKeyInfo {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub is_active: bool,
+    pub revoked: bool,
     pub expires_at: Option<String>,
 }
 
@@ -291,7 +296,8 @@ pub struct ApiKeyPageResponse {
 /// GET /api/v1/keys
 /// - 普通用户：只返回自己的 Keys
 /// - Admin: the same ownership restriction applies.
-/// - include_revoked: 是否包含已撤销的 Key（默认 false，只返回活跃的）
+/// - include_revoked: 是否包含内部轮换产生的已撤销 Key；默认返回所有未撤销
+///   Key，并通过 `is_active` 区分仍可用和已过期状态。
 pub async fn list_my_api_keys(
     auth: ConsoleAuth,
     State(state): State<AppState>,
@@ -323,18 +329,22 @@ pub async fn list_my_api_keys(
 
     let api_keys: Vec<ApiKeyInfo> = keys
         .into_iter()
-        .map(|k| ApiKeyInfo {
-            id: k.id,
-            name: k.name,
-            key_preview: k.produce_ai_key_preview,
-            created_at: k.created_at.to_rfc3339(),
-            last_used_at: k
-                .last_used_at
-                .map(|t: chrono::DateTime<chrono::Utc>| t.to_rfc3339()),
-            is_active: !k.revoked,
-            expires_at: k
-                .expires_at
-                .map(|t: chrono::DateTime<chrono::Utc>| t.to_rfc3339()),
+        .map(|k| {
+            let is_active = !k.revoked && k.expires_at.is_none_or(|at| at > Utc::now());
+            ApiKeyInfo {
+                id: k.id,
+                name: k.name,
+                key_preview: k.produce_ai_key_preview,
+                created_at: k.created_at.to_rfc3339(),
+                last_used_at: k
+                    .last_used_at
+                    .map(|t: chrono::DateTime<chrono::Utc>| t.to_rfc3339()),
+                is_active,
+                revoked: k.revoked,
+                expires_at: k
+                    .expires_at
+                    .map(|t: chrono::DateTime<chrono::Utc>| t.to_rfc3339()),
+            }
         })
         .collect();
 
@@ -420,10 +430,11 @@ pub async fn create_api_key(
         expires_at,
     };
 
-    let saved_key = ProduceAiKey::create_owned(
+    let saved_key = ProduceAiKey::create_owned_with_secret(
         &tx,
         scope,
         &create_req,
+        &new_key,
         &key_audit(&auth, request_id.map(|Extension(id)| id.0)),
     )
     .await
@@ -438,7 +449,7 @@ pub async fn create_api_key(
         Json(serde_json::json!({
             "success": true,
             "message": "API Key created",
-            "key": new_key, // 注意：这是唯一一次返回完整 key
+            "key": new_key,
             "key_id": saved_key.id,
             "name": saved_key.name,
             "created_at": saved_key.created_at.to_rfc3339(),
@@ -449,13 +460,222 @@ pub async fn create_api_key(
         .into_response())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevealApiKeyRequest {
+    pub current_password: String,
+}
+
+#[derive(Serialize)]
+struct RevealApiKeyResponse<'a> {
+    key_id: Uuid,
+    key: &'a str,
+}
+
+const KEY_REVEAL_ATTEMPTS_PER_MINUTE: u32 = 5;
+const KEY_REVEAL_RATE_NAMESPACE: Uuid = Uuid::from_u128(0x6b657963_6f6d_7075_7465_2d7265766561);
+
+async fn admit_key_reveal(state: &AppState, user_id: Uuid) -> Result<()> {
+    state
+        .console_limiter
+        .check_and_record_with_config(
+            &RateLimitKey::new(KEY_REVEAL_RATE_NAMESPACE, user_id, Uuid::nil()),
+            &RateLimitConfig::new(KEY_REVEAL_ATTEMPTS_PER_MINUTE, u32::MAX),
+        )
+        .await
+        .map_err(|error| match error {
+            keycompute_types::KeyComputeError::RateLimitExceeded(_) => {
+                ApiError::RateLimit("Too many API key reveal attempts. Try again later.".into())
+            }
+            _ => ApiError::ServiceUnavailable(
+                "API key reveal protection is temporarily unavailable".into(),
+            ),
+        })
+}
+
+async fn verify_key_reveal_password(password: String, password_hash: String) -> Result<bool> {
+    tokio::task::spawn_blocking(move || PasswordHasher::new().verify(&password, &password_hash))
+        .await
+        .map_err(|_| {
+            ApiError::ServiceUnavailable("Password confirmation is temporarily unavailable".into())
+        })?
+        .map_err(|_| {
+            ApiError::ServiceUnavailable("Password confirmation is temporarily unavailable".into())
+        })
+}
+
+/// Reveal a non-revoked API key only to its current owner after password
+/// confirmation. Metadata/list endpoints never include recoverable material.
+pub async fn reveal_api_key(
+    auth: ConsoleAuth,
+    request_id: Option<Extension<RequestId>>,
+    Path(key_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Json(req): Json<RevealApiKeyRequest>,
+) -> Result<Response> {
+    if req.current_password.is_empty() || req.current_password.len() > 4096 {
+        return Err(ApiError::BadRequest(
+            "A valid current password is required".into(),
+        ));
+    }
+    let scope = auth.require_owner(
+        auth.user_id,
+        keycompute_auth::AuthorizationAction::ReadPersonalResource,
+    )?;
+    admit_key_reveal(&state, auth.user_id).await?;
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("Console storage unavailable".into()))?;
+    // Argon2 is deliberately executed before opening a transaction. Its
+    // 64-MiB memory-hard verification must not hold a database connection or
+    // identity/key locks. The verified hash is compared again under lock below.
+    let credential_snapshot = UserCredential::find_by_user_id(pool.write_conn(), auth.user_id)
+        .await
+        .map_err(|_| {
+            ApiError::ServiceUnavailable("Password confirmation is temporarily unavailable".into())
+        })?;
+    let password_confirmed = match credential_snapshot
+        .as_ref()
+        .filter(|credential| credential.email_verified && !credential.is_locked())
+    {
+        Some(credential) => {
+            verify_key_reveal_password(req.current_password, credential.password_hash.clone())
+                .await?
+        }
+        None => false,
+    };
+    let tx = key_control_auth::begin(&state, &auth).await?;
+    let envelope = ProduceAiKey::reveal_owned(&tx, scope, key_id)
+        .await
+        .map_err(key_reveal_error)?
+        .ok_or_else(|| ApiError::NotFound("API Key secret is unavailable".into()))?;
+    let actor = key_audit(&auth, request_id.map(|Extension(id)| id.0));
+    let credential = UserCredential::find_by_user_id_for_update(&tx, auth.user_id)
+        .await
+        .map_err(|_| {
+            ApiError::ServiceUnavailable("Password confirmation is temporarily unavailable".into())
+        })?;
+    let credential_unchanged = credential.as_ref().is_some_and(|current| {
+        credential_snapshot.as_ref().is_some_and(|snapshot| {
+            current.password_hash == snapshot.password_hash
+                && current.email_verified
+                && !current.is_locked()
+        })
+    });
+    if !password_confirmed || !credential_unchanged {
+        if !password_confirmed
+            && credential_unchanged
+            && let Some(current) = credential.as_ref()
+        {
+            let failed = current.increment_failed_attempts(&tx).await.map_err(|_| {
+                ApiError::ServiceUnavailable(
+                    "Password confirmation is temporarily unavailable".into(),
+                )
+            })?;
+            if failed.failed_login_attempts >= DEFAULT_MAX_FAILED_ATTEMPTS {
+                failed
+                    .lock(&tx, DEFAULT_LOCK_DURATION_MINUTES)
+                    .await
+                    .map_err(|_| {
+                        ApiError::ServiceUnavailable(
+                            "Password confirmation is temporarily unavailable".into(),
+                        )
+                    })?;
+            }
+        }
+        keycompute_db::TenantAuditEvent::append(
+            &tx,
+            keycompute_types::AuditScopeType::User,
+            Some(auth.tenant_id),
+            &actor,
+            "key.reveal",
+            "produce_ai_key",
+            Some(&key_id.to_string()),
+            keycompute_types::AuditResult::Denied,
+            serde_json::json!({"reason":"password confirmation failed"}),
+        )
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+        key_control_auth::finish_read(&tx, &auth).await?;
+        tx.commit()
+            .await
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        return Err(ApiError::Forbidden("Password confirmation failed".into()));
+    }
+    if let Some(credential) = credential.as_ref()
+        && (credential.failed_login_attempts != 0 || credential.locked_until.is_some())
+    {
+        credential
+            .record_successful_verification(&tx)
+            .await
+            .map_err(|_| {
+                ApiError::ServiceUnavailable(
+                    "Password confirmation is temporarily unavailable".into(),
+                )
+            })?;
+    }
+    let secret = keycompute_runtime::decrypt_produce_ai_key(
+        &envelope,
+        keycompute_runtime::ProduceAiKeyEnvelopeContext {
+            tenant_id: auth.tenant_id,
+            user_id: auth.user_id,
+            key_id,
+        },
+    )
+    .map_err(|_| {
+        ApiError::ServiceUnavailable("API key decryption is temporarily unavailable".into())
+    })?;
+    keycompute_db::TenantAuditEvent::append(
+        &tx,
+        keycompute_types::AuditScopeType::User,
+        Some(auth.tenant_id),
+        &actor,
+        "key.reveal",
+        "produce_ai_key",
+        Some(&key_id.to_string()),
+        keycompute_types::AuditResult::Success,
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+    // Re-check the original console session after the secret read and audit
+    // write, so a concurrent logout, tenant switch, or membership change
+    // cannot receive a late reveal response.
+    key_control_auth::finish_read(&tx, &auth).await?;
+    tx.commit()
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let response = (
+        [
+            (header::CACHE_CONTROL, "private, no-store"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        Json(RevealApiKeyResponse {
+            key_id,
+            key: secret.expose(),
+        }),
+    )
+        .into_response();
+    drop(secret);
+    Ok(response)
+}
+
 /// 删除 API Key
 ///
 /// DELETE /api/v1/keys/{id}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermanentDeleteConfirmation {
+    #[serde(default)]
+    pub permanent: bool,
+}
+
 pub async fn delete_api_key(
     auth: ConsoleAuth,
     request_id: Option<Extension<RequestId>>,
     Path(key_id): Path<Uuid>,
+    Query(confirmation): Query<PermanentDeleteConfirmation>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
     // 查找 API Key 并验证所有权
@@ -463,6 +683,11 @@ pub async fn delete_api_key(
         auth.user_id,
         keycompute_auth::AuthorizationAction::ManagePersonalResource,
     )?;
+    if !confirmation.permanent {
+        return Err(ApiError::BadRequest(
+            "Permanent API Key deletion requires explicit confirmation".into(),
+        ));
+    }
     let tx = key_control_auth::begin(&state, &auth).await?;
     let outcome = ProduceAiKey::remove_owned(
         &tx,
@@ -475,12 +700,11 @@ pub async fn delete_api_key(
     key_control_auth::commit(&state, tx, &auth, KeyChange::Credential).await?;
     match outcome {
         keycompute_db::models::api_key::KeyRemoval::Deleted(id) => Ok(Json(serde_json::json!({
-            "success": true, "message": "API Key deleted", "key_id": id, "deleted": true,
+            "success": true, "message": "API Key permanently deleted", "key_id": id, "deleted": true,
         }))),
-        keycompute_db::models::api_key::KeyRemoval::Revoked(key) => Ok(Json(serde_json::json!({
-            "success": true, "message": "API Key revoked", "key_id": key.id,
-            "revoked_at": key.revoked_at.map(|time| time.to_rfc3339()), "deleted": false,
-        }))),
+        keycompute_db::models::api_key::KeyRemoval::Revoked(_) => Err(ApiError::Internal(
+            "Permanent API Key deletion returned an invalid outcome".into(),
+        )),
     }
 }
 
@@ -503,6 +727,17 @@ fn key_mutation_error(error: keycompute_db::DbError) -> ApiError {
         }
         keycompute_db::DbError::Other(message) if message.starts_with("invalid key") => {
             ApiError::BadRequest(message)
+        }
+        _ => ApiError::ServiceUnavailable("API key storage is temporarily unavailable".into()),
+    }
+}
+
+fn key_reveal_error(error: keycompute_db::DbError) -> ApiError {
+    match error {
+        keycompute_db::DbError::Other(message)
+            if message == "key management authorization denied" =>
+        {
+            ApiError::Forbidden("Key reveal permission is not available".into())
         }
         _ => ApiError::ServiceUnavailable("API key storage is temporarily unavailable".into()),
     }

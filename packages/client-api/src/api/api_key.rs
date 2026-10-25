@@ -6,8 +6,6 @@ use crate::client::ApiClient;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 
-pub use super::common::MessageResponse;
-
 /// API Key API 客户端
 #[derive(Debug, Clone)]
 pub struct ApiKeyApi {
@@ -95,11 +93,83 @@ impl ApiKeyApi {
     }
 
     /// 删除 API Key
-    pub async fn delete_api_key(&self, id: &str, token: &str) -> Result<MessageResponse> {
-        self.client
-            .delete_json(&format!("/api/v1/keys/{}", id), Some(token))
-            .await
+    pub async fn delete_api_key(&self, id: &str, token: &str) -> Result<DeleteApiKeyResponse> {
+        let key_id = uuid::Uuid::parse_str(id).map_err(|_| {
+            crate::ClientError::Config("A valid API Key identifier is required".into())
+        })?;
+        if key_id.is_nil() {
+            return Err(crate::ClientError::Config(
+                "A valid API Key identifier is required".into(),
+            ));
+        }
+        let response: DeleteApiKeyResponse = self
+            .client
+            .delete_json(
+                &format!("/api/v1/keys/{key_id}?permanent=true"),
+                Some(token),
+            )
+            .await?;
+        if !response.success || !response.deleted || response.key_id != key_id {
+            return Err(crate::ClientError::InvalidResponse(
+                "API Key deletion response is inconsistent".into(),
+            ));
+        }
+        Ok(response)
     }
+
+    /// Read the current owner's recoverable key secret. This is deliberately
+    /// a separate explicit request; list endpoints contain metadata only.
+    pub async fn reveal_api_key(
+        &self,
+        id: &str,
+        current_password: &str,
+        token: &str,
+    ) -> Result<String> {
+        let key_id = uuid::Uuid::parse_str(id).map_err(|_| {
+            crate::ClientError::Config("A valid API Key identifier is required".into())
+        })?;
+        if key_id.is_nil() {
+            return Err(crate::ClientError::Config(
+                "A valid API Key identifier is required".into(),
+            ));
+        }
+        if current_password.is_empty() || current_password.len() > 4096 {
+            return Err(crate::ClientError::Config(
+                "A valid current password is required".into(),
+            ));
+        }
+        #[derive(Serialize)]
+        struct RevealRequest<'a> {
+            current_password: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct RevealResponse {
+            key_id: uuid::Uuid,
+            key: String,
+        }
+        let response: RevealResponse = self
+            .client
+            .post_json(
+                &format!("/api/v1/keys/{id}/reveal"),
+                &RevealRequest { current_password },
+                Some(token),
+            )
+            .await?;
+        if response.key_id != key_id || !super::common::valid_one_time_key(&response.key) {
+            return Err(crate::ClientError::InvalidResponse(
+                "API Key reveal response is inconsistent".into(),
+            ));
+        }
+        Ok(response.key)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeleteApiKeyResponse {
+    pub success: bool,
+    pub message: String,
+    pub key_id: uuid::Uuid,
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -163,18 +233,25 @@ pub struct ApiKeyInfo {
     pub id: String,
     pub name: String,
     pub key_preview: String,
-    /// 是否活跃（后端返回 is_active，前端转换为 !revoked）
+    /// 是否可用于鉴权（未撤销且未过期）
     #[serde(rename = "is_active")]
     pub is_active: bool,
+    /// 是否已被内部轮换流程撤销；与过期状态相互独立。
+    #[serde(default)]
+    pub revoked: bool,
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub expires_at: Option<String>,
 }
 
 impl ApiKeyInfo {
-    /// 返回是否已撤销（与 is_active 相反）
+    /// 返回是否已撤销。
     pub fn revoked(&self) -> bool {
-        !self.is_active
+        self.revoked
+    }
+
+    pub fn expired(&self) -> bool {
+        !self.revoked && !self.is_active
     }
 }
 
@@ -201,7 +278,7 @@ impl CreateApiKeyRequest {
     }
 }
 
-/// 创建 API Key 响应（包含完整 key，仅创建时返回一次）
+/// 创建 API Key 响应（创建时返回完整 key；后续可由所有者显式 reveal）
 #[derive(Clone, Deserialize)]
 pub struct CreateApiKeyResponse {
     /// 是否成功

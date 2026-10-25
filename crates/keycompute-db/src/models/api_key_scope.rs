@@ -6,6 +6,7 @@ use keycompute_types::{
     TenantScope,
 };
 use sea_orm::DatabaseTransaction;
+use sha2::{Digest, Sha256};
 
 const COLUMNS: &str = "k.id,k.tenant_id,k.user_id,k.name,k.produce_ai_key_preview,k.revoked,k.revoked_at,k.expires_at,k.last_used_at,k.created_at,k.updated_at";
 
@@ -267,14 +268,40 @@ fn valid_reason(reason: &str) -> Result<&str, DbError> {
     }
     Ok(reason)
 }
+
+/// Keep the recoverable value and the authentication value inseparable. The
+/// plaintext exists only for validation and envelope encryption and is never
+/// written to PostgreSQL.
+fn valid_plaintext(
+    req: &CreateProduceAiKeyRequest,
+    plaintext: Option<&str>,
+) -> Result<(), DbError> {
+    let Some(secret) = plaintext else {
+        return Ok(());
+    };
+    if !secret.starts_with("sk-") || secret.len() > 255 || secret.chars().any(char::is_control) {
+        return Err(DbError::Other("invalid API key secret".into()));
+    }
+    let mut digest = Sha256::new();
+    digest.update(secret.as_bytes());
+    let expected_hash = hex::encode(digest.finalize());
+    if expected_hash != req.produce_ai_key_hash {
+        return Err(DbError::Other(
+            "API key secret does not match its hash".into(),
+        ));
+    }
+    Ok(())
+}
 async fn create(
     db: &(impl ConnectionTrait + TransactionTrait),
     scope: Scope,
     req: &CreateProduceAiKeyRequest,
     audit: &AuditContext,
     reason: &str,
+    plaintext: Option<&str>,
 ) -> Result<ProduceAiKey, DbError> {
     let reason = valid_reason(reason)?;
+    valid_plaintext(req, plaintext)?;
     if req.tenant_id != scope.tenant() {
         return Err(denied());
     }
@@ -286,9 +313,67 @@ async fn create(
     }
     let tx = begin(db).await?;
     let actor = lock_authority(&tx, scope, req.user_id, audit, true).await?;
-    let key=ProduceAiKey::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-        "INSERT INTO produce_ai_keys(tenant_id,user_id,name,produce_ai_key_hash,produce_ai_key_preview,expires_at) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
-        [scope.tenant().into(),req.user_id.into(),req.name.as_str().into(),req.produce_ai_key_hash.as_str().into(),req.produce_ai_key_preview.as_str().into(),req.expires_at.into()])).one(&tx).await?.ok_or_else(||DbError::Other("key insert returned no row".into()))?;
+    // Do not expose the encryption service as an oracle to a caller whose
+    // current ownership/tenant authority has not first been locked and proven.
+    let id = Uuid::new_v4();
+    let envelope = match plaintext {
+        Some(secret) => keycompute_runtime::encrypt_produce_ai_key(
+            secret,
+            keycompute_runtime::ProduceAiKeyEnvelopeContext {
+                tenant_id: scope.tenant(),
+                user_id: req.user_id,
+                key_id: id,
+            },
+        )
+        .map_err(|error| DbError::Other(format!("API key encryption unavailable: {error}")))?,
+        None => {
+            #[cfg(feature = "test-fixtures")]
+            {
+                // Synthetic authentication fixtures are intentionally not
+                // revealable and contain no plaintext secret.
+                keycompute_runtime::ProduceAiKeyEnvelope {
+                    ciphertext: "test-fixture-unrecoverable".into(),
+                    nonce: "AAAAAAAAAAAAAAAA".into(),
+                    wrapped_dek: "test-fixture-unrecoverable".into(),
+                    wrap_nonce: "AAAAAAAAAAAAAAAA".into(),
+                    kek_key_id: "test-fixture".into(),
+                    encryption_version: 1,
+                }
+            }
+            #[cfg(not(feature = "test-fixtures"))]
+            {
+                return Err(DbError::Other(
+                    "a recoverable API key secret is required".into(),
+                ));
+            }
+        }
+    };
+    let key = ProduceAiKey::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO produce_ai_keys(id,tenant_id,user_id,name,produce_ai_key_hash,
+             produce_ai_key_ciphertext,produce_ai_key_nonce,produce_ai_key_wrapped_dek,
+             produce_ai_key_wrap_nonce,produce_ai_key_kek_id,produce_ai_key_encryption_version,
+             produce_ai_key_preview,expires_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *",
+        [
+            id.into(),
+            scope.tenant().into(),
+            req.user_id.into(),
+            req.name.as_str().into(),
+            req.produce_ai_key_hash.as_str().into(),
+            envelope.ciphertext.into(),
+            envelope.nonce.into(),
+            envelope.wrapped_dek.into(),
+            envelope.wrap_nonce.into(),
+            envelope.kek_key_id.into(),
+            envelope.encryption_version.into(),
+            req.produce_ai_key_preview.as_str().into(),
+            req.expires_at.into(),
+        ],
+    ))
+    .one(&tx)
+    .await?
+    .ok_or_else(|| DbError::Other("key insert returned no row".into()))?;
     record(
         &tx,
         scope,
@@ -302,8 +387,10 @@ async fn create(
     Ok(key)
 }
 
-/// The established self-service API revokes a live key first; a later removal
-/// may delete its revoked metadata. Neither outcome changes resource ownership.
+/// Public delete operations permanently remove the credential after explicit
+/// caller confirmation. Revocation remains an internal primitive for atomic
+/// rotation, where the old credential must stop authenticating before the
+/// replacement is committed.
 #[derive(Debug)]
 pub enum KeyRemoval {
     Revoked(ProduceAiKeyResponse),
@@ -321,6 +408,24 @@ async fn change(
     let tx = begin(db).await?;
     let snapshot = find(&tx, scope, id).await?.ok_or_else(|| missing(id))?;
     let actor = lock_authority(&tx, scope, snapshot.user_id, audit, false).await?;
+    let cancelled_intents = if remove {
+        // A missing pending-intent row cannot be row-locked. Serialize this
+        // absence check with rotation creation before cancelling intents and
+        // locking the source credential. Claim already locks an existing
+        // intent before the key and therefore remains compatible with this
+        // intent -> key order.
+        super::lock_key_rotation_lane(&tx, scope.tenant(), id).await?;
+        tx.query_all(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE tenant_key_issuance_intents SET status='cancelled'
+                 WHERE tenant_id=$1 AND replaces_key_id=$2 AND status='pending'
+                 RETURNING id,owner_user_id",
+            [scope.tenant().into(), id.into()],
+        ))
+        .await?
+    } else {
+        Vec::new()
+    };
     let key = ProduceAiKey::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "SELECT * FROM produce_ai_keys WHERE tenant_id=$1 AND user_id=$2 AND id=$3 FOR UPDATE",
@@ -329,12 +434,45 @@ async fn change(
     .one(&tx)
     .await?
     .ok_or_else(|| missing(id))?;
-    if remove && key.revoked {
-        let changed=tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-            "DELETE FROM produce_ai_keys WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND revoked",
-            [scope.tenant().into(),key.user_id.into(),id.into()])).await?.rows_affected();
+    if remove {
+        // Claimed history deliberately retains immutable UUID snapshots
+        // without a foreign key to the credential row.
+        let changed = tx
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM produce_ai_keys WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
+                [scope.tenant().into(), key.user_id.into(), id.into()],
+            ))
+            .await?
+            .rows_affected();
         if changed != 1 {
             return Err(missing(id));
+        }
+        for cancelled in cancelled_intents {
+            let intent_id: Uuid = cancelled.try_get("", "id")?;
+            let owner_user_id: Uuid = cancelled.try_get("", "owner_user_id")?;
+            TenantAuditEvent::append(
+                &tx,
+                if actor.actor_platform_role.is_platform_admin()
+                    && actor.actor_tenant_role.is_none()
+                {
+                    AuditScopeType::Platform
+                } else {
+                    AuditScopeType::Tenant
+                },
+                Some(scope.tenant()),
+                &actor,
+                "key_issuance.cancel",
+                "key_issuance",
+                Some(&intent_id.to_string()),
+                AuditResult::Success,
+                serde_json::json!({
+                    "owner_user_id": owner_user_id,
+                    "replaces_key_id": id,
+                    "reason": "source key permanently deleted"
+                }),
+            )
+            .await?;
         }
         record(&tx, scope, &actor, &key.into(), "key.delete", reason).await?;
         tx.commit().await?;
@@ -475,6 +613,11 @@ impl ProduceAiKey {
     ) -> Result<i64, DbError> {
         count(db, Scope::Platform(scope, tenant), owner, include_revoked).await
     }
+    /// Test-fixture compatibility for rows whose authentication hash is
+    /// supplied without the original secret. Production callers must use
+    /// `create_owned_with_secret`, so every production-created key is
+    /// recoverable by its owner.
+    #[cfg(feature = "test-fixtures")]
     pub async fn create_owned(
         db: &(impl ConnectionTrait + TransactionTrait),
         scope: TenantScope,
@@ -487,17 +630,49 @@ impl ProduceAiKey {
             req,
             audit,
             "self-service key creation",
+            None,
         )
         .await
     }
+    pub async fn create_owned_with_secret(
+        db: &(impl ConnectionTrait + TransactionTrait),
+        scope: TenantScope,
+        req: &CreateProduceAiKeyRequest,
+        secret: &str,
+        audit: &AuditContext,
+    ) -> Result<Self, DbError> {
+        create(
+            db,
+            Scope::Owned(scope),
+            req,
+            audit,
+            "self-service key creation",
+            Some(secret),
+        )
+        .await
+    }
+    /// Test-fixture compatibility; production tenant creation is intentionally
+    /// not exposed without a recoverable secret.
+    #[cfg(feature = "test-fixtures")]
     pub async fn create_in_tenant(
         db: &(impl ConnectionTrait + TransactionTrait),
         scope: TenantScope,
         req: &CreateProduceAiKeyRequest,
         audit: &AuditContext,
     ) -> Result<Self, DbError> {
-        create(db, Scope::Tenant(scope), req, audit, "tenant key creation").await
+        create(
+            db,
+            Scope::Tenant(scope),
+            req,
+            audit,
+            "tenant key creation",
+            None,
+        )
+        .await
     }
+    /// Test-fixture compatibility; production platform creation is intentionally
+    /// not exposed without a recoverable secret.
+    #[cfg(feature = "test-fixtures")]
     pub async fn create_platform(
         db: &(impl ConnectionTrait + TransactionTrait),
         scope: PlatformScope,
@@ -511,6 +686,7 @@ impl ProduceAiKey {
             req,
             audit,
             reason,
+            None,
         )
         .await
     }
@@ -525,7 +701,7 @@ impl ProduceAiKey {
             Scope::Owned(scope),
             id,
             audit,
-            "self-service key removal",
+            "self-service permanent key deletion",
             true,
         )
         .await
@@ -557,7 +733,7 @@ impl ProduceAiKey {
             Scope::Tenant(scope),
             id,
             audit,
-            "tenant key removal",
+            "tenant permanent key deletion",
             true,
         )
         .await
@@ -642,5 +818,23 @@ mod tests {
         );
         assert!(valid_reason("").is_err());
         assert!(valid_reason("new\nline").is_err());
+    }
+
+    #[test]
+    fn recoverable_secret_must_match_the_authentication_hash() {
+        let secret = "sk-123456789012345678901234567890123456789012345678";
+        let mut digest = Sha256::new();
+        digest.update(secret.as_bytes());
+        let request = CreateProduceAiKeyRequest {
+            tenant_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            name: "test".into(),
+            produce_ai_key_hash: hex::encode(digest.finalize()),
+            produce_ai_key_preview: "sk-12345****".into(),
+            expires_at: None,
+        };
+        assert!(valid_plaintext(&request, Some(secret)).is_ok());
+        assert!(valid_plaintext(&request, Some("sk-a-different-secret")).is_err());
+        assert!(valid_plaintext(&request, Some("not-a-key")).is_err());
     }
 }

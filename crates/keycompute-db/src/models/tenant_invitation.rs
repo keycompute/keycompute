@@ -84,6 +84,11 @@ impl TenantInvitation {
         if actor.actor_user_id != req.invited_by {
             return Err(DbError::Other("invitation actor mismatch".into()));
         }
+        if req.tenant_role != TenantRole::Member {
+            return Err(DbError::Other(
+                "tenant invitations may only grant ordinary membership".into(),
+            ));
+        }
         let email = normalized_email(&req.email)?;
         if let Some(existing) =
             super::tenant_membership::TenantMembership::find_by_statement(
@@ -199,6 +204,9 @@ impl TenantInvitation {
         let invitation = Self::find_by_token_hash(tx, tenant, &hash)
             .await?
             .ok_or_else(invalid)?;
+        if invitation.tenant_role()? != TenantRole::Member {
+            return Err(invalid());
+        }
         let mut users = vec![user, invitation.invited_by];
         users.sort_unstable();
         users.dedup();

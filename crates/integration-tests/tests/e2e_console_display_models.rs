@@ -124,11 +124,22 @@ async fn trend_empty_and_invalid_intervals_are_bounded() {
 async fn dashboard_counts_are_complete_but_previews_are_bounded_and_secret_free() {
     let (db, mut guard, tenant, user) = fixture().await;
     usage(&db, tenant, user, "2026-01-01T00:00:00Z", 250).await;
-    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,r#"
-      INSERT INTO produce_ai_keys(tenant_id,user_id,name,produce_ai_key_hash,produce_ai_key_preview,revoked,expires_at)
-      SELECT $1,$2,'display-key-'||g::text,repeat(md5(gen_random_uuid()::text),2),'sk-fixture-****',g>10,
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"
+      INSERT INTO produce_ai_keys(tenant_id,user_id,name,produce_ai_key_hash,
+        produce_ai_key_ciphertext,produce_ai_key_nonce,produce_ai_key_wrapped_dek,
+        produce_ai_key_wrap_nonce,produce_ai_key_kek_id,produce_ai_key_encryption_version,
+        produce_ai_key_preview,revoked,expires_at)
+      SELECT $1,$2,'display-key-'||g::text,repeat(md5(gen_random_uuid()::text),2),
+      'fixture-unrecoverable','AAAAAAAAAAAAAAAA','fixture-unrecoverable',
+      'AAAAAAAAAAAAAAAA','test-fixture',1,'sk-fixture-****',g>10,
       CASE WHEN g=10 THEN NOW()-INTERVAL '1 day' ELSE NULL END FROM generate_series(1,12) g
-    "#,[tenant.into(),user.into()])).await.unwrap();
+    "#,
+        [tenant.into(), user.into()],
+    ))
+    .await
+    .unwrap();
     db.execute(Statement::from_sql_and_values(DbBackend::Postgres,r#"
       INSERT INTO payment_orders(tenant_id,user_id,out_trade_no,amount,subject,expired_at,pay_url)
       SELECT $1,$2,gen_random_uuid()::text,10,'display fixture',NOW()+INTERVAL '1 day','https://secret.invalid/' FROM generate_series(1,10)

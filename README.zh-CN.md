@@ -279,7 +279,7 @@ keycompute/
 |:---|:---|:---:|
 | `KC__DATABASE__URL` | PostgreSQL 连接串 | ✅ |
 | `KC__AUTH__JWT_SECRET` | 生产环境：非默认、非纯空白且至少 32 字节的 JWT 签名密钥 | ✅ |
-| `KC__CRYPTO__SECRET_KEY` | 生产环境：恰好 32 字节的 Base64 编码；写入 Provider API Key 后不可更改 | ✅ |
+| `KC__CRYPTO__SECRET_KEY` | 生产环境：恰好 32 字节的 Base64 KEK，用于 Provider 加密及 Produce AI Key 每记录信封加密；仅可在重加密/重新包装已有记录后轮换 | ✅ |
 | `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | 生产环境配置 Redis 时：非默认且至少 16 字节的 HMAC 密钥；签发一次性节点注册 token | 条件必填 |
 | `KC__REDIS__URL` | Redis 连接串（可选；不配置时限流降级为内存、缓存变为 no-op、节点网关不可用） | ⚪ |
 | `KC__EMAIL__SMTP_HOST` | SMTP 服务器地址（可选） | ⚪ |

@@ -9,6 +9,7 @@ test-fixtures = []
 
 [dependencies]
 keycompute-types.workspace = true
+keycompute-runtime.workspace = true
 keycompute-config.workspace = true
 keycompute-observability.workspace = true
 sea-orm = { workspace = true }

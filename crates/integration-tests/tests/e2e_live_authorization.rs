@@ -178,6 +178,7 @@ impl Fixture {
     }
     async fn member(&self, suffix: &str, platform: PlatformRole) -> User {
         let member = create_test_user(&self.db, self.a.id, suffix, &self.run).await;
+        let platform_actor = platform_audit(&self.db).await;
         let tx = self.db.begin().await.unwrap();
         TenantMembership::set_role(
             &tx,
@@ -185,7 +186,7 @@ impl Fixture {
             member.id,
             TenantRole::Admin,
             1,
-            &audit(&self.a),
+            &platform_actor,
         )
         .await
         .unwrap();

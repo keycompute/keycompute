@@ -204,9 +204,10 @@ async fn detail_list_count_and_stats_keep_personal_and_tenant_scopes_separate() 
 #[tokio::test]
 async fn stale_scopes_cannot_survive_demotion_suspension_or_tenant_deactivation() {
     let mut f = Fixture::new().await;
+    let platform = platform_audit(&f.db).await;
     let tx = f.db.begin().await.unwrap();
     let elevated =
-        TenantMembership::set_role(&tx, f.a.id, f.user.id, TenantRole::Admin, 1, &audit(&f.a))
+        TenantMembership::set_role(&tx, f.a.id, f.user.id, TenantRole::Admin, 1, &platform)
             .await
             .unwrap();
     tx.commit().await.unwrap();
@@ -214,7 +215,6 @@ async fn stale_scopes_cannot_survive_demotion_suspension_or_tenant_deactivation(
         TenantUsageScope::new(TenantScope::checked(f.a.id, f.user.id, TenantRole::Admin).unwrap())
             .unwrap();
     assert_eq!(stale.count(&f.db, None, None).await.unwrap(), 2);
-    let platform = platform_audit(&f.db).await;
     let tx = f.db.begin().await.unwrap();
     let lowered = TenantMembership::set_role(
         &tx,

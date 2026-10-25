@@ -346,15 +346,9 @@ impl Fixture {
                 json!({"name":"must-roll-back","expected_updated_at":key["updated_at"]}),
                 self.tenant.admin_user_id,
             ),
-            "revoke" => (
-                "POST",
-                format!("{base}/keys/{id}/revoke"),
-                json!({}),
-                self.tenant.admin_user_id,
-            ),
             "delete" => (
                 "DELETE",
-                format!("{base}/keys/{id}"),
+                format!("{base}/keys/{id}?permanent=true"),
                 Value::Null,
                 self.tenant.admin_user_id,
             ),
@@ -384,7 +378,7 @@ impl Fixture {
             ),
             "personal_delete" => (
                 "DELETE",
-                format!("/api/v1/keys/{id}"),
+                format!("/api/v1/keys/{id}?permanent=true"),
                 Value::Null,
                 self.owner,
             ),
@@ -498,10 +492,7 @@ async fn expired_owner_claim_rolls_back_after_audit_wait() {
 }
 #[tokio::test]
 async fn expired_key_admin_and_owner_commands_roll_back_after_audit_wait() {
-    isolated(&[
-        "request", "rotate", "patch", "revoke", "delete", "cancel", "decline",
-    ])
-    .await;
+    isolated(&["request", "rotate", "patch", "delete", "cancel", "decline"]).await;
 }
 
 #[tokio::test]

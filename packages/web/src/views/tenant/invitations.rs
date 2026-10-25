@@ -61,7 +61,6 @@ fn TenantInvitationsPage() -> Element {
     let scope = WorkspaceScope::from_stores(auth, users);
     let mut page = use_signal(|| 1u32);
     let mut email = use_signal(String::new);
-    let mut role = use_signal(|| TenantRole::Member);
     let mut hours = use_signal(|| "24".to_owned());
     let mut error = use_signal(String::new);
     let mut busy = use_signal(|| false);
@@ -69,7 +68,7 @@ fn TenantInvitationsPage() -> Element {
     // This one-time recovery link is intentionally kept only in this keyed component.
     let mut created = use_signal(|| None::<InvitationCreateResponse>);
     super::workspace_switcher::use_workspace_dirty_blocker(move || {
-        busy() || !email().trim().is_empty() || role() != TenantRole::Member || hours() != "24"
+        busy() || !email().trim().is_empty() || hours() != "24"
     });
     let mut data = use_resource(move || {
         let scope = WorkspaceScope::from_stores(auth, users);
@@ -112,7 +111,7 @@ fn TenantInvitationsPage() -> Element {
         }
         let body = CreateInvitation {
             email: email_value,
-            tenant_role: role(),
+            tenant_role: TenantRole::Member,
             expires_in_seconds: seconds,
         };
         busy.set(true);
@@ -131,7 +130,6 @@ fn TenantInvitationsPage() -> Element {
                 Ok(result) => {
                     created.set(Some(result));
                     email.set(String::new());
-                    role.set(TenantRole::Member);
                     hours.set("24".to_owned());
                     page.set(1);
                     data.restart();
@@ -189,8 +187,8 @@ fn TenantInvitationsPage() -> Element {
                     input {id:"invite-email",class:"input-field",r#type:"email",maxlength:"255",value:"{email}",disabled:busy(),oninput:move |e|email.set(e.value())}
                 }
                 div {class:"form-field",
-                    label {class:"form-label",r#for:"invite-role",{i18n.t("tenant.role")}}
-                    select {id:"invite-role",class:"input-field",value:"{role().as_str()}",disabled:busy(),onchange:move |e|{if let Ok(value)=e.value().parse::<TenantRole>(){role.set(value);}},option {value:"member",{i18n.t("tenant.role_member")}} option {value:"admin",{i18n.t("tenant.role_admin")}}}
+                    label {class:"form-label",{i18n.t("tenant.role")}}
+                    p {class:"input-field tenant-fixed-role",{i18n.t("tenant.role_member")}}
                 }
                 div {class:"form-field",
                     label {class:"form-label",r#for:"invite-duration",{i18n.t("tenant.duration_hours")}}

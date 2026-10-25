@@ -2,7 +2,7 @@
 
 use client_api::api::api_key::{ApiKeyApi, CreateApiKeyRequest};
 use client_api::error::ClientError;
-use wiremock::matchers::{body_json, method, path};
+use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
 mod common;
@@ -21,6 +21,7 @@ async fn test_list_my_api_keys_success() {
                 "name": "Development Key",
                 "key_preview": "sk-...abcd",
                 "is_active": true,
+                "revoked": false,
                 "expires_at": "2024-12-31T23:59:59Z",
                 "last_used_at": "2024-01-15T10:30:00Z",
                 "created_at": "2024-01-01T00:00:00Z"
@@ -30,6 +31,7 @@ async fn test_list_my_api_keys_success() {
                 "name": "Production Key",
                 "key_preview": "sk-...efgh",
                 "is_active": true,
+                "revoked": false,
                 "expires_at": null,
                 "last_used_at": null,
                 "created_at": "2024-01-10T00:00:00Z"
@@ -126,6 +128,44 @@ async fn test_create_api_key_success() {
 }
 
 #[tokio::test]
+async fn test_reveal_api_key_is_owner_scoped_and_validates_the_response_id() {
+    let (client, mock_server) = create_test_client().await;
+    let api_key_api = ApiKeyApi::new(&client);
+    let id = "11111111-1111-4111-8111-111111111111";
+
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/keys/{id}/reveal")))
+        .and(body_json(serde_json::json!({
+            "current_password": "CurrentPassword123!"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "key_id": id,
+            "key": "sk-revealed-key"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    assert_eq!(
+        api_key_api
+            .reveal_api_key(id, "CurrentPassword123!", fixtures::TEST_ACCESS_TOKEN,)
+            .await
+            .unwrap(),
+        "sk-revealed-key"
+    );
+    assert!(
+        api_key_api
+            .reveal_api_key(
+                "not-a-uuid",
+                "CurrentPassword123!",
+                fixtures::TEST_ACCESS_TOKEN,
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(mock_server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn test_create_api_key_with_default_server_expiration() {
     let (client, mock_server) = create_test_client().await;
     let api_key_api = ApiKeyApi::new(&client);
@@ -188,20 +228,53 @@ async fn test_delete_api_key_success() {
     let (client, mock_server) = create_test_client().await;
     let api_key_api = ApiKeyApi::new(&client);
 
+    let id = "11111111-1111-4111-8111-111111111111";
     Mock::given(method("DELETE"))
-        .and(path("/api/v1/keys/key_001"))
+        .and(path(format!("/api/v1/keys/{id}")))
+        .and(query_param("permanent", "true"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "message": "API Key deleted successfully"
+            "success": true,
+            "message": "API Key deleted successfully",
+            "key_id": id,
+            "deleted": true
         })))
         .mount(&mock_server)
         .await;
 
     let result = api_key_api
-        .delete_api_key("key_001", fixtures::TEST_ACCESS_TOKEN)
+        .delete_api_key(id, fixtures::TEST_ACCESS_TOKEN)
         .await;
 
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().message, "API Key deleted successfully");
+    let result = result.unwrap();
+    assert_eq!(result.message, "API Key deleted successfully");
+    assert!(result.deleted);
+}
+
+#[tokio::test]
+async fn test_delete_api_key_rejects_a_non_permanent_or_mismatched_result() {
+    let (client, mock_server) = create_test_client().await;
+    let api_key_api = ApiKeyApi::new(&client);
+    let id = "11111111-1111-4111-8111-111111111111";
+
+    Mock::given(method("DELETE"))
+        .and(path(format!("/api/v1/keys/{id}")))
+        .and(query_param("permanent", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "message": "not actually deleted",
+            "key_id": "22222222-2222-4222-8222-222222222222",
+            "deleted": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    assert!(matches!(
+        api_key_api
+            .delete_api_key(id, fixtures::TEST_ACCESS_TOKEN)
+            .await,
+        Err(ClientError::InvalidResponse(_))
+    ));
 }
 
 #[tokio::test]
@@ -209,8 +282,10 @@ async fn test_delete_api_key_not_found() {
     let (client, mock_server) = create_test_client().await;
     let api_key_api = ApiKeyApi::new(&client);
 
+    let id = "22222222-2222-4222-8222-222222222222";
     Mock::given(method("DELETE"))
-        .and(path("/api/v1/keys/nonexistent_key"))
+        .and(path(format!("/api/v1/keys/{id}")))
+        .and(query_param("permanent", "true"))
         .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
             "error": "API Key not found"
         })))
@@ -218,7 +293,7 @@ async fn test_delete_api_key_not_found() {
         .await;
 
     let result = api_key_api
-        .delete_api_key("nonexistent_key", fixtures::TEST_ACCESS_TOKEN)
+        .delete_api_key(id, fixtures::TEST_ACCESS_TOKEN)
         .await;
 
     assert!(matches!(result.unwrap_err(), ClientError::NotFound(_)));
@@ -229,15 +304,17 @@ async fn test_delete_api_key_unauthorized() {
     let (client, mock_server) = create_test_client().await;
     let api_key_api = ApiKeyApi::new(&client);
 
+    let id = "33333333-3333-4333-8333-333333333333";
     Mock::given(method("DELETE"))
-        .and(path("/api/v1/keys/key_001"))
+        .and(path(format!("/api/v1/keys/{id}")))
+        .and(query_param("permanent", "true"))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
             "error": "Unauthorized"
         })))
         .mount(&mock_server)
         .await;
 
-    let result = api_key_api.delete_api_key("key_001", "invalid_token").await;
+    let result = api_key_api.delete_api_key(id, "invalid_token").await;
 
     assert!(matches!(result.unwrap_err(), ClientError::Unauthorized(_)));
 }
@@ -247,8 +324,10 @@ async fn test_delete_api_key_forbidden() {
     let (client, mock_server) = create_test_client().await;
     let api_key_api = ApiKeyApi::new(&client);
 
+    let id = "44444444-4444-4444-8444-444444444444";
     Mock::given(method("DELETE"))
-        .and(path("/api/v1/keys/key_002"))
+        .and(path(format!("/api/v1/keys/{id}")))
+        .and(query_param("permanent", "true"))
         .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
             "error": "Cannot delete this API Key"
         })))
@@ -256,7 +335,7 @@ async fn test_delete_api_key_forbidden() {
         .await;
 
     let result = api_key_api
-        .delete_api_key("key_002", fixtures::TEST_ACCESS_TOKEN)
+        .delete_api_key(id, fixtures::TEST_ACCESS_TOKEN)
         .await;
 
     assert!(matches!(result.unwrap_err(), ClientError::Forbidden(_)));

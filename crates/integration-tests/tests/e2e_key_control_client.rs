@@ -148,11 +148,10 @@ async fn real_key_clients_keep_admin_metadata_and_owner_claims_in_separate_scope
             .owner_user_id,
         owner.id
     );
-    let revoked = api.revoke(replacement.key_id, &admin).await.unwrap();
-    assert!(revoked.key.unwrap().revoked);
     let removed = api.delete(replacement.key_id, &admin).await.unwrap();
     assert_eq!(removed.key_id, replacement.key_id);
-    assert!(removed.deleted || removed.key.as_ref().is_some_and(|key| key.revoked));
+    assert!(removed.deleted);
+    assert!(removed.key.is_none());
     let decline = api
         .request(
             &NewIssuance {

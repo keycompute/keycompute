@@ -2,10 +2,14 @@
 //!
 //! An intent is deliberately not a credential.  It contains the metadata
 //! needed to let a tenant administrator request owner provisioning, but never
-//! stores a plaintext key, ciphertext, key hash, or recoverable secret.
+//! stores a secret itself; the resulting key's recoverable secret is kept on
+//! the key row and is readable only through the owner's explicit reveal path.
 
 use super::{
-    api_key::{CreateProduceAiKeyRequest, KeyRemoval, ProduceAiKey, ProduceAiKeyResponse},
+    api_key::{
+        CreateProduceAiKeyRequest, KeyRemoval, ProduceAiKey, ProduceAiKeyResponse,
+        lock_key_rotation_lane,
+    },
     tenant::Tenant,
     tenant_audit_event::{AuditContext, TenantAuditEvent, lock_identity_admin},
     tenant_control::{self, TenantAuthzSnapshot},
@@ -349,6 +353,10 @@ async fn request_intent_in_tx(
     };
 
     if let Some(replaces_key_id) = replaces_key_id {
+        // Permanent deletion takes the same transaction-scoped lane before it
+        // cancels pending intents. This closes the otherwise un-lockable gap
+        // where both transactions observe that no pending intent exists.
+        lock_key_rotation_lane(tx, tenant_id, replaces_key_id).await?;
         let pending = KeyIssuanceIntent::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
@@ -882,7 +890,6 @@ pub async fn remove_key(
     snapshot: TenantAuthzSnapshot,
     key_id: Uuid,
     actor: &AuditContext,
-    revoke_only: bool,
 ) -> Result<KeyRemoval, DbError> {
     let tx = begin(db).await?;
     let result = async {
@@ -895,29 +902,15 @@ pub async fn remove_key(
                 authority.actor.actor_platform_role,
             )
             .map_err(DbError::Other)?;
-            if revoke_only {
-                ProduceAiKey::revoke_platform(
-                    &tx,
-                    platform,
-                    authority.tenant_id,
-                    key_id,
-                    &authority.actor,
-                    "platform tenant key revocation",
-                )
-                .await?
-            } else {
-                ProduceAiKey::remove_platform(
-                    &tx,
-                    platform,
-                    authority.tenant_id,
-                    key_id,
-                    &authority.actor,
-                    "platform tenant key removal",
-                )
-                .await?
-            }
-        } else if revoke_only {
-            ProduceAiKey::revoke_in_tenant(&tx, scope, key_id, &authority.actor).await?
+            ProduceAiKey::remove_platform(
+                &tx,
+                platform,
+                authority.tenant_id,
+                key_id,
+                &authority.actor,
+                "platform tenant permanent key deletion",
+            )
+            .await?
         } else {
             ProduceAiKey::remove_in_tenant(&tx, scope, key_id, &authority.actor).await?
         };
@@ -1067,7 +1060,7 @@ async fn claim_in_tx_inner(
         None
     };
     let _ = saved_old;
-    let saved = ProduceAiKey::create_owned(
+    let saved = ProduceAiKey::create_owned_with_secret(
         tx,
         owner_scope,
         &CreateProduceAiKeyRequest {
@@ -1078,6 +1071,7 @@ async fn claim_in_tx_inner(
             produce_ai_key_preview: format!("{}****", &secret[..8.min(secret.len())]),
             expires_at: intent.requested_expires_at,
         },
+        &secret,
         &authority.actor,
     )
     .await?;

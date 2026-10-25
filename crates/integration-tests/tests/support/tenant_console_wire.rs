@@ -123,7 +123,7 @@ async fn sdk_accepts_actual_session_membership_invitation_and_audit_contracts() 
     f.guard.cleanup().await.unwrap();
 }
 #[tokio::test]
-async fn sdk_member_versions_multiple_admins_and_tenant_selection_are_real_server_boundaries() {
+async fn sdk_tenant_admin_cannot_assign_roles_and_tenant_selection_is_a_real_boundary() {
     let mut f = InvitationFixture::new().await;
     let peer = create_test_user(&f.db, f.tenant.id, "console-peer", &f.run).await;
     let other = create_test_tenant(&f.db, "console-foreign", &f.run).await;
@@ -132,7 +132,7 @@ async fn sdk_member_versions_multiple_admins_and_tenant_selection_are_real_serve
     let control = TenantControlApi::new(api, f.tenant.id).unwrap();
     let token = selected(&f, api, f.inviter.id).await;
     let peer_before = control.member(peer.id, &token).await.unwrap();
-    let promoted = control
+    let rejected = control
         .patch_member(
             peer.id,
             &MemberPatch {
@@ -143,14 +143,11 @@ async fn sdk_member_versions_multiple_admins_and_tenant_selection_are_real_serve
             &token,
         )
         .await
-        .unwrap();
-    assert!(promoted.authz_version > peer_before.authz_version);
-    assert!(
-        control
-            .remove_member(peer.id, peer_before.authz_version, &token)
-            .await
-            .is_err()
-    );
+        .unwrap_err();
+    assert!(format!("{rejected:?}").contains("platform administrators"));
+    let peer_after = control.member(peer.id, &token).await.unwrap();
+    assert_eq!(peer_after.tenant_role, TenantRole::Member);
+    assert_eq!(peer_after.authz_version, peer_before.authz_version);
     assert!(
         TenantControlApi::new(api, other.id)
             .unwrap()

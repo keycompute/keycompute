@@ -22,12 +22,16 @@
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use rand::RngCore;
+use hkdf::Hkdf;
+use rand::{RngCore, rngs::OsRng};
+use sha2::{Digest, Sha256};
 use std::fmt;
 use thiserror::Error;
+use uuid::Uuid;
+use zeroize::{Zeroize, Zeroizing};
 
 /// 加密相关错误
 #[derive(Debug, Error)]
@@ -51,6 +55,14 @@ pub enum CryptoError {
     /// Base64 解码失败
     #[error("Base64 decode failed: {0}")]
     Base64DecodeError(#[from] base64::DecodeError),
+
+    /// 密钥包装器与密文记录不匹配
+    #[error("Key-encryption key mismatch")]
+    KeyEncryptionKeyMismatch,
+
+    /// 不支持的信封格式
+    #[error("Unsupported envelope encryption version: {0}")]
+    UnsupportedEnvelopeVersion(i16),
 }
 
 /// AES-256-GCM 密钥长度 (32 bytes)
@@ -58,6 +70,81 @@ const KEY_SIZE: usize = 32;
 
 /// GCM Nonce 长度 (12 bytes, GCM 推荐值)
 const NONCE_SIZE: usize = 12;
+
+/// Produce AI Key 信封格式版本。版本参与 AAD，不能静默降级。
+pub const PRODUCE_AI_KEY_ENVELOPE_VERSION: i16 = 1;
+
+/// 单条 Produce AI Key 的不可变加密上下文。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProduceAiKeyEnvelopeContext {
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub key_id: Uuid,
+}
+
+impl ProduceAiKeyEnvelopeContext {
+    fn validate(self) -> Result<Self, CryptoError> {
+        if self.tenant_id.is_nil() || self.user_id.is_nil() || self.key_id.is_nil() {
+            return Err(CryptoError::InvalidCiphertextFormat);
+        }
+        Ok(self)
+    }
+
+    fn aad(self, purpose: &str, version: i16) -> Vec<u8> {
+        format!(
+            "keycompute:produce-ai-key:{purpose}:v{version}:{}:{}:{}",
+            self.tenant_id, self.user_id, self.key_id
+        )
+        .into_bytes()
+    }
+}
+
+/// 数据库可持久化的单记录信封。两个 nonce 与密文分离保存，便于审计
+/// 格式并为后续 KMS/Vault KEK 提供方保留稳定边界。
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProduceAiKeyEnvelope {
+    pub ciphertext: String,
+    pub nonce: String,
+    pub wrapped_dek: String,
+    pub wrap_nonce: String,
+    pub kek_key_id: String,
+    pub encryption_version: i16,
+}
+
+impl fmt::Debug for ProduceAiKeyEnvelope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProduceAiKeyEnvelope")
+            .field("ciphertext", &"[REDACTED]")
+            .field("nonce", &"[REDACTED]")
+            .field("wrapped_dek", &"[REDACTED]")
+            .field("wrap_nonce", &"[REDACTED]")
+            .field("kek_key_id", &self.kek_key_id)
+            .field("encryption_version", &self.encryption_version)
+            .finish()
+    }
+}
+
+/// 解密后的短生命周期秘密。Debug/Display 均不输出内容，离开作用域时
+/// 清零进程内持有的字符串缓冲区。
+pub struct DecryptedProduceAiKey(Zeroizing<String>);
+
+impl DecryptedProduceAiKey {
+    pub fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Debug for DecryptedProduceAiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("***REDACTED***")
+    }
+}
+
+impl fmt::Display for DecryptedProduceAiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("***REDACTED***")
+    }
+}
 
 /// 加密后的 API Key
 ///
@@ -128,12 +215,14 @@ impl<'de> serde::Deserialize<'de> for EncryptedApiKey {
 #[derive(Clone)]
 pub struct ApiKeyCrypto {
     cipher: Aes256Gcm,
+    key_id: String,
 }
 
 impl fmt::Debug for ApiKeyCrypto {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ApiKeyCrypto")
             .field("algorithm", &"AES-256-GCM")
+            .field("key_id", &self.key_id)
             .finish_non_exhaustive()
     }
 }
@@ -147,7 +236,7 @@ impl ApiKeyCrypto {
     /// # 错误
     /// 如果密钥长度不正确或 Base64 解码失败，返回错误
     pub fn new(secret_key: &str) -> Result<Self, CryptoError> {
-        let key_bytes = BASE64.decode(secret_key)?;
+        let key_bytes = Zeroizing::new(BASE64.decode(secret_key)?);
 
         if key_bytes.len() != KEY_SIZE {
             return Err(CryptoError::InvalidKey(format!(
@@ -157,10 +246,7 @@ impl ApiKeyCrypto {
             )));
         }
 
-        let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_bytes);
-        let cipher = Aes256Gcm::new(key);
-
-        Ok(Self { cipher })
+        Self::from_bytes(key_bytes.as_ref())
     }
 
     /// 从原始字节创建加密器
@@ -178,8 +264,10 @@ impl ApiKeyCrypto {
 
         let key = aes_gcm::Key::<Aes256Gcm>::from_slice(key_bytes);
         let cipher = Aes256Gcm::new(key);
+        let fingerprint = Sha256::digest(key_bytes);
+        let key_id = format!("local-sha256-{}", hex_prefix(&fingerprint, 16));
 
-        Ok(Self { cipher })
+        Ok(Self { cipher, key_id })
     }
 
     /// 生成随机密钥
@@ -187,16 +275,66 @@ impl ApiKeyCrypto {
     /// 返回 Base64 编码的 32 字节密钥。
     /// **重要**: 此密钥应安全存储，丢失后将无法解密已加密的数据。
     pub fn generate_key() -> String {
-        let mut key = [0u8; KEY_SIZE];
-        rand::thread_rng().fill_bytes(&mut key);
-        BASE64.encode(key)
+        let mut key = Zeroizing::new([0u8; KEY_SIZE]);
+        OsRng.fill_bytes(key.as_mut());
+        BASE64.encode(key.as_ref())
     }
 
     /// 生成随机 Nonce
     fn generate_nonce() -> [u8; NONCE_SIZE] {
         let mut nonce = [0u8; NONCE_SIZE];
-        rand::thread_rng().fill_bytes(&mut nonce);
+        OsRng.fill_bytes(&mut nonce);
         nonce
+    }
+
+    /// 不泄露 KEK 本身的稳定标识，用于阻止使用错误主密钥尝试解密。
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    fn encrypt_bytes_with_aad(
+        &self,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<(String, String), CryptoError> {
+        let nonce_bytes = Self::generate_nonce();
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = self
+            .cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
+        Ok((BASE64.encode(ciphertext), BASE64.encode(nonce_bytes)))
+    }
+
+    fn decrypt_bytes_with_aad(
+        &self,
+        ciphertext: &str,
+        nonce: &str,
+        aad: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let nonce_bytes = BASE64.decode(nonce)?;
+        if nonce_bytes.len() != NONCE_SIZE {
+            return Err(CryptoError::InvalidCiphertextFormat);
+        }
+        let ciphertext = BASE64.decode(ciphertext)?;
+        if ciphertext.len() < 16 {
+            return Err(CryptoError::InvalidCiphertextFormat);
+        }
+        self.cipher
+            .decrypt(
+                Nonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: &ciphertext,
+                    aad,
+                },
+            )
+            .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))
     }
 
     /// 加密 API Key
@@ -286,7 +424,12 @@ impl ApiKeyCrypto {
 ///
 /// 用于存储和访问全局加密密钥。
 /// 密钥应在应用启动时设置一次。
-static GLOBAL_CRYPTO: std::sync::OnceLock<ApiKeyCrypto> = std::sync::OnceLock::new();
+struct GlobalCryptoState {
+    provider: ApiKeyCrypto,
+    produce_ai_key_kek: ApiKeyCrypto,
+}
+
+static GLOBAL_CRYPTO: std::sync::OnceLock<GlobalCryptoState> = std::sync::OnceLock::new();
 
 /// 设置全局加密密钥
 ///
@@ -295,8 +438,26 @@ static GLOBAL_CRYPTO: std::sync::OnceLock<ApiKeyCrypto> = std::sync::OnceLock::n
 /// # 参数
 /// - `secret_key`: Base64 编码的 32 字节密钥
 pub fn set_global_crypto(secret_key: &str) -> Result<(), CryptoError> {
-    let crypto = ApiKeyCrypto::new(secret_key)?;
-    let _ = GLOBAL_CRYPTO.set(crypto);
+    let provider = ApiKeyCrypto::new(secret_key)?;
+    let master = Zeroizing::new(BASE64.decode(secret_key)?);
+    if master.len() != KEY_SIZE {
+        return Err(CryptoError::InvalidKey(format!(
+            "Key must be {KEY_SIZE} bytes, got {}",
+            master.len()
+        )));
+    }
+    let mut produce_ai_key_kek = Zeroizing::new([0u8; KEY_SIZE]);
+    Hkdf::<Sha256>::new(None, master.as_ref())
+        .expand(
+            b"keycompute:produce-ai-key:kek:v1",
+            produce_ai_key_kek.as_mut(),
+        )
+        .map_err(|_| CryptoError::InvalidKey("Unable to derive Produce AI Key KEK".into()))?;
+    let state = GlobalCryptoState {
+        provider,
+        produce_ai_key_kek: ApiKeyCrypto::from_bytes(produce_ai_key_kek.as_ref())?,
+    };
+    let _ = GLOBAL_CRYPTO.set(state);
     Ok(())
 }
 
@@ -304,7 +465,11 @@ pub fn set_global_crypto(secret_key: &str) -> Result<(), CryptoError> {
 ///
 /// 如果全局密钥未设置，返回 None
 pub fn global_crypto() -> Option<&'static ApiKeyCrypto> {
-    GLOBAL_CRYPTO.get()
+    GLOBAL_CRYPTO.get().map(|state| &state.provider)
+}
+
+fn produce_ai_key_kek() -> Option<&'static ApiKeyCrypto> {
+    GLOBAL_CRYPTO.get().map(|state| &state.produce_ai_key_kek)
 }
 
 /// 使用全局密钥加密 API Key
@@ -321,6 +486,88 @@ pub fn decrypt_api_key(encrypted: &EncryptedApiKey) -> Result<String, CryptoErro
         CryptoError::InvalidKey("Global crypto key not set. Call set_global_crypto() first.".into())
     })?;
     crypto.decrypt(encrypted)
+}
+
+/// 使用每条记录随机 DEK 加密 Produce AI Key，再由全局 KEK 包装 DEK。
+pub fn encrypt_produce_ai_key(
+    plaintext: &str,
+    context: ProduceAiKeyEnvelopeContext,
+) -> Result<ProduceAiKeyEnvelope, CryptoError> {
+    let context = context.validate()?;
+    let kek = produce_ai_key_kek().ok_or_else(|| {
+        CryptoError::InvalidKey("Produce AI Key encryption key is not configured".into())
+    })?;
+    let mut dek = Zeroizing::new([0u8; KEY_SIZE]);
+    OsRng.fill_bytes(dek.as_mut());
+    let data_cipher = ApiKeyCrypto::from_bytes(dek.as_ref())?;
+    let version = PRODUCE_AI_KEY_ENVELOPE_VERSION;
+    let (ciphertext, nonce) =
+        data_cipher.encrypt_bytes_with_aad(plaintext.as_bytes(), &context.aad("data", version))?;
+    let (wrapped_dek, wrap_nonce) =
+        kek.encrypt_bytes_with_aad(dek.as_ref(), &context.aad("dek", version))?;
+    Ok(ProduceAiKeyEnvelope {
+        ciphertext,
+        nonce,
+        wrapped_dek,
+        wrap_nonce,
+        kek_key_id: kek.key_id().to_owned(),
+        encryption_version: version,
+    })
+}
+
+/// 解包记录 DEK 并按不可变租户/所有者/Key 上下文认证解密。
+pub fn decrypt_produce_ai_key(
+    envelope: &ProduceAiKeyEnvelope,
+    context: ProduceAiKeyEnvelopeContext,
+) -> Result<DecryptedProduceAiKey, CryptoError> {
+    let context = context.validate()?;
+    if envelope.encryption_version != PRODUCE_AI_KEY_ENVELOPE_VERSION {
+        return Err(CryptoError::UnsupportedEnvelopeVersion(
+            envelope.encryption_version,
+        ));
+    }
+    let kek = produce_ai_key_kek().ok_or_else(|| {
+        CryptoError::InvalidKey("Produce AI Key encryption key is not configured".into())
+    })?;
+    if envelope.kek_key_id != kek.key_id() {
+        return Err(CryptoError::KeyEncryptionKeyMismatch);
+    }
+    let mut dek = Zeroizing::new(kek.decrypt_bytes_with_aad(
+        &envelope.wrapped_dek,
+        &envelope.wrap_nonce,
+        &context.aad("dek", envelope.encryption_version),
+    )?);
+    if dek.len() != KEY_SIZE {
+        dek.zeroize();
+        return Err(CryptoError::InvalidCiphertextFormat);
+    }
+    let data_cipher = ApiKeyCrypto::from_bytes(dek.as_ref())?;
+    let plaintext = Zeroizing::new(data_cipher.decrypt_bytes_with_aad(
+        &envelope.ciphertext,
+        &envelope.nonce,
+        &context.aad("data", envelope.encryption_version),
+    )?);
+    // Validate before copying into the returned zeroizing String. On failure,
+    // the original decrypted byte buffer is still zeroized on scope exit.
+    let value = std::str::from_utf8(plaintext.as_ref())
+        .map_err(|_| CryptoError::DecryptionFailed("Invalid UTF-8 in decrypted text".into()))?
+        .to_owned();
+    Ok(DecryptedProduceAiKey(Zeroizing::new(value)))
+}
+
+fn hex_prefix(bytes: &[u8], chars: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(chars.min(bytes.len() * 2));
+    for byte in bytes {
+        if out.len() >= chars {
+            break;
+        }
+        out.push(HEX[(byte >> 4) as usize] as char);
+        if out.len() < chars {
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -441,5 +688,65 @@ mod tests {
         let encrypted = encrypt_api_key(plaintext).expect("Failed to encrypt");
         let decrypted = decrypt_api_key(&encrypted).expect("Failed to decrypt");
         assert_eq!(decrypted, plaintext);
+        assert_ne!(
+            global_crypto().unwrap().key_id(),
+            produce_ai_key_kek().unwrap().key_id(),
+            "Provider encryption and Produce AI Key wrapping require separate key domains"
+        );
+    }
+
+    #[test]
+    fn produce_key_envelope_round_trips_with_unique_record_keys() {
+        set_global_crypto(&ApiKeyCrypto::generate_key()).unwrap();
+        let context = ProduceAiKeyEnvelopeContext {
+            tenant_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            key_id: Uuid::new_v4(),
+        };
+        let plaintext = "sk-envelope-test-123456789012345678901234567890123";
+        let first = encrypt_produce_ai_key(plaintext, context).unwrap();
+        let second = encrypt_produce_ai_key(plaintext, context).unwrap();
+
+        assert_ne!(first.ciphertext, second.ciphertext);
+        assert_ne!(first.wrapped_dek, second.wrapped_dek);
+        assert_ne!(first.nonce, second.nonce);
+        assert_ne!(first.wrap_nonce, second.wrap_nonce);
+        assert_eq!(
+            decrypt_produce_ai_key(&first, context).unwrap().expose(),
+            plaintext
+        );
+        assert!(!format!("{first:?}").contains(plaintext));
+    }
+
+    #[test]
+    fn produce_key_envelope_rejects_tampering_and_context_reuse() {
+        set_global_crypto(&ApiKeyCrypto::generate_key()).unwrap();
+        let context = ProduceAiKeyEnvelopeContext {
+            tenant_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            key_id: Uuid::new_v4(),
+        };
+        let envelope = encrypt_produce_ai_key("sk-context-bound-secret", context).unwrap();
+        let wrong_context = ProduceAiKeyEnvelopeContext {
+            key_id: Uuid::new_v4(),
+            ..context
+        };
+        assert!(decrypt_produce_ai_key(&envelope, wrong_context).is_err());
+
+        let mut tampered = envelope.clone();
+        let replacement = if tampered.ciphertext.starts_with('A') {
+            "B"
+        } else {
+            "A"
+        };
+        tampered.ciphertext.replace_range(..1, replacement);
+        assert!(decrypt_produce_ai_key(&tampered, context).is_err());
+
+        let mut unsupported = envelope;
+        unsupported.encryption_version += 1;
+        assert!(matches!(
+            decrypt_produce_ai_key(&unsupported, context),
+            Err(CryptoError::UnsupportedEnvelopeVersion(_))
+        ));
     }
 }

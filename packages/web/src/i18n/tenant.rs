@@ -305,14 +305,14 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("tenant.members", "成员", "Members"),
     (
         "tenant.members_hint",
-        "管理当前租户的普通成员。租户管理员同级，只有平台管理员可以修改管理员身份或状态。",
-        "Manage ordinary members in this tenant. Tenant administrators are peers; only platform administrators can change an administrator’s role or status.",
+        "管理当前租户普通成员的状态和访问权。租户角色只能由 root/operator 在平台租户页面设置。",
+        "Manage ordinary members' status and access. Only root/operator can assign tenant roles from the platform tenant page.",
     ),
     ("tenant.invitations", "邀请", "Invitations"),
     (
         "tenant.invitations_hint",
-        "邀请用户加入当前租户。邀请不能授予平台权限。",
-        "Invite users to this tenant. Invitations never grant platform privileges.",
+        "邀请用户以普通成员身份加入当前租户。租户管理员权限只能由 root/operator 后续授予。",
+        "Invite users as ordinary members. Only root/operator can grant tenant administrator access later.",
     ),
     ("tenant.audit", "审计记录", "Audit events"),
     (

@@ -374,6 +374,11 @@ impl TenantControlApi {
                 "invitation duration is outside the supported range".into(),
             ));
         }
+        if body.tenant_role != TenantRole::Member {
+            return Err(ClientError::Config(
+                "tenant invitations may only grant ordinary membership".into(),
+            ));
+        }
         self.client
             .post_json(&format!("{}/invitations", self.base), body, Some(token))
             .await

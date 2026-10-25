@@ -2,7 +2,8 @@ use client_api::error::Result;
 use client_api::{
     ApiKeyApi,
     api::api_key::{
-        ApiKeyPage, ApiKeyQueryParams, CreateApiKeyRequest, CreateApiKeyResponse, MessageResponse,
+        ApiKeyPage, ApiKeyQueryParams, CreateApiKeyRequest, CreateApiKeyResponse,
+        DeleteApiKeyResponse,
     },
 };
 
@@ -33,7 +34,14 @@ pub async fn create(name: &str, token: &str) -> Result<CreateApiKeyResponse> {
         .await
 }
 
-pub async fn delete(id: &str, token: &str) -> Result<MessageResponse> {
+pub async fn delete(id: &str, token: &str) -> Result<DeleteApiKeyResponse> {
     let client = get_client();
     ApiKeyApi::new(&client).delete_api_key(id, token).await
+}
+
+pub async fn reveal(id: &str, current_password: &str, token: &str) -> Result<String> {
+    let client = get_client();
+    ApiKeyApi::new(&client)
+        .reveal_api_key(id, current_password, token)
+        .await
 }

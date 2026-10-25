@@ -3758,6 +3758,7 @@ dependencies = [
  "hmac",
  "keycompute-config",
  "keycompute-observability",
+ "keycompute-runtime",
  "keycompute-types",
  "parking_lot",
  "rand 0.8.5",
@@ -3885,14 +3886,17 @@ dependencies = [
  "aes-gcm",
  "base64",
  "deadpool-redis",
+ "hkdf",
  "rand 0.8.5",
  "redis",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

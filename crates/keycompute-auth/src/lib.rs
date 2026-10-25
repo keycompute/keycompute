@@ -14,10 +14,11 @@ use keycompute_types::{
     AuthorizationSubject, CredentialKind, KeyComputeError, PlatformRole, Result, TenantRole,
 };
 pub use password::{
-    CompleteRegistrationRequest, CompleteRegistrationResponse, EmailConfig, EmailService,
-    EmailValidator, LoginRequest, LoginResponse, LoginService, PasswordHasher,
-    PasswordResetService, PasswordValidator, RegistrationService, RequestPasswordResetRequest,
-    RequestRegistrationCodeRequest, RequestRegistrationCodeResponse, ResetPasswordRequest,
+    CompleteRegistrationRequest, CompleteRegistrationResponse, DEFAULT_LOCK_DURATION_MINUTES,
+    DEFAULT_MAX_FAILED_ATTEMPTS, EmailConfig, EmailService, EmailValidator, LoginRequest,
+    LoginResponse, LoginService, PasswordHasher, PasswordResetService, PasswordValidator,
+    RegistrationService, RequestPasswordResetRequest, RequestRegistrationCodeRequest,
+    RequestRegistrationCodeResponse, ResetPasswordRequest,
 };
 pub use permission::{
     AuthorizationAction, AuthorizationDecision, Permission, PermissionChecker, ResourceScope,

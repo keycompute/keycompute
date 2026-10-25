@@ -90,6 +90,12 @@ pub mod produce_ai_keys {
     pub const USER_ID: &str = "user_id";
     pub const NAME: &str = "name";
     pub const PRODUCE_AI_KEY_HASH: &str = "produce_ai_key_hash";
+    pub const PRODUCE_AI_KEY_CIPHERTEXT: &str = "produce_ai_key_ciphertext";
+    pub const PRODUCE_AI_KEY_NONCE: &str = "produce_ai_key_nonce";
+    pub const PRODUCE_AI_KEY_WRAPPED_DEK: &str = "produce_ai_key_wrapped_dek";
+    pub const PRODUCE_AI_KEY_WRAP_NONCE: &str = "produce_ai_key_wrap_nonce";
+    pub const PRODUCE_AI_KEY_KEK_ID: &str = "produce_ai_key_kek_id";
+    pub const PRODUCE_AI_KEY_ENCRYPTION_VERSION: &str = "produce_ai_key_encryption_version";
     pub const PRODUCE_AI_KEY_PREVIEW: &str = "produce_ai_key_preview";
     pub const REVOKED: &str = "revoked";
     pub const REVOKED_AT: &str = "revoked_at";

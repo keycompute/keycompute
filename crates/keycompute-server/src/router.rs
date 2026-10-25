@@ -144,6 +144,7 @@ use crate::{
         responses_websocket,
         retrieve_model,
         retrieve_response,
+        reveal_api_key,
         revoke_node_token,
         set_account_cooldown,
         set_default_pricing,
@@ -381,6 +382,7 @@ pub fn create_router(state: AppState) -> Router {
         // API Keys 管理
         .route("/api/v1/keys", get(list_my_api_keys).post(create_api_key))
         .route("/api/v1/keys/{id}", delete(delete_api_key))
+        .route("/api/v1/keys/{id}/reveal", post(reveal_api_key))
         // 用量统计
         .route("/api/v1/usage", get(get_my_usage))
         .route("/api/v1/usage/stats", get(get_my_usage_stats))

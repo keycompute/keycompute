@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS tenant_invitations (
     invited_by UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     email VARCHAR(255) NOT NULL,
     tenant_role VARCHAR(20) NOT NULL DEFAULT 'member'
-        CONSTRAINT chk_tenant_invitations_tenant_role CHECK (tenant_role IN ('admin', 'member')),
+        CONSTRAINT chk_tenant_invitations_tenant_role CHECK (tenant_role = 'member'),
     token_hash VARCHAR(64) NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
     status VARCHAR(20) NOT NULL DEFAULT 'pending'
         CONSTRAINT chk_tenant_invitations_status CHECK (status IN ('pending', 'accepted', 'expired', 'revoked')),
@@ -164,6 +164,15 @@ CREATE TABLE IF NOT EXISTS produce_ai_keys (
     user_id UUID NOT NULL,
     name VARCHAR(255) NOT NULL,
     produce_ai_key_hash VARCHAR(255) NOT NULL UNIQUE,
+    -- Owner reveal uses per-record envelope encryption. The plaintext and DEK
+    -- are never persisted; the configured KEK remains outside PostgreSQL.
+    produce_ai_key_ciphertext TEXT NOT NULL,
+    produce_ai_key_nonce VARCHAR(24) NOT NULL,
+    produce_ai_key_wrapped_dek TEXT NOT NULL,
+    produce_ai_key_wrap_nonce VARCHAR(24) NOT NULL,
+    produce_ai_key_kek_id VARCHAR(128) NOT NULL,
+    produce_ai_key_encryption_version SMALLINT NOT NULL DEFAULT 1
+        CHECK (produce_ai_key_encryption_version > 0),
     produce_ai_key_preview VARCHAR(20) NOT NULL,
     revoked BOOLEAN NOT NULL DEFAULT FALSE,
     revoked_at TIMESTAMPTZ,
@@ -181,11 +190,9 @@ CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_tenant ON produce_ai_keys(tenant_
 CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_user ON produce_ai_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_hash ON produce_ai_keys(produce_ai_key_hash);
 CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_revoked ON produce_ai_keys(revoked) WHERE revoked = FALSE;
--- Paste this block into the final greenfield
--- crates/keycompute-db/migrations/001_init.sql after produce_ai_keys.
--- It is intentionally create-only: do not turn it into 002_* or add ALTER
--- compatibility paths.  No plaintext key, ciphertext, key hash, password, or
--- outbox payload is stored here.
+
+-- Issuance intents contain workflow metadata only. No plaintext key,
+-- ciphertext, key hash, password, or outbox payload is stored here.
 
 CREATE TABLE IF NOT EXISTS tenant_key_issuance_intents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

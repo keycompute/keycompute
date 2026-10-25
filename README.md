@@ -285,7 +285,7 @@ uses `config.toml` instead.
 |:---|:---|:---:|
 | `KC__DATABASE__URL` | PostgreSQL connection string | ✅ |
 | `KC__AUTH__JWT_SECRET` | Production: non-default/non-blank JWT signing secret, at least 32 bytes | ✅ |
-| `KC__CRYPTO__SECRET_KEY` | Production: Base64 encoding of exactly 32 bytes; cannot be changed after Provider API keys are written | ✅ |
+| `KC__CRYPTO__SECRET_KEY` | Production: 32-byte Base64 KEK for Provider encryption and per-record Produce AI Key envelope encryption; rotate only after re-encrypting/rewrapping stored records | ✅ |
 | `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | Production with Redis: non-default HMAC signing secret of at least 16 bytes; issues one-time node registration tokens | Conditional |
 | `KC__REDIS__URL` | Redis connection string (optional; without it: rate limiter falls back to in-memory, cache no-ops, node gateway unavailable) | ⚪ |
 | `KC__EMAIL__SMTP_HOST` | SMTP host (optional) | ⚪ |

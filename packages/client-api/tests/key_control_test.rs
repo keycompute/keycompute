@@ -315,26 +315,24 @@ async fn owner_claim_is_single_dispatch_redacted_and_bound_to_the_original_inten
     }
 }
 #[tokio::test]
-async fn deletion_honors_retained_revoked_history_and_decline_is_owner_scoped() {
+async fn deletion_requires_a_confirmed_permanent_result_and_decline_is_owner_scoped() {
     let server = MockServer::start().await;
     let tenant = Uuid::new_v4();
     let owner = Uuid::new_v4();
     let id = Uuid::new_v4();
     let api = TenantKeyApi::new(&client(&server), tenant).unwrap();
-    let mut revoked = key(tenant, owner, id);
-    revoked["revoked"] = json!(true);
-    revoked["revoked_at"] = json!(STAMP);
     Mock::given(method("DELETE"))
         .and(path(format!("/api/v1/tenants/{tenant}/keys/{id}")))
+        .and(query_param("permanent", "true"))
         .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"success":true,"key_id":id,"key":revoked,"revoked_at":STAMP,"deleted":false}),
+            json!({"success":true,"key_id":id,"key":null,"revoked_at":null,"deleted":true}),
         ))
         .expect(1)
         .mount(&server)
         .await;
-    let retained = api.delete(id, "console").await.unwrap();
-    assert!(!retained.deleted);
-    assert!(retained.key.unwrap().revoked);
+    let deleted = api.delete(id, "console").await.unwrap();
+    assert!(deleted.deleted);
+    assert!(deleted.key.is_none());
     let mine = OwnerKeyIssuanceApi::new(&client(&server), tenant, owner).unwrap();
     let original: IssuanceIntent = serde_json::from_value(intent(tenant, owner, id)).unwrap();
     let mut cancelled = intent(tenant, owner, id);

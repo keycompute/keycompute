@@ -203,7 +203,7 @@ async fn ordinary_jwt_retains_self_service_and_public_routes_stay_public() {
         request(
             &state,
             "DELETE",
-            &format!("/api/v1/keys/{key_id}"),
+            &format!("/api/v1/keys/{key_id}?permanent=true"),
             &token,
             Value::Null
         )

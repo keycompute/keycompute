@@ -3243,13 +3243,16 @@ mod tests {
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "INSERT INTO produce_ai_keys \
-             (id, tenant_id, user_id, name, produce_ai_key_hash, produce_ai_key_preview) \
-             VALUES ($1, $2, $3, 'debt-test', $4, 'sk-test')",
+             (id,tenant_id,user_id,name,produce_ai_key_hash,produce_ai_key_ciphertext,produce_ai_key_nonce, \
+              produce_ai_key_wrapped_dek,produce_ai_key_wrap_nonce,produce_ai_key_kek_id, \
+              produce_ai_key_encryption_version,produce_ai_key_preview) \
+             VALUES ($1,$2,$3,'debt-test',$4,'fixture-unrecoverable','AAAAAAAAAAAAAAAA', \
+              'fixture-unrecoverable','AAAAAAAAAAAAAAAA','test-fixture',1,'sk-test')",
             [
                 key_id.into(),
                 tenant_id.into(),
                 user_id.into(),
-                format!("hash-{}", Uuid::new_v4()).into(),
+                keycompute_auth::ProduceAiKeyValidator::hash_key(&format!("sk-{key_id}")).into(),
             ],
         ))
         .await

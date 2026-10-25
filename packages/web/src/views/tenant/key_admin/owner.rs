@@ -157,11 +157,13 @@ fn SecretPanel(
     let mut copied = use_signal(|| false);
     let mut copying = use_signal(|| false);
     let mut copy_failed = use_signal(|| false);
+    let mut revealed = use_signal(|| false);
     use_effect(move || {
         let _ = secret.read().as_ref().map(|k| k.key_id);
         copied.set(false);
         copy_failed.set(false);
         copying.set(false);
+        revealed.set(false);
     });
     let copy = move |_| {
         if copying() || !scope.is_current(auth, users) {
@@ -195,8 +197,9 @@ fn SecretPanel(
     };
     rsx! {section{class:"kc-api-success-panel owner-issued-secret",
         h2{{i18n.t("tenant_keys.secret_title")}}p{{i18n.t("tenant_keys.secret_hint")}}p{TechnicalId{value:key.key_id.to_string()}}
-        pre{class:"kc-api-example",style:"white-space:pre-wrap;overflow-wrap:anywhere","{key.key.expose()}"}
-        button{class:"btn btn-secondary",disabled:copying(),onclick:copy,{i18n.t("tenant_keys.copy")}}
+        pre{class:"kc-api-example",style:"white-space:pre-wrap;overflow-wrap:anywhere",if revealed(){"{key.key.expose()}"}else{"••••••••••••••••••••"}}
+        button{class:"btn btn-secondary",onclick:move |_|revealed.toggle(),{i18n.t(if revealed(){"tenant_keys.hide_secret"}else{"tenant_keys.reveal_secret"})}}
+        button{class:"btn btn-secondary",disabled:copying() || !revealed(),onclick:copy,{i18n.t("tenant_keys.copy")}}
         button{class:"btn btn-secondary",onclick:move |_|on_close.call(()),{i18n.t("tenant_keys.clear_secret")}}
         if copied(){p{role:"status",{i18n.t("tenant_keys.copied")}}}
         if copy_failed(){p{role:"alert",{i18n.t("tenant_keys.copy_failed")}}}

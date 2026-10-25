@@ -193,6 +193,20 @@ mod tests {
     }
 
     #[test]
+    fn api_key_schema_uses_per_record_envelope_encryption() {
+        let sql = include_str!("../migrations/001_init.sql");
+        assert!(sql.contains("produce_ai_key_hash VARCHAR(255) NOT NULL UNIQUE"));
+        assert!(sql.contains("produce_ai_key_ciphertext TEXT NOT NULL"));
+        assert!(sql.contains("produce_ai_key_nonce VARCHAR(24) NOT NULL"));
+        assert!(sql.contains("produce_ai_key_wrapped_dek TEXT NOT NULL"));
+        assert!(sql.contains("produce_ai_key_wrap_nonce VARCHAR(24) NOT NULL"));
+        assert!(sql.contains("produce_ai_key_kek_id VARCHAR(128) NOT NULL"));
+        assert!(sql.contains("produce_ai_key_encryption_version SMALLINT NOT NULL DEFAULT 1"));
+        assert!(!sql.contains("produce_ai_key_plaintext"));
+        assert!(sql.contains("produce_ai_key_preview VARCHAR(20) NOT NULL"));
+    }
+
+    #[test]
     fn platform_settings_schema_keeps_identity_and_monotonic_versions() {
         let sql = include_str!("../migrations/001_init.sql");
         assert!(sql.contains("guard_platform_setting_version"));
@@ -417,6 +431,7 @@ mod tests {
             "uq_tenant_memberships_one_current_tenant_per_user",
             "status IN ('active', 'suspended', 'removed')",
             "tenant_role VARCHAR(20)",
+            "CONSTRAINT chk_tenant_invitations_tenant_role CHECK (tenant_role = 'member')",
             "accepted_by UUID REFERENCES users(id) ON DELETE RESTRICT",
             "platform_role VARCHAR(20) NOT NULL",
             "metadata JSONB NOT NULL DEFAULT '{}'::jsonb",

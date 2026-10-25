@@ -427,13 +427,25 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("dashboard.account_settings", "Account Settings");
     m.insert(
         "api_keys.subtitle",
-        "Manage OpenAI-compatible access keys. Full key values are shown only once after creation.",
+        "Manage OpenAI-compatible access keys. Full values stay hidden until you explicitly reveal them.",
     );
     m.insert("api_keys.create", "Create API Key");
     m.insert("api_keys.active", "Active");
+    m.insert("api_keys.current", "Current keys");
+    m.insert("api_keys.expired", "Expired");
     m.insert("api_keys.all_with_revoked", "All, including revoked");
     m.insert("api_keys.created_title", "API Key created");
-    m.insert("api_keys.created_once", "Shown only once. Save it now.");
+    m.insert(
+        "api_keys.created_once",
+        "Encrypted for your account and hidden by default. This page keeps a temporary in-memory copy only until you close it or leave the page.",
+    );
+    m.insert("api_keys.reveal_secret", "Reveal key");
+    m.insert("api_keys.hide_secret", "Hide key");
+    m.insert("api_keys.confirm_reveal", "Confirm and reveal");
+    m.insert(
+        "api_keys.password_required",
+        "Enter your current password to reveal this key.",
+    );
     m.insert("api_keys.example", "Usage example");
     m.insert("api_keys.models_title", "1. Available models");
     m.insert("api_keys.models_desc_prefix", "Use the ");
@@ -502,14 +514,15 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.delete_confirm_title", "Delete API Key");
     m.insert(
         "api_keys.delete_confirm_message",
-        "Delete API Key “{name}”? This action cannot be undone.",
+        "Permanently delete API Key “{name}”? Its credential and recoverable secret will be removed immediately and cannot be restored. Security audit history is retained, and any pending rotation that replaces this key will be cancelled.",
     );
+    m.insert("api_keys.delete_permanently", "Permanently delete");
     m.insert("api_keys.loading_failed", "Load failed");
     m.insert("api_keys.registry", "API Key Management");
     m.insert("api_keys.empty_meta", "No keys match the current filter.");
     m.insert(
         "api_keys.active_meta",
-        "Showing active keys available for gateway requests.",
+        "Showing current non-revoked keys. Expired keys remain visible so you can permanently delete them.",
     );
     m.insert(
         "api_keys.all_meta",

@@ -509,6 +509,151 @@ async fn rotation_request_is_inert_until_its_owner_claims() {
 }
 
 #[tokio::test]
+async fn permanent_deletion_requires_confirmation_and_cancels_pending_rotation() {
+    let mut f = Fixture::new().await;
+    let (source, source_raw) = f.key(f.a.id, f.owner.id).await;
+    let admin = f.token(f.a.id, f.a.admin_user_id).await;
+    let base = format!("/api/v1/tenants/{}/keys/{}", f.a.id, source.id);
+    let (status, rotation, _) = request(
+        &f.state,
+        "POST",
+        &format!("{base}/rotate"),
+        &admin,
+        json!({"name":"cancelled replacement"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{rotation}");
+    let intent_id = id(&rotation["intent"]["id"]);
+
+    let (status, _, _) = request(&f.state, "DELETE", &base, &admin, Value::Null).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(f.state.auth.verify_api_key(&source_raw).await.is_ok());
+
+    let (status, deleted, _) = request(
+        &f.state,
+        "DELETE",
+        &format!("{base}?permanent=true"),
+        &admin,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["deleted"], true);
+    assert!(f.state.auth.verify_api_key(&source_raw).await.is_err());
+    let row =
+        f.db.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT status FROM tenant_key_issuance_intents WHERE tenant_id=$1 AND id=$2",
+            [f.a.id.into(), intent_id.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "status").unwrap(), "cancelled");
+    let audit =
+        f.db.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*)::BIGINT AS count FROM tenant_audit_events
+             WHERE tenant_id=$1 AND action='key_issuance.cancel' AND resource_id=$2",
+            [f.a.id.into(), intent_id.to_string().into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(audit.try_get::<i64>("", "count").unwrap(), 1);
+    f.guard.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn permanent_deletion_cancels_a_rotation_committed_while_waiting_for_its_source_key() {
+    let mut f = Fixture::new().await;
+    let (source, _) = f.key(f.a.id, f.owner.id).await;
+    let (admin_scope, admin_snapshot, admin_actor) = f.authority(f.a.id, f.a.admin_user_id).await;
+    let owner_user = User::find_by_id(&f.db, f.owner.id).await.unwrap().unwrap();
+    let owner_membership = TenantMembership::find_any(&f.db, f.a.id, f.owner.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let creating = f.db.begin().await.unwrap();
+    let lane = format!("keycompute:key-rotation:{}:{}", f.a.id, source.id);
+    creating
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            [lane.into()],
+        ))
+        .await
+        .unwrap();
+    creating
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM produce_ai_keys WHERE tenant_id=$1 AND id=$2 FOR UPDATE",
+            [f.a.id.into(), source.id.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let delete_db = f.db.clone();
+    let source_id = source.id;
+    let deletion = tokio::spawn(async move {
+        ProduceAiKey::remove_in_tenant(&delete_db, admin_scope, source_id, &admin_actor).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !deletion.is_finished(),
+        "deletion must wait for the source-key rotation lane"
+    );
+
+    let intent_id = Uuid::new_v4();
+    creating
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO tenant_key_issuance_intents
+             (id,tenant_id,owner_user_id,requested_by_user_id,replaces_key_id,requested_name,
+              status,expires_at,requested_by_token_version,requested_by_authz_version,
+              owner_token_version,owner_authz_version,tenant_authz_version)
+             VALUES($1,$2,$3,$4,$5,'concurrent replacement','pending',NOW()+INTERVAL '15 minutes',
+                    $6,$7,$8,$9,$10)",
+            [
+                intent_id.into(),
+                f.a.id.into(),
+                f.owner.id.into(),
+                f.a.admin_user_id.into(),
+                source.id.into(),
+                admin_snapshot.token_version.into(),
+                admin_snapshot.membership_authz_version.into(),
+                owner_user.token_version.into(),
+                owner_membership.authz_version.into(),
+                admin_snapshot.tenant_authz_version.into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    creating.commit().await.unwrap();
+    deletion.await.unwrap().unwrap();
+
+    assert!(
+        ProduceAiKey::find_in_tenant(&f.db, admin_scope, source.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let intent =
+        f.db.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT status FROM tenant_key_issuance_intents WHERE tenant_id=$1 AND id=$2",
+            [f.a.id.into(), intent_id.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(intent.try_get::<String>("", "status").unwrap(), "cancelled");
+    f.guard.cleanup().await.unwrap();
+}
+
+#[tokio::test]
 async fn regranted_administrator_or_owner_role_does_not_reanimate_old_issuance() {
     let mut f = Fixture::new().await;
     let delegate = create_test_user(&f.db, f.a.id, "issuance-delegate", &f.run).await;
@@ -828,7 +973,7 @@ async fn expired_issuance_never_creates_a_credential() {
 }
 
 #[tokio::test]
-async fn committed_key_claim_and_admin_revocation_refresh_cached_owner_dashboard() {
+async fn committed_key_claim_and_permanent_deletion_refresh_cached_owner_dashboard() {
     let mut f = Fixture::new().await;
     let intent = f.issue().await;
     let owner = f.token(f.a.id, f.owner.id).await;
@@ -889,19 +1034,20 @@ async fn committed_key_claim_and_admin_revocation_refresh_cached_owner_dashboard
     let (_, current, _) = request(&f.state, "GET", dashboard, &owner, Value::Null).await;
     assert_eq!(current["active_keys"][0]["name"], "Updated dashboard key");
 
-    let (status, _, _) = request(
+    let (status, deleted, _) = request(
         &f.state,
-        "POST",
-        &format!("/api/v1/tenants/{}/keys/{key_id}/revoke", f.a.id),
+        "DELETE",
+        &format!("/api/v1/tenants/{}/keys/{key_id}?permanent=true", f.a.id),
         &admin,
         Value::Null,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["deleted"], true);
     let (_, current, _) = request(&f.state, "GET", dashboard, &owner, Value::Null).await;
     assert_eq!(
         current["active_key_count"], 0,
-        "committed revocation must fence the cached owner view"
+        "committed permanent deletion must fence the cached owner view"
     );
     f.guard.cleanup().await.unwrap();
 }

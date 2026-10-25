@@ -20,6 +20,37 @@ use uuid::Uuid;
 // 初始化结束后才开始访问数据库，不会观察到初始化过程的中间状态。
 static SCHEMA_INITIALIZED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
+/// Known only to isolated integration fixtures. Production credentials never
+/// use this value or the reduced test-only Argon2 cost.
+pub const TEST_USER_PASSWORD: &str = "KeyCompute-Test-Password-2026!";
+
+async fn create_test_credential(db: &DatabaseConnection, user_id: Uuid) {
+    let password_hash = keycompute_auth::PasswordHasher::with_params(1024, 1, 1)
+        .unwrap()
+        .hash(TEST_USER_PASSWORD)
+        .unwrap();
+    let credential = keycompute_db::UserCredential::create(
+        db,
+        &keycompute_db::CreateUserCredentialRequest {
+            user_id,
+            password_hash,
+        },
+    )
+    .await
+    .expect("fixture credential should be created");
+    credential
+        .update(
+            db,
+            &keycompute_db::UpdateUserCredentialRequest {
+                email_verified: Some(true),
+                email_verified_at: Some(chrono::Utc::now()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fixture credential should be email-verified");
+}
+
 pub async fn initialize_test_schema(db: &DatabaseConnection) -> Result<(), keycompute_db::DbError> {
     SCHEMA_INITIALIZED
         .get_or_try_init(|| async {
@@ -51,6 +82,10 @@ pub async fn initialize_test_schema(db: &DatabaseConnection) -> Result<(), keyco
 }
 
 pub async fn create_test_pool() -> DatabaseConnection {
+    let crypto_key = std::env::var("KC__CRYPTO__SECRET_KEY")
+        .unwrap_or_else(|_| "LXmXUgcaoZePsWayXJN2E5Wa9/zpkl/vOTwnLNy/oLc=".into());
+    keycompute_runtime::set_global_crypto(&crypto_key)
+        .expect("test envelope-encryption key should be valid");
     let database_url = crate::common::resolve_database_url();
 
     use sea_orm::ConnectOptions;
@@ -242,6 +277,7 @@ pub async fn create_test_tenant(
     )
     .await
     .expect("failed to create global fixture administrator");
+    create_test_credential(pool, administrator.id).await;
     let tx = pool
         .begin()
         .await
@@ -291,6 +327,7 @@ pub async fn create_test_user(
     )
     .await
     .expect("Failed to create test user");
+    create_test_credential(pool, user.id).await;
     let tx = pool
         .begin()
         .await

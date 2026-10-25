@@ -32,10 +32,7 @@ pub(super) fn Editor(
     let label = op.label();
     let requesting = matches!(op, Operation::Request);
     let editing = matches!(op, Operation::Edit(_));
-    let dangerous = matches!(
-        op,
-        Operation::Revoke(_) | Operation::Delete(_) | Operation::Cancel(_)
-    );
+    let dangerous = matches!(op, Operation::Delete(_) | Operation::Cancel(_));
     let input_fields = requesting || editing || matches!(op, Operation::Rotate(_));
     let original = op.clone();
     let submit = move |_| {
@@ -91,17 +88,6 @@ pub(super) fn Editor(
                         }
                         Ok("tenant.saved")
                     }
-                    Operation::Revoke(key) => {
-                        let result = api.revoke(key.id, &token).await?;
-                        if result
-                            .key
-                            .as_ref()
-                            .is_some_and(|r| r.owner_user_id != key.owner_user_id)
-                        {
-                            return Err(invalid());
-                        }
-                        Ok("tenant_keys.revoked_result")
-                    }
                     Operation::Delete(key) => {
                         let result = api.delete(key.id, &token).await?;
                         if result
@@ -111,11 +97,10 @@ pub(super) fn Editor(
                         {
                             return Err(invalid());
                         }
-                        Ok(if result.deleted {
-                            "tenant_keys.deleted_result"
-                        } else {
-                            "tenant_keys.retained_result"
-                        })
+                        if !result.deleted {
+                            return Err(invalid());
+                        }
+                        Ok("tenant_keys.deleted_result")
                     }
                     Operation::Cancel(intent) => {
                         let result = api.cancel(intent.id, &token).await?;
@@ -179,7 +164,11 @@ pub(super) fn Editor(
                     }
                 }
             }
-            div{class:"command-note",p{{i18n.t("tenant_keys.metadata_only")}}p{{i18n.t("tenant.command_hint")}}}
+            div{class:"command-note",
+                if matches!(op,Operation::Delete(_)){p{role:"alert",{i18n.t("tenant_keys.delete_permanent_warning")}}}
+                else {p{{i18n.t("tenant_keys.metadata_only")}}}
+                p{{i18n.t("tenant.command_hint")}}
+            }
         }
         div{class:"modal-footer",
             button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}

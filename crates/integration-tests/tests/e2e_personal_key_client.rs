@@ -5,7 +5,9 @@ use client_api::{
 };
 use integration_tests::{
     common::generate_test_id,
-    db::{TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{
+        TEST_USER_PASSWORD, TestDataGuard, create_test_pool, create_test_tenant, create_test_user,
+    },
 };
 use keycompute_db::{DbRouter, Tenant, User};
 use keycompute_server::{AppState, create_router};
@@ -69,9 +71,18 @@ async fn real_personal_key_client_creates_only_the_current_owners_key_with_serve
     );
     let created = created.unwrap();
     let id: Uuid = created.id.parse().unwrap();
-    let row=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT tenant_id,user_id,expires_at,produce_ai_key_hash FROM produce_ai_keys WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
-        [a.id.into(),owner.id.into(),id.into()])).await.unwrap().unwrap();
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT tenant_id,user_id,expires_at,produce_ai_key_hash,produce_ai_key_ciphertext,
+                produce_ai_key_nonce,produce_ai_key_wrapped_dek,produce_ai_key_wrap_nonce,
+                produce_ai_key_kek_id,produce_ai_key_encryption_version
+         FROM produce_ai_keys WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
+            [a.id.into(), owner.id.into(), id.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(row.try_get::<Uuid>("", "tenant_id").unwrap(), a.id);
     assert_eq!(row.try_get::<Uuid>("", "user_id").unwrap(), owner.id);
     let expiry = row
@@ -83,6 +94,73 @@ async fn real_personal_key_client_creates_only_the_current_owners_key_with_serve
         row.try_get::<String>("", "produce_ai_key_hash").unwrap(),
         keycompute_auth::ProduceAiKeyValidator::hash_key(&created.api_key)
     );
+    assert_ne!(
+        row.try_get::<String>("", "produce_ai_key_ciphertext")
+            .unwrap(),
+        created.api_key,
+        "PostgreSQL must never persist the API Key plaintext"
+    );
+    assert!(
+        !row.try_get::<String>("", "produce_ai_key_wrapped_dek")
+            .unwrap()
+            .contains(&created.api_key)
+    );
+    assert_eq!(
+        row.try_get::<i16>("", "produce_ai_key_encryption_version")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        row.try_get::<String>("", "produce_ai_key_nonce")
+            .unwrap()
+            .len(),
+        16
+    );
+    assert_eq!(
+        row.try_get::<String>("", "produce_ai_key_wrap_nonce")
+            .unwrap()
+            .len(),
+        16
+    );
+    assert!(
+        row.try_get::<String>("", "produce_ai_key_kek_id")
+            .unwrap()
+            .starts_with("local-sha256-")
+    );
+    assert_eq!(
+        api.reveal_api_key(&created.id, TEST_USER_PASSWORD, &token)
+            .await
+            .unwrap(),
+        created.api_key
+    );
+    assert!(
+        api.reveal_api_key(&created.id, "wrong-password", &token)
+            .await
+            .is_err(),
+        "owner reveal requires password confirmation"
+    );
+    let credential = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT failed_login_attempts,locked_until FROM user_credentials WHERE user_id=$1",
+            [owner.id.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        credential
+            .try_get::<i32>("", "failed_login_attempts")
+            .unwrap(),
+        1,
+        "a failed secret reveal must participate in credential lockout protection"
+    );
+    assert!(
+        credential
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>>("", "locked_until")
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(api.list_my_api_keys(false, &token).await.unwrap().len(), 1);
     assert!(
         api.list_my_api_keys(false, &admin)
@@ -93,28 +171,25 @@ async fn real_personal_key_client_creates_only_the_current_owners_key_with_serve
     );
     for denied in [&foreign, &peer] {
         assert!(api.delete_api_key(&created.id, denied).await.is_err());
+        assert!(
+            api.reveal_api_key(&created.id, TEST_USER_PASSWORD, denied)
+                .await
+                .is_err()
+        );
     }
     assert!(matches!(
         api.list_my_api_keys(false, &created.api_key).await,
         Err(ClientError::Forbidden(_) | ClientError::Unauthorized(_))
     ));
     assert!(api.delete_api_key(&created.id, &token).await.is_ok());
-    let revoked = api.list_my_api_keys(true, &token).await.unwrap();
-    assert_eq!(
-        revoked.len(),
-        1,
-        "first personal removal preserves revoked metadata"
-    );
-    assert_eq!(revoked[0].id, created.id);
-    assert!(revoked[0].revoked());
     assert!(
-        api.list_my_api_keys(false, &token)
+        api.reveal_api_key(&created.id, TEST_USER_PASSWORD, &token)
             .await
-            .unwrap()
-            .is_empty()
+            .is_err(),
+        "permanently deleted API keys must not reveal their recoverable secret"
     );
-    assert!(api.delete_api_key(&created.id, &token).await.is_ok());
     assert!(api.list_my_api_keys(true, &token).await.unwrap().is_empty());
+    assert!(api.delete_api_key(&created.id, &token).await.is_err());
     // The only supported alternate lifetime is never_expires, not a custom date.
     let permanent = api
         .create_api_key(
@@ -126,6 +201,27 @@ async fn real_personal_key_client_creates_only_the_current_owners_key_with_serve
     assert!(permanent.never_expires);
     assert!(permanent.expires_at.is_none());
     assert!(!format!("{permanent:?}").contains(&permanent.api_key));
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE produce_ai_keys SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+        [Uuid::parse_str(&permanent.id).unwrap().into()],
+    ))
+    .await
+    .unwrap();
+    let expired = api
+        .list_my_api_keys(true, &token)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|key| key.id == permanent.id)
+        .unwrap();
+    assert!(expired.expired());
+    assert!(!expired.revoked());
+    assert!(
+        api.reveal_api_key(&permanent.id, TEST_USER_PASSWORD, &token)
+            .await
+            .is_err()
+    );
     let transport = reqwest::Client::builder().no_proxy().build().unwrap();
     let rejected = transport
         .post(format!("http://{addr}/api/v1/keys"))
@@ -161,5 +257,70 @@ async fn real_personal_key_client_creates_only_the_current_owners_key_with_serve
             .is_ok()
     );
     assert!(api.delete_api_key(&permanent.id, &token).await.is_ok());
+    cleanup.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn repeated_failed_reveals_lock_the_credential_and_hit_the_dedicated_rate_limit() {
+    let db = create_test_pool().await;
+    let run = generate_test_id();
+    let mut cleanup = TestDataGuard::new(db.clone(), run.clone());
+    let tenant = create_test_tenant(&db, "reveal-lockout", &run).await;
+    let owner = create_test_user(&db, tenant.id, "reveal-lockout-owner", &run).await;
+    let state = AppState::with_pool(DbRouter::single(db.clone()));
+    let token = console(&state, &db, owner.id, &tenant).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _server = Server(tokio::spawn(async move {
+        axum::serve(listener, create_router(state)).await.unwrap();
+    }));
+    let client =
+        ApiClient::new(ClientConfig::new(format!("http://{addr}")).with_no_proxy(true)).unwrap();
+    let api = ApiKeyApi::new(&client);
+    let key = api
+        .create_api_key(&CreateApiKeyRequest::new("lockout target"), &token)
+        .await
+        .unwrap();
+    let transport = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("http://{addr}/api/v1/keys/{}/reveal", key.id);
+    for _ in 0..keycompute_auth::DEFAULT_MAX_FAILED_ATTEMPTS {
+        let response = transport
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({"current_password":"wrong-password"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 403);
+    }
+    let credential = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT failed_login_attempts,locked_until FROM user_credentials WHERE user_id=$1",
+            [owner.id.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        credential
+            .try_get::<i32>("", "failed_login_attempts")
+            .unwrap(),
+        keycompute_auth::DEFAULT_MAX_FAILED_ATTEMPTS
+    );
+    assert!(
+        credential
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>>("", "locked_until")
+            .unwrap()
+            .is_some_and(|until| until > chrono::Utc::now())
+    );
+    let limited = transport
+        .post(url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({"current_password":TEST_USER_PASSWORD}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status().as_u16(), 429);
     cleanup.cleanup().await.unwrap();
 }

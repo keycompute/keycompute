@@ -106,6 +106,20 @@ impl UserCredential {
         Ok(UserCredential::find_by_statement(stmt).one(db).await?)
     }
 
+    /// 读取并共享锁定当前凭证快照，用于需要密码二次确认但不修改凭证的
+    /// 安全操作。调用方应先锁定用户身份行，以保持与密码修改相同顺序。
+    pub async fn find_by_user_id_for_share(
+        db: &impl ConnectionTrait,
+        user_id: Uuid,
+    ) -> Result<Option<UserCredential>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_credentials WHERE user_id = $1 FOR SHARE",
+            [user_id.into()],
+        );
+        Ok(UserCredential::find_by_statement(stmt).one(db).await?)
+    }
+
     /// 更新凭证
     pub async fn update(
         &self,
@@ -210,6 +224,23 @@ impl UserCredential {
             .ok_or_else(|| DbError::not_found("UserCredential", self.id.to_string()))?;
 
         Ok(credential)
+    }
+
+    /// A successful password step-up clears failures without changing login
+    /// timestamps or client-IP history.
+    pub async fn record_successful_verification(
+        &self,
+        db: &impl ConnectionTrait,
+    ) -> Result<UserCredential, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE user_credentials SET failed_login_attempts = 0, locked_until = NULL, updated_at = NOW() WHERE id = $1 RETURNING *"#,
+            [self.id.into()],
+        );
+        UserCredential::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserCredential", self.id.to_string()))
     }
 
     /// 锁定账户

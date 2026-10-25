@@ -184,6 +184,11 @@ impl TenantMembership {
             .await?
             .ok_or_else(|| conflict(tenant, user))?;
         require_mutable_membership_target(&before, actor.actor_platform_role)?;
+        if !actor.actor_platform_role.is_platform_admin() {
+            return Err(DbError::Other(
+                "only platform administrators may change tenant membership roles".into(),
+            ));
+        }
         if expected <= 0 {
             return Err(conflict(tenant, user));
         }
@@ -193,7 +198,11 @@ impl TenantMembership {
         )).one(tx).await?.ok_or_else(||conflict(tenant,user))?;
         TenantAuditEvent::append(
             tx,
-            AuditScopeType::Tenant,
+            if actor.actor_platform_role.is_platform_admin() {
+                AuditScopeType::Platform
+            } else {
+                AuditScopeType::Tenant
+            },
             Some(tenant),
             &actor,
             "membership.role",

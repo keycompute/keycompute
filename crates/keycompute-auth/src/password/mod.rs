@@ -17,7 +17,10 @@ mod validator;
 
 // 重新导出公共接口
 pub use hash::PasswordHasher;
-pub use login::{LoginRequest, LoginResponse, LoginService};
+pub use login::{
+    DEFAULT_LOCK_DURATION_MINUTES, DEFAULT_MAX_FAILED_ATTEMPTS, LoginRequest, LoginResponse,
+    LoginService,
+};
 pub use register::{
     CompleteRegistrationRequest, CompleteRegistrationResponse, RegistrationService,
     RequestRegistrationCodeRequest, RequestRegistrationCodeResponse,

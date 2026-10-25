@@ -126,8 +126,8 @@ stream_timeout_secs = 600
 # 用于多代理出口、按 Provider 路由到不同代理
 # [gateway.proxy]
 
-# ==================== 加密配置（可选）====================
-# 用于上游 Provider API Key 的加密存储
+# ==================== 加密配置（生产必填）====================
+# 用于上游 Provider API Key 加密，并作为用户 Produce AI Key 每记录 DEK 的包装密钥（KEK）
 # 生产环境必须配置；未配置时服务拒绝启动
 # 
 # [crypto]
@@ -136,6 +136,7 @@ stream_timeout_secs = 600
 # 或在代码中：keycompute_runtime::ApiKeyCrypto::generate_key()
 #
 # 生产模式对应环境变量：KC__CRYPTO__SECRET_KEY
+# 写入任何加密 Key 后不可直接更换；轮换必须先重新包装/加密现有记录
 #
 # secret_key = "your-base64-encoded-32-byte-key"
 

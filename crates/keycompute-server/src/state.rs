@@ -234,7 +234,8 @@ impl AppStateConfig {
 /// - `is_production`: 是否为非开发环境；生产环境缺失密钥时直接返回错误
 ///
 /// # 返回
-/// - `Ok(())`: 成功初始化，或开发环境未配置密钥并回退到明文存储
+/// - `Ok(())`: 成功初始化；开发环境缺失密钥时 Provider 可保持旧的
+///   明文兼容路径，但 Produce AI Key 创建与查看始终拒绝降级
 /// - `Err(...)`: 生产环境缺失密钥，或已提供的密钥格式错误
 ///
 /// # 示例
@@ -259,7 +260,9 @@ pub fn init_global_crypto(
                 "KC__CRYPTO__SECRET_KEY is required in production; refusing plaintext Provider API key storage".to_string(),
             ));
         } else {
-            tracing::warn!("未配置 KC__CRYPTO__SECRET_KEY，Provider API Key 将以明文存储");
+            tracing::warn!(
+                "未配置 KC__CRYPTO__SECRET_KEY：Provider API Key 使用开发兼容路径，Produce AI Key 创建与查看将不可用"
+            );
         }
         return Ok(());
     };

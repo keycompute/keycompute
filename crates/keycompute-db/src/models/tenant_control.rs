@@ -576,6 +576,11 @@ pub async fn update_member(
     let next_role = patch.tenant_role.unwrap_or(before.tenant_role()?);
     let next_status = patch.status.unwrap_or(before.membership_status()?);
     let platform_actor = authority.actor.actor_platform_role.is_platform_admin();
+    if !platform_actor && patch.tenant_role.is_some() {
+        return Err(invariant(
+            "only platform administrators may change tenant membership roles",
+        ));
+    }
     super::tenant_membership::require_mutable_membership_target(
         &before,
         authority.actor.actor_platform_role,
@@ -854,6 +859,11 @@ pub async fn create_invitation(
 ) -> Result<CreatedTenantInvitation, DbError> {
     if !(MIN_INVITATION_TTL_SECONDS..=MAX_INVITATION_TTL_SECONDS).contains(&expires_in_seconds) {
         return Err(invariant("expires_in_seconds is outside the allowed range"));
+    }
+    if tenant_role != TenantRole::Member {
+        return Err(invariant(
+            "tenant invitations may only grant ordinary membership",
+        ));
     }
     let email = normalized_email(email)?;
     let authority = revalidate_in_transaction(tx, scope, snapshot, actor).await?;

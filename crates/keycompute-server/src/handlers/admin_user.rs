@@ -14,6 +14,7 @@ use axum::{
     http::HeaderMap,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::Utc;
 use keycompute_auth::AuthorizationAction;
 use keycompute_billing::balance::{
     BalanceReservationPageCursor, MAX_BALANCE_RESERVATION_PAGE_SIZE,
@@ -866,9 +867,10 @@ pub async fn list_all_api_keys(
                 "user_id": k.user_id,
                 "name": k.name,
                 "key_preview": k.produce_ai_key_preview,
-                "is_active": !k.revoked,
+                "is_active": !k.revoked && k.expires_at.is_none_or(|at| at > Utc::now()),
                 "revoked": k.revoked,
                 "revoked_at": k.revoked_at.map(|t| t.to_rfc3339()),
+                "expires_at": k.expires_at.map(|t| t.to_rfc3339()),
                 "created_at": k.created_at.to_rfc3339(),
                 "last_used_at": k.last_used_at.map(|t| t.to_rfc3339()),
             })

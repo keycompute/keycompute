@@ -394,13 +394,22 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("dashboard.account_settings", "账户设置");
     m.insert(
         "api_keys.subtitle",
-        "管理 OpenAI 兼容接口访问密钥。密钥明文仅在创建成功后显示一次。",
+        "管理 OpenAI 兼容接口访问密钥。明文默认隐藏，仅在你主动显示时展示。",
     );
     m.insert("api_keys.create", "创建 API Key");
     m.insert("api_keys.active", "活跃");
+    m.insert("api_keys.current", "当前 Key");
+    m.insert("api_keys.expired", "已过期");
     m.insert("api_keys.all_with_revoked", "全部（含已撤销）");
     m.insert("api_keys.created_title", "API Key 已创建");
-    m.insert("api_keys.created_once", "仅显示一次，请立即保存。");
+    m.insert(
+        "api_keys.created_once",
+        "Key 已为当前账号加密保存并默认隐藏；本页面仅在关闭明文区域或离开页面前，于内存中短暂持有副本。",
+    );
+    m.insert("api_keys.reveal_secret", "显示 Key 原文");
+    m.insert("api_keys.hide_secret", "隐藏 Key 原文");
+    m.insert("api_keys.confirm_reveal", "确认并显示");
+    m.insert("api_keys.password_required", "请输入当前密码后显示此 Key。");
     m.insert("api_keys.example", "使用示例");
     m.insert("api_keys.models_title", "1. 当前系统可用模型");
     m.insert("api_keys.models_desc_prefix", "可在请求中通过 ");
@@ -469,12 +478,16 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.delete_confirm_title", "删除 API Key");
     m.insert(
         "api_keys.delete_confirm_message",
-        "确定删除 API Key“{name}”吗？删除后无法恢复。",
+        "确定永久删除 API Key“{name}”吗？其凭证及可恢复明文将立即移除且无法还原；安全审计历史仍会保留，以该 Key 为目标的待处理轮换申请也会同时取消。",
     );
+    m.insert("api_keys.delete_permanently", "永久删除");
     m.insert("api_keys.loading_failed", "加载失败");
     m.insert("api_keys.registry", "API 密钥管理");
     m.insert("api_keys.empty_meta", "当前筛选条件下没有可用凭证。");
-    m.insert("api_keys.active_meta", "正在显示可用于调用网关的活跃凭证。");
+    m.insert(
+        "api_keys.active_meta",
+        "正在显示当前未撤销的 Key；已过期 Key 仍会保留在列表中，便于永久删除。",
+    );
     m.insert("api_keys.all_meta", "正在显示全部凭证，包括已撤销记录。");
     m.insert("api_keys.empty", "暂无可用的 API Key，点击上方按钮创建");
     m.insert("api_keys.prefix", "前缀");

@@ -255,6 +255,7 @@ fn db_error(error: keycompute_db::DbError) -> ApiError {
                 || lower.contains("invalid")
                 || lower.contains("member id")
                 || lower.contains("active member identity")
+                || lower.contains("ordinary membership")
                 || lower.contains("platform identities cannot")
             {
                 ApiError::BadRequest(message)
@@ -578,6 +579,11 @@ pub async fn create_invitation(
         return Err(ApiError::BadRequest(format!(
             "expires_in_seconds must be between {MIN_INVITATION_TTL_SECONDS} and {MAX_INVITATION_TTL_SECONDS}"
         )));
+    }
+    if request.tenant_role != TenantRole::Member {
+        return Err(ApiError::BadRequest(
+            "tenant invitations may only grant ordinary membership".into(),
+        ));
     }
     let db = pool(&state)?;
     let tx = db

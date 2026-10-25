@@ -201,7 +201,7 @@ async fn member_operator_and_foreign_object_requests_are_denied_without_cross_te
 }
 
 #[tokio::test]
-async fn member_update_is_versioned_atomic_and_rejects_unknown_global_fields() {
+async fn member_status_update_is_versioned_and_tenant_admin_cannot_assign_roles() {
     let mut f = Fixture::new().await;
     let membership = TenantMembership::find(&f.db, f.tenant.id, f.member.id)
         .await
@@ -230,7 +230,7 @@ async fn member_update_is_versioned_atomic_and_rejects_unknown_global_fields() {
     assert_eq!(unchanged.tenant_role, "member");
     assert_eq!(unchanged.status, "active");
 
-    let (status, body) = f
+    let (status, _) = f
         .request(
             Method::PATCH,
             format!("/api/v1/tenants/{}/members/{}", f.tenant.id, f.member.id),
@@ -238,13 +238,33 @@ async fn member_update_is_versioned_atomic_and_rejects_unknown_global_fields() {
             Some(json!({
                 "expected_authz_version": membership.authz_version,
                 "tenant_role": "admin",
-                "status": "active"
+                "status": "suspended"
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let role_unchanged = TenantMembership::find(&f.db, f.tenant.id, f.member.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(role_unchanged.tenant_role, "member");
+    assert_eq!(role_unchanged.status, "active");
+    assert_eq!(role_unchanged.authz_version, membership.authz_version);
+
+    let (status, body) = f
+        .request(
+            Method::PATCH,
+            format!("/api/v1/tenants/{}/members/{}", f.tenant.id, f.member.id),
+            Some(&f.admin_token),
+            Some(json!({
+                "expected_authz_version": membership.authz_version,
+                "status": "suspended"
             })),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["tenant_role"], "admin");
-    assert_eq!(body["membership_status"], "active");
+    assert_eq!(body["tenant_role"], "member");
+    assert_eq!(body["membership_status"], "suspended");
     assert_eq!(
         body["authz_version"].as_i64().unwrap(),
         membership.authz_version + 1
@@ -447,6 +467,16 @@ async fn denied_member_command_keeps_cache_and_successful_change_invalidates_old
     let (status, _) = f
         .request(Method::PATCH, &path, Some(&f.admin_token), Some(body))
         .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(f.state.display_cache.metrics()["entries"], entries);
+    let (status, _) = f
+        .request(
+            Method::PATCH,
+            &path,
+            Some(&f.admin_token),
+            Some(json!({"expected_authz_version":1,"status":"suspended"})),
+        )
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(f.state.display_cache.metrics()["entries"], 0);
     let (status, _) = f
@@ -481,7 +511,7 @@ async fn membership_change_rolls_back_when_audit_insert_fails() {
             format!("/api/v1/tenants/{}/members/{}", f.tenant.id, f.member.id),
             Some(&f.admin_token),
             Some(json!({
-                "expected_authz_version":1,"tenant_role":"admin"
+                "expected_authz_version":1,"status":"suspended"
             })),
         )
         .await;
@@ -528,7 +558,7 @@ async fn queued_member_change_revalidates_administrator_after_demotion() {
         Method::PATCH,
         format!("/api/v1/tenants/{}/members/{}", f.tenant.id, target.id),
         Some(&admin_token),
-        Some(json!({"expected_authz_version":1,"tenant_role":"admin"})),
+        Some(json!({"expected_authz_version":1,"status":"suspended"})),
     );
     let demotion = async {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {

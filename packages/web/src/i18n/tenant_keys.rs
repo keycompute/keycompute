@@ -43,8 +43,16 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ("tenant_keys.request", "Request a new key", "申请签发 Key"),
         ("tenant_keys.edit", "Edit key metadata", "编辑 Key 元数据"),
         ("tenant_keys.rotate", "Request key rotation", "申请轮换 Key"),
-        ("tenant_keys.revoke", "Revoke key", "撤销 Key"),
-        ("tenant_keys.delete", "Remove key", "移除 Key"),
+        (
+            "tenant_keys.delete",
+            "Permanently delete key",
+            "永久删除 Key",
+        ),
+        (
+            "tenant_keys.delete_permanent_warning",
+            "Confirm permanent deletion. The API key credential and recoverable secret will be removed immediately and cannot be restored. Security audit history is retained, and any pending rotation that replaces this key will be cancelled.",
+            "请二次确认永久删除。该 API Key 的凭证及可恢复明文将立即移除且无法还原；安全审计历史仍会保留，以该 Key 为目标的待处理轮换申请也会同时取消。",
+        ),
         (
             "tenant_keys.cancel_request",
             "Cancel issuance request",
@@ -95,19 +103,9 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
             "相同轮换申请已在等待领取，没有重复签发 Key。",
         ),
         (
-            "tenant_keys.revoked_result",
-            "Key revoked; original ownership and history retained.",
-            "Key 已撤销，原始归属和历史记录保留。",
-        ),
-        (
             "tenant_keys.deleted_result",
-            "Unused key removed.",
-            "未被历史记录引用的 Key 已移除。",
-        ),
-        (
-            "tenant_keys.retained_result",
-            "Key revoked, not physically deleted: existing records retain its identity.",
-            "Key 已撤销，但未物理删除：已有记录仍需保留其身份。",
+            "API key permanently deleted.",
+            "API Key 已永久删除。",
         ),
         (
             "tenant_keys.cancelled_result",
@@ -162,8 +160,8 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ),
         (
             "tenant_keys.owner_hint",
-            "Only you can claim your requests. A successful claim returns the secret once; this page never saves it to browser storage.",
-            "只有本人能领取自己的申请。领取成功只返回一次明文，本页不会将其写入浏览器存储。",
+            "Only you can claim your requests. The resulting key is stored encrypted for your account and is kept only in short-lived page memory while displayed.",
+            "只有本人能领取自己的申请。生成的 Key 会加密保存到账号，显示期间仅短暂保留在当前页面内存中。",
         ),
         ("tenant_keys.claim", "Claim my key", "领取我的 Key"),
         (
@@ -183,19 +181,17 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ),
         (
             "tenant_keys.claim_uncertain",
-            "Refresh request and key records before another attempt. A lost one-time response cannot be recovered by repeating a claim.",
-            "再次操作前请刷新申请和 Key 记录；丢失的一次性响应无法通过重复领取找回。",
+            "Refresh request and key records before another attempt. Do not repeat an uncertain claim; after a confirmed claim, the owner can reveal the key from the key list.",
+            "再次操作前请刷新申请和 Key 记录；不确定时不要重复领取，确认领取成功后可在 Key 列表中由本人显示原文。",
         ),
-        (
-            "tenant_keys.secret_title",
-            "Your one-time key",
-            "本人一次性 Key 明文",
-        ),
+        ("tenant_keys.secret_title", "Your API key", "本人的 API Key"),
         (
             "tenant_keys.secret_hint",
-            "Save this key securely now. Closing this value, leaving the page or switching workspace removes it from this view; it cannot be retrieved again.",
-            "请立即安全保存。关闭明文、离开页面或切换工作区后，本页将不再显示，无法再次读取。",
+            "This key is hidden by default. Only its owner can retrieve it, and this page keeps a temporary in-memory copy only until you close it or leave.",
+            "此 Key 默认隐藏且只有本人可以读取；本页面仅在关闭明文区域或离开页面前，于内存中短暂持有副本。",
         ),
+        ("tenant_keys.reveal_secret", "Reveal key", "显示 Key 原文"),
+        ("tenant_keys.hide_secret", "Hide key", "隐藏 Key 原文"),
         ("tenant_keys.copy", "Copy my key", "复制本人的 Key"),
         (
             "tenant_keys.clear_secret",

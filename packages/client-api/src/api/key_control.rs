@@ -1,6 +1,7 @@
-//! Tenant metadata management and a separate, owner-only one-time issuance client.
-//! Platform administration always uses an explicit tenant target; there is no
-//! secret read API, implicit target, or automatic command replay.
+//! Tenant metadata management and a separate, owner-only key-issuance client.
+//! Platform administration always uses an explicit tenant target; secret reads
+//! use a separate owner-only API, while tenant metadata has no secret
+//! projection, implicit target, or automatic command replay.
 use crate::{ApiClient, ClientError, Result};
 use reqwest::Method;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -132,7 +133,9 @@ impl std::fmt::Debug for IssuedSecret {
         f.write_str("IssuedSecret([REDACTED])")
     }
 }
-/// One-time claim results cannot be serialized into persistent frontend state.
+/// Claim results cannot be serialized wholesale. A UI may keep the secret only
+/// in short-lived component memory after an explicit owner action; browser
+/// storage is outside this contract.
 /// ```compile_fail
 /// fn persist(value: &client_api::api::key_control::ClaimedKey) {
 ///     let _ = serde_json::to_string(value);
@@ -351,38 +354,16 @@ impl TenantKeyApi {
         self.check(&r, Some(id), None)?;
         Ok(r)
     }
-    async fn remove(&self, id: Uuid, revoke: bool, token: &str) -> Result<KeyMutation> {
+    pub async fn delete(&self, id: Uuid, token: &str) -> Result<KeyMutation> {
         real(id)?;
-        let path = format!(
-            "{}/keys/{id}{}",
-            self.base,
-            if revoke { "/revoke" } else { "" }
-        );
+        let path = format!("{}/keys/{id}?permanent=true", self.base);
         let r: KeyMutation = self
-            .command(
-                if revoke { Method::POST } else { Method::DELETE },
-                &path,
-                &serde_json::json!({}),
-                token,
-            )
+            .command(Method::DELETE, &path, &serde_json::json!({}), token)
             .await?;
-        if !r.success || r.key_id != id || revoke && r.deleted || r.deleted && r.key.is_some() {
+        if !r.success || r.key_id != id || !r.deleted || r.key.is_some() || r.revoked_at.is_some() {
             return Err(invalid());
         }
-        if !r.deleted {
-            let key = r.key.as_ref().ok_or_else(invalid)?;
-            self.check(key, Some(id), None)?;
-            if !key.revoked {
-                return Err(invalid());
-            }
-        }
         Ok(r)
-    }
-    pub async fn revoke(&self, id: Uuid, token: &str) -> Result<KeyMutation> {
-        self.remove(id, true, token).await
-    }
-    pub async fn delete(&self, id: Uuid, token: &str) -> Result<KeyMutation> {
-        self.remove(id, false, token).await
     }
     pub async fn request(&self, body: &NewIssuance, token: &str) -> Result<IssuanceResponse> {
         real(body.owner_user_id)?;
@@ -553,6 +534,9 @@ impl OwnerKeyIssuanceApi {
         if r.intent_id != intent.id
             || r.key_id.is_nil()
             || r.outcome != "claimed"
+            // This flag describes delivery in this claim response. It does not
+            // imply that the owner can never reveal the key again: the owner
+            // reveal endpoint is the canonical recovery path after claiming.
             || !r.secret_returned_once
             || r.name != intent.requested_name
             || r.expires_at != intent.requested_expires_at

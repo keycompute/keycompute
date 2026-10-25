@@ -8,8 +8,9 @@ pub mod crypto;
 pub mod redis_store;
 
 pub use crypto::{
-    ApiKeyCrypto, CryptoError, EncryptedApiKey, decrypt_api_key, encrypt_api_key, global_crypto,
-    set_global_crypto,
+    ApiKeyCrypto, CryptoError, DecryptedProduceAiKey, EncryptedApiKey, ProduceAiKeyEnvelope,
+    ProduceAiKeyEnvelopeContext, decrypt_api_key, decrypt_produce_ai_key, encrypt_api_key,
+    encrypt_produce_ai_key, global_crypto, set_global_crypto,
 };
 
 #[cfg(feature = "redis")]

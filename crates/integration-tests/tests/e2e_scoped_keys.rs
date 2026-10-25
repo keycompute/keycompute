@@ -291,11 +291,17 @@ async fn scoped_key_mutations_preserve_owners_and_commit_audit_with_the_change()
     .unwrap();
     assert_eq!(key.user_id, f.peer.id);
     assert_eq!(f.audits().await, before + 3);
+    assert!(
+        matches!(ProduceAiKey::remove_in_tenant(&f.db,admin(&f.a),key.id,&actor(admin(&f.a))).await.unwrap(),KeyRemoval::Deleted(id) if id==key.id),
+        "an active key must be permanently deleted in one confirmed operation"
+    );
+    assert_eq!(f.audits().await, before + 4);
     f.guard.cleanup().await.unwrap();
 }
 #[tokio::test]
 async fn stale_key_scopes_are_rejected_after_demotion_and_revocation() {
     let mut f = Fixture::new().await;
+    let platform = platform_audit(&f.db).await;
     let member = TenantMembership::find(&f.db, f.a.id, f.user.id)
         .await
         .unwrap()
@@ -307,7 +313,7 @@ async fn stale_key_scopes_are_rejected_after_demotion_and_revocation() {
         f.user.id,
         TenantRole::Admin,
         member.authz_version,
-        &actor(admin(&f.a)),
+        &platform,
     )
     .await
     .unwrap();
@@ -319,7 +325,6 @@ async fn stale_key_scopes_are_rejected_after_demotion_and_revocation() {
             .unwrap(),
         2
     );
-    let platform = platform_audit(&f.db).await;
     let tx = f.db.begin().await.unwrap();
     let lowered = TenantMembership::set_role(
         &tx,
@@ -474,7 +479,7 @@ async fn platform_key_access_requires_real_platform_identity_and_explicit_tenant
     f.guard.cleanup().await.unwrap();
 }
 #[tokio::test]
-async fn key_http_create_revoke_delete_rejects_foreign_ids_and_inference_credentials() {
+async fn key_http_create_and_permanent_delete_reject_foreign_ids_and_inference_credentials() {
     let mut f = Fixture::new().await;
     let state = AppState::with_pool(DbRouter::single(f.db.clone()));
     let global = state
@@ -495,7 +500,7 @@ async fn key_http_create_revoke_delete_rejects_foreign_ids_and_inference_credent
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/keys/{id}"))
+                    .uri(format!("/api/v1/keys/{id}?permanent=true"))
                     .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -537,7 +542,7 @@ async fn key_http_create_revoke_delete_rejects_foreign_ids_and_inference_credent
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/api/v1/keys/{id}"))
+                .uri(format!("/api/v1/keys/{id}?permanent=true"))
                 .header("authorization", format!("Bearer {inference}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -545,25 +550,47 @@ async fn key_http_create_revoke_delete_rejects_foreign_ids_and_inference_credent
         .await
         .unwrap();
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-    for deleted in [false, true] {
-        let response = create_router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/api/v1/keys/{id}"))
-                    .header("authorization", format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body: Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap())
-                .unwrap();
-        assert_eq!(body["deleted"], json!(deleted));
-        assert!(state.auth.verify_token(inference).await.is_err());
-    }
+    let unconfirmed = create_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/keys/{id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unconfirmed.status(), StatusCode::BAD_REQUEST);
+    assert!(state.auth.verify_token(inference).await.is_ok());
+    let response = create_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/keys/{id}?permanent=true"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(body["deleted"], json!(true));
+    assert!(state.auth.verify_token(inference).await.is_err());
+    let missing = create_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/v1/keys/{id}?permanent=true"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     f.guard.cleanup().await.unwrap();
 }
 
@@ -617,6 +644,7 @@ impl Drop for PendingKeyChange {
 #[tokio::test]
 async fn queued_key_mutation_rechecks_authority_after_concurrent_demotion() {
     let mut f = Fixture::new().await;
+    let platform = platform_audit(&f.db).await;
     let member = TenantMembership::find(&f.db, f.a.id, f.user.id)
         .await
         .unwrap()
@@ -628,13 +656,12 @@ async fn queued_key_mutation_rechecks_authority_after_concurrent_demotion() {
         f.user.id,
         TenantRole::Admin,
         member.authz_version,
-        &actor(admin(&f.a)),
+        &platform,
     )
     .await
     .unwrap();
     tx.commit().await.unwrap();
     let stale = TenantScope::checked(f.a.id, f.user.id, TenantRole::Admin).unwrap();
-    let platform = platform_audit(&f.db).await;
     let gate = f.db.begin().await.unwrap();
     Tenant::find_by_id_for_update(&gate, f.a.id)
         .await

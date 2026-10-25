@@ -76,7 +76,7 @@ pub use distribution::{
 // 用户自服务
 pub use user::{
     change_password, create_api_key, delete_api_key, get_current_user, get_my_usage,
-    get_my_usage_stats, list_my_api_keys, update_profile,
+    get_my_usage_stats, list_my_api_keys, reveal_api_key, update_profile,
 };
 
 // 用户管理（admin_user）

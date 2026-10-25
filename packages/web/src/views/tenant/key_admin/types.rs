@@ -33,7 +33,6 @@ pub enum Operation {
     Request,
     Edit(KeyMetadata),
     Rotate(KeyMetadata),
-    Revoke(KeyMetadata),
     Delete(KeyMetadata),
     Cancel(IssuanceIntent),
 }
@@ -43,14 +42,13 @@ impl Operation {
             Self::Request => "tenant_keys.request",
             Self::Edit(_) => "tenant_keys.edit",
             Self::Rotate(_) => "tenant_keys.rotate",
-            Self::Revoke(_) => "tenant_keys.revoke",
             Self::Delete(_) => "tenant_keys.delete",
             Self::Cancel(_) => "tenant_keys.cancel_request",
         }
     }
     pub fn key_row(&self) -> Option<&KeyMetadata> {
         match self {
-            Self::Edit(r) | Self::Rotate(r) | Self::Revoke(r) | Self::Delete(r) => Some(r),
+            Self::Edit(r) | Self::Rotate(r) | Self::Delete(r) => Some(r),
             _ => None,
         }
     }

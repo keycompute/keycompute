@@ -1,6 +1,6 @@
 //! Tenant API-key metadata administration and owner-only provisioning.
 //!
-//! Tenant administrators can manage metadata and revoke/remove keys in their
+//! Tenant administrators can manage metadata and permanently delete keys in their
 //! tenant, but they never receive another user's raw key.  A requested
 //! creation or rotation is an inert issuance intent until the key owner claims
 //! it through the `/me/key-issuance` routes.
@@ -51,6 +51,13 @@ pub struct TenantPath {
 pub struct TenantKeyPath {
     pub tenant_id: Uuid,
     pub id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermanentDeleteConfirmation {
+    #[serde(default)]
+    pub permanent: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,13 +216,6 @@ fn key_metadata(key: ProduceAiKeyResponse) -> TenantKeyMetadata {
         last_used_at: key.last_used_at,
         created_at: key.created_at,
         updated_at: key.updated_at,
-    }
-}
-
-fn key_metadata_from_removal(removal: &KeyRemoval) -> Option<TenantKeyMetadata> {
-    match removal {
-        KeyRemoval::Revoked(key) => Some(key_metadata(key.clone())),
-        KeyRemoval::Deleted(_) => None,
     }
 }
 
@@ -407,50 +407,20 @@ pub async fn patch_tenant_key(
     Ok(Json(key_metadata(updated)))
 }
 
-pub async fn revoke_tenant_key(
-    access: TenantAdministration,
-    request_id: RequestId,
-    Path(path): Path<TenantKeyPath>,
-    State(state): State<AppState>,
-) -> Result<Json<KeyMutationResponse>> {
-    access.require_path_tenant(path.tenant_id)?;
-    access.require(AuthorizationAction::ManageTenantResource)?;
-    let session = access.authorization_context();
-    let tx = key_mutation_transaction_context(&state, &session).await?;
-    let result = key_issuance::remove_key(
-        &tx,
-        access.scope(),
-        access.snapshot(),
-        path.id,
-        &audit(&access, request_id),
-        true,
-    )
-    .await
-    .map_err(map_db_error)?;
-    commit_key_mutation_context(&state, tx, &session, KeyChange::Credential).await?;
-    Ok(Json(KeyMutationResponse {
-        success: true,
-        key: key_metadata_from_removal(&result),
-        key_id: match &result {
-            KeyRemoval::Revoked(key) => key.id,
-            KeyRemoval::Deleted(id) => *id,
-        },
-        revoked_at: match &result {
-            KeyRemoval::Revoked(key) => key.revoked_at,
-            KeyRemoval::Deleted(_) => None,
-        },
-        deleted: matches!(result, KeyRemoval::Deleted(_)),
-    }))
-}
-
 pub async fn delete_tenant_key(
     access: TenantAdministration,
     request_id: RequestId,
     Path(path): Path<TenantKeyPath>,
+    Query(confirmation): Query<PermanentDeleteConfirmation>,
     State(state): State<AppState>,
 ) -> Result<Json<KeyMutationResponse>> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
+    if !confirmation.permanent {
+        return Err(ApiError::BadRequest(
+            "Permanent API Key deletion requires explicit confirmation".into(),
+        ));
+    }
     let session = access.authorization_context();
     let tx = key_mutation_transaction_context(&state, &session).await?;
     let result = key_issuance::remove_key(
@@ -459,23 +429,21 @@ pub async fn delete_tenant_key(
         access.snapshot(),
         path.id,
         &audit(&access, request_id),
-        false,
     )
     .await
     .map_err(map_db_error)?;
     commit_key_mutation_context(&state, tx, &session, KeyChange::Credential).await?;
+    let KeyRemoval::Deleted(key_id) = result else {
+        return Err(ApiError::Internal(
+            "Permanent API Key deletion returned an invalid outcome".into(),
+        ));
+    };
     Ok(Json(KeyMutationResponse {
         success: true,
-        key: key_metadata_from_removal(&result),
-        key_id: match &result {
-            KeyRemoval::Revoked(key) => key.id,
-            KeyRemoval::Deleted(id) => *id,
-        },
-        revoked_at: match &result {
-            KeyRemoval::Revoked(key) => key.revoked_at,
-            KeyRemoval::Deleted(_) => None,
-        },
-        deleted: matches!(result, KeyRemoval::Deleted(_)),
+        key: None,
+        key_id,
+        revoked_at: None,
+        deleted: true,
     }))
 }
 
@@ -639,7 +607,7 @@ pub async fn list_my_key_issuances(
 fn claim_response(claimed: ClaimedKey) -> ClaimResponse {
     ClaimResponse {
         outcome: "claimed",
-        message: "the raw key is returned exactly once; it cannot be recovered",
+        message: "the raw key is included in this claim response; the owner can reveal it later from the key list",
         intent_id: claimed.intent.id,
         key_id: claimed.key.id,
         name: claimed.key.name,
@@ -745,10 +713,6 @@ pub fn router() -> axum::Router<AppState> {
                 .delete(delete_tenant_key),
         )
         .route(
-            "/api/v1/tenants/{tenant_id}/keys/{id}/revoke",
-            post(revoke_tenant_key),
-        )
-        .route(
             "/api/v1/tenants/{tenant_id}/keys/issuance",
             post(request_tenant_key),
         )
@@ -773,10 +737,6 @@ pub fn router() -> axum::Router<AppState> {
             get(get_tenant_key)
                 .patch(patch_tenant_key)
                 .delete(delete_tenant_key),
-        )
-        .route(
-            "/api/v1/platform/tenants/{tenant_id}/keys/{id}/revoke",
-            post(revoke_tenant_key),
         )
         .route(
             "/api/v1/platform/tenants/{tenant_id}/keys/issuance",

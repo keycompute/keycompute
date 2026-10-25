@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
+pub const DEFAULT_MAX_FAILED_ATTEMPTS: i32 = 5;
+pub const DEFAULT_LOCK_DURATION_MINUTES: i64 = 30;
+
 /// 登录请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginRequest {
@@ -71,8 +74,8 @@ impl LoginService {
             password_hasher: PasswordHasher::new(),
             email_validator: EmailValidator::new(),
             jwt_validator,
-            max_failed_attempts: 5,
-            lock_duration_minutes: 30,
+            max_failed_attempts: DEFAULT_MAX_FAILED_ATTEMPTS,
+            lock_duration_minutes: DEFAULT_LOCK_DURATION_MINUTES,
         }
     }
 

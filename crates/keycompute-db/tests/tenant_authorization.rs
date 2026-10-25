@@ -10,6 +10,7 @@ use rust_decimal::Decimal;
 use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait,
 };
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 fn actor(user: &User, role: Option<TenantRole>) -> AuditContext {
@@ -158,7 +159,7 @@ async fn run(db: DatabaseConnection) {
     .await
     .unwrap();
     let invitee = user(&db, "invitee", false).await;
-    let req = request(&organization, &primary_admin, &invitee, TenantRole::Admin);
+    let req = request(&organization, &primary_admin, &invitee, TenantRole::Member);
 
     let (first, second) = tokio::join!(issue(&db, &req, &admin), issue(&db, &req, &admin));
     let first = first.unwrap();
@@ -167,7 +168,7 @@ async fn run(db: DatabaseConnection) {
     assert_ne!(first.token.is_some(), second.token.is_some());
     let token = first.token.or(second.token).unwrap();
     let mut changed = req.clone();
-    changed.tenant_role = TenantRole::Member;
+    changed.tenant_role = TenantRole::Admin;
     assert!(issue(&db, &changed, &admin).await.is_err());
     assert!(
         accept(&db, organization.id, &token, &invitee)
@@ -209,7 +210,7 @@ async fn run(db: DatabaseConnection) {
             .unwrap()
             .unwrap()
             .tenant_role,
-        "admin"
+        "member"
     );
     assert_eq!(
         User::find_by_id(&db, invitee.id)
@@ -229,7 +230,7 @@ async fn run(db: DatabaseConnection) {
             &organization,
             &primary_admin,
             &second_admin,
-            TenantRole::Admin,
+            TenantRole::Member,
         ),
         &admin,
     )
@@ -243,6 +244,23 @@ async fn run(db: DatabaseConnection) {
     )
     .await
     .unwrap();
+    let second_membership = TenantMembership::find(&db, organization.id, second_admin.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let platform_admin = actor(&root, None);
+    let tx = db.begin().await.unwrap();
+    let promoted = TenantMembership::set_role(
+        &tx,
+        organization.id,
+        second_admin.id,
+        TenantRole::Admin,
+        second_membership.authz_version,
+        &platform_admin,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
     let invitation_race_admin = user(&db, "invitation-race-admin", true).await;
     let invitation_race = issue(
         &db,
@@ -314,14 +332,13 @@ async fn run(db: DatabaseConnection) {
     assert_eq!(protected.to_string(), "peer_tenant_administrator_protected");
     tx.rollback().await.unwrap();
 
-    let platform_admin = actor(&root, None);
     let tx = db.begin().await.unwrap();
     TenantMembership::set_status(
         &tx,
         organization.id,
         second_admin.id,
         keycompute_types::MembershipStatus::Suspended,
-        1,
+        promoted.authz_version,
         &platform_admin,
     )
     .await
@@ -405,10 +422,23 @@ async fn run(db: DatabaseConnection) {
     tx.rollback().await.unwrap();
 
     let key = Uuid::new_v4();
-    db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "INSERT INTO produce_ai_keys(id,tenant_id,user_id,name,produce_ai_key_hash,produce_ai_key_preview) VALUES($1,$2,$3,'fixture',$4,'fixture-preview')",
-        [key.into(),organization.id.into(),invitee.id.into(),Uuid::new_v4().to_string().into()],
-    )).await.unwrap();
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO produce_ai_keys(id,tenant_id,user_id,name,produce_ai_key_hash,
+         produce_ai_key_ciphertext,produce_ai_key_nonce,produce_ai_key_wrapped_dek,
+         produce_ai_key_wrap_nonce,produce_ai_key_kek_id,produce_ai_key_encryption_version,
+         produce_ai_key_preview)
+         VALUES($1,$2,$3,'fixture',$4,'fixture-unrecoverable','AAAAAAAAAAAAAAAA',
+         'fixture-unrecoverable','AAAAAAAAAAAAAAAA','test-fixture',1,'fixture-preview')",
+        [
+            key.into(),
+            organization.id.into(),
+            invitee.id.into(),
+            hex::encode(Sha256::digest(format!("sk-{key}").as_bytes())).into(),
+        ],
+    ))
+    .await
+    .unwrap();
     let tx = db.begin().await.unwrap();
     TenantMembership::set_status(
         &tx,

@@ -175,7 +175,6 @@ fn KeyRow(
     let i18n = use_i18n();
     let edit = row.clone();
     let rotate = row.clone();
-    let revoke = row.clone();
     let delete = row.clone();
     rsx! { tr {
         td { p {"{row.name}"} code {"{row.key_preview}"}
@@ -187,7 +186,6 @@ fn KeyRow(
         td { div { class:"action-buttons",style:"display:flex;flex-wrap:wrap;gap:8px",
             button {class:"btn btn-secondary btn-sm",onclick:move |_|on_operation.call(Operation::Edit(edit.clone())),{i18n.t("tenant_keys.edit")}}
             button {class:"btn btn-secondary btn-sm",disabled:!types::live_key(&row),onclick:move |_|on_operation.call(Operation::Rotate(rotate.clone())),{i18n.t("tenant_keys.rotate")}}
-            button {class:"btn btn-danger btn-sm",disabled:row.revoked,onclick:move |_|on_operation.call(Operation::Revoke(revoke.clone())),{i18n.t("tenant_keys.revoke")}}
             button {class:"btn btn-danger btn-sm",onclick:move |_|on_operation.call(Operation::Delete(delete.clone())),{i18n.t("tenant_keys.delete")}}
         }}
     }}

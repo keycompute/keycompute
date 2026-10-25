@@ -1,6 +1,7 @@
 //! 加密配置
 //!
-//! 用于上游 Provider API Key 的加密存储。
+//! 用作上游 Provider API Key 的直接加密密钥，以及 Produce AI Key
+//! 信封加密的数据密钥包装密钥（KEK）。
 
 use serde::Deserialize;
 
@@ -9,8 +10,8 @@ use serde::Deserialize;
 pub struct CryptoConfig {
     /// 加密密钥（Base64 编码的 32 字节密钥）
     ///
-    /// 生产环境必须设置，否则服务拒绝启动；仅开发环境在未配置时
-    /// 允许回退为明文存储。
+    /// 生产环境必须设置，否则服务拒绝启动；开发环境未配置时只有旧的
+    /// Provider 路径可回退，Produce AI Key 创建与查看始终失败关闭。
     /// 可通过以下方式生成：
     /// - 命令行：`openssl rand -base64 32`
     /// - 代码：`ApiKeyCrypto::generate_key()`

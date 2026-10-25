@@ -462,7 +462,7 @@ impl AppConfig {
         let has_crypto_key = self.crypto.as_ref().map(|c| c.has_key()).unwrap_or(false);
         if !has_crypto_key {
             tracing::info!(
-                "💡 提示: 未配置加密密钥，开发环境会明文存储 Provider API Key；生产启动会拒绝该配置"
+                "💡 提示: 未配置加密密钥：开发环境仅保留 Provider 兼容路径，Produce AI Key 创建与查看不可用；生产启动会拒绝该配置"
             );
         }
 
@@ -731,7 +731,7 @@ impl AppConfig {
         }
 
         if !self.crypto.as_ref().is_some_and(CryptoConfig::has_key) {
-            issues.push("KC__CRYPTO__SECRET_KEY must be configured so Provider API keys are not stored in plaintext".to_string());
+            issues.push("KC__CRYPTO__SECRET_KEY must be configured for Provider encryption and Produce AI Key envelope encryption".to_string());
         }
 
         if self.email.is_partially_configured() {
