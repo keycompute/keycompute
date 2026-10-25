@@ -9,11 +9,36 @@ use keycompute_auth::{
     ResetPasswordRequest,
 };
 use keycompute_db::{
-    CreatePasswordResetRequest, CreateUserCredentialRequest, DbRouter, PasswordReset,
-    UpdateUserCredentialRequest, User, UserCredential,
+    CreatePasswordResetRequest, DbRouter, PasswordReset, UpdateUserCredentialRequest, User,
+    UserCredential,
 };
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement, TransactionTrait,
+};
 use std::{sync::Arc, time::Duration};
+use uuid::Uuid;
+
+async fn replace_fixture_credential_password(
+    pool: &DatabaseConnection,
+    user_id: Uuid,
+    password_hash: String,
+) -> UserCredential {
+    let credential = UserCredential::find_by_user_id(pool, user_id)
+        .await
+        .expect("fixture credential lookup should succeed")
+        .expect("fixture credential should exist");
+    credential
+        .update(
+            pool,
+            &UpdateUserCredentialRequest {
+                password_hash: Some(password_hash),
+                email_verified: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fixture credential should be updated")
+}
 
 #[tokio::test]
 async fn test_login_rejects_password_hash_changed_during_verification() {
@@ -31,25 +56,7 @@ async fn test_login_rejects_password_hash_changed_during_verification() {
     let new_hash = hasher
         .hash("NewPassword123!")
         .expect("new password should hash");
-    let credential = UserCredential::create(
-        &pool,
-        &CreateUserCredentialRequest {
-            user_id: user.id,
-            password_hash: old_hash.clone(),
-        },
-    )
-    .await
-    .expect("credential should be created");
-    credential
-        .update(
-            &pool,
-            &UpdateUserCredentialRequest {
-                email_verified: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("credential should be verified");
+    let credential = replace_fixture_credential_password(&pool, user.id, old_hash.clone()).await;
 
     // Block only the final user snapshot. The initial user/credential reads
     // and Argon2 verification can complete while this transaction is held.
@@ -145,25 +152,7 @@ async fn test_password_reset_locks_user_before_credential() {
     let hasher = PasswordHasher::new();
     let old_password = "OldPassword123!";
     let old_hash = hasher.hash(old_password).expect("old password should hash");
-    let credential = UserCredential::create(
-        &pool,
-        &CreateUserCredentialRequest {
-            user_id: user.id,
-            password_hash: old_hash,
-        },
-    )
-    .await
-    .expect("credential should be created");
-    credential
-        .update(
-            &pool,
-            &UpdateUserCredentialRequest {
-                email_verified: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("credential should be verified");
+    replace_fixture_credential_password(&pool, user.id, old_hash).await;
 
     let token = format!("reset-lock-order-{test_id}");
     PasswordReset::create(
@@ -322,26 +311,8 @@ async fn test_refresh_token_rejected_after_token_version_bump() {
     let tenant = create_test_tenant(&pool, "tv-refresh", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "credential-regression", &test_id).await;
 
-    // 创建凭证并标记邮箱已验证——refresh 流程要求凭证存在、未锁定、邮箱已验证。
-    let credential = UserCredential::create(
-        &pool,
-        &CreateUserCredentialRequest {
-            user_id: user.id,
-            password_hash: "dummy-argon2-hash".to_string(),
-        },
-    )
-    .await
-    .expect("credential should be created");
-    credential
-        .update(
-            &pool,
-            &UpdateUserCredentialRequest {
-                email_verified: Some(true),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("credential email_verified should be set");
+    // 配置夹具凭证并保持邮箱已验证——refresh 流程要求凭证存在、未锁定、邮箱已验证。
+    replace_fixture_credential_password(&pool, user.id, "dummy-argon2-hash".to_string()).await;
 
     let router = DbRouter::single(pool.clone());
     let jwt = JwtValidator::new("test-secret", "keycompute");
