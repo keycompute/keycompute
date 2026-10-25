@@ -185,14 +185,42 @@ def columns(tokens: list[Token]) -> dict[str, list[str]]:
 
 
 def domain(tokens: list[Token], field: str) -> set[str]:
-    for i in range(len(tokens)-3):
-        if words(tokens[i:i+3]) == [field, 'in', '('] and all(t.kind == 'identifier' for t in tokens[i:i+3]):
-            result: set[str] = set()
-            for item in tokens[i+3:]:
-                if item.kind == 'identifier' and item.value == ')':
-                    return result
-                if item.kind == 'literal':
-                    result.add(item.value)
+    for i in range(len(tokens)-1):
+        if words(tokens[i:i+2]) != ['check', '('] or not all(
+            token.kind == 'identifier' for token in tokens[i:i+2]
+        ):
+            continue
+        expression: list[Token] = []
+        depth = 1
+        for token in tokens[i+2:]:
+            if token.kind == 'identifier':
+                depth += (token.value == '(') - (token.value == ')')
+            if depth == 0:
+                break
+            expression.append(token)
+        if depth:
+            raise ValueError('unterminated CHECK constraint')
+        if (
+            len(expression) == 3
+            and words(expression[:2]) == [field, '=']
+            and all(token.kind == 'identifier' for token in expression[:2])
+            and expression[2].kind == 'literal'
+        ):
+            return {expression[2].value}
+        if (
+            len(expression) >= 5
+            and words(expression[:3]) == [field, 'in', '(']
+            and all(token.kind == 'identifier' for token in expression[:3])
+            and expression[-1].kind == 'identifier'
+            and expression[-1].value == ')'
+        ):
+            values = expression[3:-1]
+            if all(
+                token.kind == ('literal' if index % 2 == 0 else 'identifier')
+                and (index % 2 == 0 or token.value == ',')
+                for index, token in enumerate(values)
+            ):
+                return {token.value for token in values if token.kind == 'literal'}
     return set()
 
 
@@ -219,7 +247,7 @@ def schema_issues(schema: str, inventory: str) -> tuple[list[str], int]:
         ('users', 'platform_role', {'root', 'operator', 'none'}),
         ('tenant_memberships', 'tenant_role', {'admin', 'member'}),
         ('tenant_memberships', 'status', {'active', 'suspended', 'removed'}),
-        ('tenant_invitations', 'tenant_role', {'admin', 'member'}),
+        ('tenant_invitations', 'tenant_role', {'member'}),
         ('tenants', 'status', {'active', 'inactive'}),
     ]:
         if domain(tables.get(table, []), field) != allowed:

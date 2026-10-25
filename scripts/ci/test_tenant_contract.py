@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS tenant_memberships (
  authz_version BIGINT, PRIMARY KEY(tenant_id,user_id)
 );
 CREATE TABLE IF NOT EXISTS tenant_invitations (
- tenant_id UUID, email TEXT, tenant_role TEXT CHECK(tenant_role IN ('admin','member')),
+ tenant_id UUID, email TEXT, tenant_role TEXT CHECK(tenant_role = 'member'),
  token_hash TEXT NOT NULL, status TEXT, expires_at TIMESTAMPTZ, accepted_by UUID
 );
 CREATE UNIQUE INDEX IF NOT EXISTS invitation_pending
@@ -75,6 +75,8 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(self.issues(SCHEMA.replace("'root','operator','none'", "'system','admin','user'")))
         self.assertTrue(self.issues(SCHEMA.replace("'admin','member'", "'root','admin','member'")))
         self.assertTrue(self.issues(SCHEMA.replace("'active','suspended','removed'", "'active','suspended','revoked'")))
+        self.assertTrue(self.issues(SCHEMA.replace("tenant_role TEXT CHECK(tenant_role = 'member')", "tenant_role TEXT CHECK(tenant_role IN ('admin','member'))")))
+        self.assertTrue(self.issues(SCHEMA.replace("tenant_role = 'member'", "tenant_role = 'member' OR tenant_role = 'admin'")))
 
     def test_retired_tenant_owner_and_membership_primary_key(self):
         self.assertTrue(self.issues(SCHEMA.replace('id UUID, revision', 'id UUID, owner_user_id UUID, revision')))
