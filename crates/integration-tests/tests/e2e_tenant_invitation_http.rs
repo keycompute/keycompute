@@ -111,11 +111,14 @@ impl InvitationFixture {
         token: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
-        let request = Request::builder()
+        let mut request = Request::builder()
             .method(method)
             .uri(path.into())
-            .header("authorization", format!("Bearer {token}"))
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        if !token.is_empty() {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let request = request
             .body(Body::from(
                 body.map(|value| value.to_string()).unwrap_or_default(),
             ))
