@@ -203,7 +203,7 @@ async fn invitation_preview_is_masked_and_rejects_unusable_invitations() {
     let invitation_id = Uuid::parse_str(created["invitation"]["id"].as_str().unwrap()).unwrap();
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_invitations SET status='revoked' WHERE id=$1",
+        "UPDATE tenant_invitations SET status='revoked',revoked_at=NOW(),updated_at=NOW() WHERE id=$1",
         [invitation_id.into()],
     ))
     .await
@@ -213,7 +213,7 @@ async fn invitation_preview_is_masked_and_rejects_unusable_invitations() {
 
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_invitations SET status='pending',expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+        "UPDATE tenant_invitations SET status='pending',revoked_at=NULL,expires_at=NOW()-INTERVAL '1 second',updated_at=NOW() WHERE id=$1",
         [invitation_id.into()],
     ))
     .await
