@@ -14,8 +14,8 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use keycompute_auth::AuthorizationAction;
 use keycompute_db::{
-    PlatformAuditCursor, PlatformAuditFilter, PlatformAuditRecord, PlatformAuditScope,
-    PlatformAuditSession,
+    PlatformAuditCursor, PlatformAuditFilter, PlatformAuditOptions, PlatformAuditRecord,
+    PlatformAuditScope, PlatformAuditSession,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -28,8 +28,17 @@ const MAX_CURSOR_LENGTH: usize = 1024;
 pub struct PlatformAuditQuery {
     pub tenant_id: Option<Uuid>,
     pub request_id: Option<Uuid>,
+    pub actor_user_id: Option<Uuid>,
     pub cursor: Option<String>,
     pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformAuditOptionsQuery {
+    pub tenant_search: Option<String>,
+    pub actor_search: Option<String>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -47,6 +56,7 @@ struct CursorEnvelope {
     id: Uuid,
     tenant_id: Option<Uuid>,
     request_id: Option<Uuid>,
+    actor_user_id: Option<Uuid>,
     page_size: i64,
 }
 
@@ -62,6 +72,7 @@ fn encode_cursor(
             id: cursor.id,
             tenant_id: filter.tenant_id,
             request_id: filter.request_id,
+            actor_user_id: filter.actor_user_id,
             page_size,
         })
         .expect("platform audit cursor serialization"),
@@ -85,6 +96,7 @@ fn decode_cursor(
         || cursor.id.is_nil()
         || cursor.tenant_id != filter.tenant_id
         || cursor.request_id != filter.request_id
+        || cursor.actor_user_id != filter.actor_user_id
         || cursor.page_size != page_size
     {
         return Err(ApiError::BadRequest("Invalid platform audit cursor".into()));
@@ -100,6 +112,7 @@ fn normalized_query(
 ) -> Result<(PlatformAuditFilter, i64, Option<PlatformAuditCursor>)> {
     if query.tenant_id.is_some_and(|id| id.is_nil())
         || query.request_id.is_some_and(|id| id.is_nil())
+        || query.actor_user_id.is_some_and(|id| id.is_nil())
         || query
             .page_size
             .is_some_and(|page_size| !(1..=100).contains(&page_size))
@@ -109,6 +122,7 @@ fn normalized_query(
     let filter = PlatformAuditFilter {
         tenant_id: query.tenant_id,
         request_id: query.request_id,
+        actor_user_id: query.actor_user_id,
     };
     let page_size = query.page_size.unwrap_or(DEFAULT_PAGE_SIZE);
     let cursor = query
@@ -173,6 +187,30 @@ pub async fn list_platform_audit_events(
     }))
 }
 
+pub async fn list_platform_audit_options(
+    auth: GlobalConsoleAuth,
+    State(state): State<AppState>,
+    Query(query): Query<PlatformAuditOptionsQuery>,
+) -> Result<Json<PlatformAuditOptions>> {
+    let db = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable("Platform audit log is temporarily unavailable".into())
+        })?
+        .write_conn();
+    scope(&auth)?
+        .options(
+            db,
+            query.tenant_search.as_deref(),
+            query.actor_search.as_deref(),
+            query.limit.unwrap_or(DEFAULT_PAGE_SIZE),
+        )
+        .await
+        .map(Json)
+        .map_err(map_error)
+}
+
 async fn private_response(mut response: Response) -> Response {
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
@@ -186,6 +224,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/platform/audit-events",
             get(list_platform_audit_events),
+        )
+        .route(
+            "/api/v1/platform/audit-options",
+            get(list_platform_audit_options),
         )
         .layer(axum::middleware::map_response(private_response))
         .layer(axum::extract::DefaultBodyLimit::max(4096))
@@ -202,6 +244,7 @@ mod tests {
         let (filter, page_size, cursor) = normalized_query(PlatformAuditQuery {
             tenant_id: Some(tenant_id),
             request_id: Some(request_id),
+            actor_user_id: None,
             cursor: None,
             page_size: Some(25),
         })
@@ -219,6 +262,7 @@ mod tests {
         let (_, _, decoded) = normalized_query(PlatformAuditQuery {
             tenant_id: Some(tenant_id),
             request_id: Some(request_id),
+            actor_user_id: None,
             cursor: Some(encoded.clone()),
             page_size: Some(page_size),
         })
@@ -232,6 +276,10 @@ mod tests {
             },
             PlatformAuditQuery {
                 request_id: Some(Uuid::nil()),
+                ..Default::default()
+            },
+            PlatformAuditQuery {
+                actor_user_id: Some(Uuid::nil()),
                 ..Default::default()
             },
             PlatformAuditQuery {
@@ -250,6 +298,7 @@ mod tests {
             normalized_query(PlatformAuditQuery {
                 tenant_id: None,
                 request_id: Some(request_id),
+                actor_user_id: None,
                 cursor: Some(encoded),
                 page_size: Some(page_size),
             })

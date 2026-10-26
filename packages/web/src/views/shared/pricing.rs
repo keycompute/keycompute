@@ -13,18 +13,28 @@ pub fn Pricing() -> dioxus::prelude::Element {
 #[component]
 fn PricingWorkspace(identity: PricingIdentity) -> Element {
     let i18n = use_i18n();
+    let auth = use_context::<AuthStore>();
     let mut target = use_signal(|| PricingTarget::Platform);
     let mut mode = use_signal(|| "platform".to_string());
     let mut tenant = use_signal(String::new);
     let mut error = use_signal(String::new);
-    rsx! {div {class:"platform-pricing-workspace",
-        section {class:"page-container",aria_label:i18n.t("platform_pricing.target"),
+    let tenants = use_resource(move || async move {
+        crate::services::api_client::with_auto_refresh(auth, |token| async move {
+            crate::services::tenant_service::list_active(&token).await
+        })
+        .await
+    });
+    rsx! {div {class:"page-container platform-pricing-workspace",
+        section {class:"platform-pricing-target",aria_label:i18n.t("platform_pricing.target"),
             label {class:"form-label",r#for:"platform-pricing-scope",{i18n.t("platform_pricing.target")}}
             select {id:"platform-pricing-scope",class:"input-field",value:"{mode}",onchange:move|e|mode.set(e.value()),
                 option {value:"platform",{i18n.t("platform_pricing.global")}} option {value:"tenant",{i18n.t("platform_pricing.tenant")}}
             }
             if mode()=="tenant" {label {class:"form-label",r#for:"platform-pricing-tenant",{i18n.t("pricing.tenant_id")}}
-                input {id:"platform-pricing-tenant",class:"input-field",value:"{tenant}",maxlength:"36",oninput:move|e|tenant.set(e.value())}}
+                select {id:"platform-pricing-tenant",class:"input-field",value:"{tenant}",onchange:move|e|tenant.set(e.value()),
+                    option {value:"",{i18n.t("platform_pricing.choose_tenant")}}
+                    if let Some(Ok(items))=tenants(){for item in items {option {value:"{item.id}","{item.name} · {item.slug}"}}}
+                }}
             button {class:"btn btn-secondary",onclick:move |_|match authority::parse_target(&mode(),&tenant()) {
                 Ok(next)=>{target.set(next);error.set(String::new());},Err(_)=>error.set(i18n.t("platform_pricing.invalid_target").into())
             },{i18n.t("platform_pricing.apply")}}
@@ -179,7 +189,7 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
     let col_count = pricing_col_count(can_manage_platform);
 
     rsx! {
-        div { class: "page-container platform-pricing-records",
+        div { class: "platform-pricing-records",
             p {class:"platform-pricing-current",{i18n.t("platform_pricing.current")} " " {authority::target_label(target,&i18n)}}
             p {class:"text-secondary",{i18n.t("platform_pricing.command_hint")}}
             PageHeader {

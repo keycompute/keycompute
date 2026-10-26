@@ -14,7 +14,15 @@ use crate::{
 };
 use client_api::api::distribution_policy::DistributionPolicyApi;
 use dioxus::prelude::*;
+use rust_decimal::Decimal;
+use std::str::FromStr;
 use types::{Operation, Query};
+
+fn display_commission_rate(value: &str) -> String {
+    Decimal::from_str(value)
+        .map(|rate| format!("{}%", (rate * Decimal::from(100)).normalize()))
+        .unwrap_or_else(|_| value.to_string())
+}
 
 #[component]
 pub fn TenantDistribution() -> Element {
@@ -94,7 +102,7 @@ fn DistributionWorkspace(scope: WorkspaceScope) -> Element {
                                             tr {key:"{row.id}",
                                                 td {strong {"{row.name}"} details {summary {"ID"} code {"{row.id}"}}}
                                                 td {if let Some(id)=row.beneficiary_id {TechnicalId {value:id.to_string()}} else {{i18n.t("tenant_distribution.everyone")}}}
-                                                td {"{row.commission_rate}"}
+                                                td {{display_commission_rate(&row.commission_rate)}}
                                                 td {p {if row.is_active {{i18n.t("tenant_distribution.active")}} else {{i18n.t("tenant_distribution.inactive")}}} small {class:"table-meta",{i18n.t("tenant_distribution.priority")} " {row.priority}"}}
                                                 td {details {summary {{i18n.t("tenant_distribution.window")}}
                                                     p {{format_time(&row.effective_from)}}

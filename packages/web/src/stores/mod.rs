@@ -1,3 +1,4 @@
+pub mod auth_entry_store;
 pub mod auth_store;
 pub mod public_settings_store;
 pub mod referral_store;

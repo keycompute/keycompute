@@ -159,10 +159,16 @@ pub fn PaymentOrders() -> Element {
             }
 
             if can_manage_platform {
-                if let Some(error) = provider_action_error() {
-                    div { class: "alert alert-error", "{error}" }
-                }
-                match verification_tenants() {
+                details { class: "card payment-provider-diagnostics",
+                    summary { class: "card-header disclosure-summary",
+                        h2 { class: "card-title", {i18n.t("payment_orders.provider_diagnostics")} }
+                        span { class: "disclosure-chevron", aria_hidden: "true", "⌄" }
+                    }
+                    div { class: "card-body",
+                    if let Some(error) = provider_action_error() {
+                        div { class: "alert alert-error", "{error}" }
+                    }
+                    match verification_tenants() {
                     None => rsx! { div { class: "loading-state", {i18n.t("table.loading")} } },
                     Some(Err(error)) => rsx! {
                         div { class: "alert alert-error", role: "alert",
@@ -186,7 +192,7 @@ pub fn PaymentOrders() -> Element {
                         }
                     },
                 }
-                div { class: "payment-provider-grid",
+                    div { class: "payment-provider-grid",
                     match provider_statuses() {
                         None => rsx! {
                             div { class: "loading-state", {i18n.t("table.loading")} }
@@ -291,6 +297,8 @@ pub fn PaymentOrders() -> Element {
                                 }
                             }
                         },
+                    }
+                    }
                     }
                 }
             }

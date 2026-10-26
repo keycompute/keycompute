@@ -13,8 +13,8 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use keycompute_auth::AuthorizationAction;
 use keycompute_db::models::platform_operations::{
-    OperationsSession, OperationsTarget, PlatformOperationsScope, TenantHealth, TenantHealthPage,
-    TenantHealthQuery, UsageOperations,
+    OperationsSession, OperationsTarget, OperationsTenantOption, PlatformOperationsScope,
+    TenantHealth, TenantHealthPage, TenantHealthQuery, UsageOperations,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -31,6 +31,12 @@ pub struct HealthQuery {
 pub struct AggregateQuery {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
+}
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantOptionsQuery {
+    pub search: Option<String>,
+    pub limit: Option<i64>,
 }
 #[derive(Debug, Deserialize)]
 pub struct TenantPath {
@@ -105,6 +111,21 @@ pub async fn tenant(
         .map(Json)
         .map_err(map_error)
 }
+pub async fn tenant_options(
+    auth: GlobalConsoleAuth,
+    State(state): State<AppState>,
+    Query(query): Query<TenantOptionsQuery>,
+) -> Result<Json<Vec<OperationsTenantOption>>> {
+    scope(&auth, AuthorizationAction::AggregateStats)?
+        .tenant_options(
+            db(&state)?,
+            query.search.as_deref(),
+            query.limit.unwrap_or(20),
+        )
+        .await
+        .map(Json)
+        .map_err(map_error)
+}
 async fn aggregate(
     auth: GlobalConsoleAuth,
     state: AppState,
@@ -175,6 +196,10 @@ async fn private_response(mut response: Response) -> Response {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/platform/operations/tenants", get(tenants))
+        .route(
+            "/api/v1/platform/operations/tenant-options",
+            get(tenant_options),
+        )
         .route(
             "/api/v1/platform/operations/tenants/{tenant_id}",
             get(tenant),

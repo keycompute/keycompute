@@ -172,8 +172,13 @@ pub(super) fn ResourceTable(scope: NodeAdminScope, kind: Kind) -> Element {
                             if let Row::Task(r)=&row {if r.cancellation_requested_at.is_some(){p {{i18n.t("tenant_nodes.cancel_pending")}}} if r.archived_at.is_some(){p {{i18n.t("tenant_nodes.archived")}}}}
                         }
                         td {div {class:"toolbar",
-                            button {class:"btn btn-secondary btn-sm",onclick:{let row=row.clone();move |_|details.set(Some(row.clone()))},{i18n.t("tenant_nodes.details")}}
-                            for action in row.actions(){button {class:"btn btn-secondary btn-sm",onclick:{let row=row.clone();move |_|{message.set(String::new());pending.set(Some(Pending{row:row.clone(),action}));}},{i18n.t(action.label())}}}
+                            button {id:"tenant-node-detail-trigger-{row.id()}",class:"btn btn-secondary btn-sm",onclick:{let row=row.clone();move |_|details.set(Some(row.clone()))},{i18n.t("tenant_nodes.details")}}
+                            if !row.actions().is_empty() {details {class:"row-action-menu",
+                                summary {class:"btn btn-secondary btn-sm",{i18n.t("common.more")}}
+                                div {class:"row-action-menu-popover",
+                                    for action in row.actions(){button {class:"btn btn-ghost btn-sm",onclick:{let row=row.clone();move |_|{message.set(String::new());pending.set(Some(Pending{row:row.clone(),action}));}},{i18n.t(action.label())}}}
+                                }
+                            }}
                         }}
                     }}}
                 }}
@@ -181,15 +186,18 @@ pub(super) fn ResourceTable(scope: NodeAdminScope, kind: Kind) -> Element {
                 Pager {page:filter().page,total_pages:value.total_pages,total:value.total,on_page:move |page|{filter.write().page=page;details.set(None);}}
             },
         }
-        if let Some(row)=details(){section {class:"card tenant-node-detail",
+        if let Some(row)=details(){for opener_id in [format!("tenant-node-detail-trigger-{}",row.id())]{div {class:"modal-backdrop detail-drawer-backdrop",tabindex:"-1",
+        onclick:{let opener_id=opener_id.clone();move |_|{details.set(None);crate::utils::restore_focus_after_dialog(&opener_id);}},
+        onkeydown:{let opener_id=opener_id.clone();move |event|{if event.key()==Key::Escape{event.stop_propagation();details.set(None);crate::utils::restore_focus_after_dialog(&opener_id);}else{ui::components::modal::contain_modal_focus(&event);}}},
+        aside {class:"detail-drawer tenant-node-detail",role:"dialog",aria_modal:"true",aria_label:i18n.t("tenant_nodes.details"),onclick:move |event|event.stop_propagation(),
             h2 {{i18n.t("tenant_nodes.details")}} p {"{row.id()}"} p {{format_time(row.version())}}
-            match row{
+            match &row{
                 Row::Node(r)=>rsx!{p {"{r.display_name} · " ResourceStatus {kind:Kind::Nodes,status:r.status.clone()}} p {{i18n.t("tenant_nodes.failures")} " {r.consecutive_failure_count} / {r.failure_threshold}"} p {{i18n.t("tenant_nodes.heartbeat")} " " {r.last_heartbeat_at.as_deref().map(format_time).unwrap_or_else(||"—".into())}}},
                 Row::Task(r)=>rsx!{p {{i18n.t("tenant_nodes.request_id")} " {r.request_id}"} p {{i18n.t("tenant_nodes.assigned")} " " {r.assigned_node_id.map(|v|v.to_string()).unwrap_or_else(||"—".into())}} p {{i18n.t("tenant_nodes.deadline")} " {format_time(&r.deadline_at)}"}},
                 Row::Registration(r)=>rsx!{p {{i18n.t("tenant_nodes.preview")} " {r.token_preview}"} p {{i18n.t("tenant_nodes.claimed")} " " {i18n.t(if r.is_revealed{"common.yes"}else{"common.no"})}} p {{i18n.t("tenant_nodes.consumed")} " " {r.consumed_at.as_deref().map(format_time).unwrap_or_else(||"—".into())}}},
             }
-            button {class:"btn btn-secondary",onclick:move |_|details.set(None),{i18n.t("operations.close")}}
-        }}
+            button {class:"btn btn-secondary",r#type:"button",autofocus:true,onclick:{let opener_id=opener_id.clone();move |_|{details.set(None);crate::utils::restore_focus_after_dialog(&opener_id);}},{i18n.t("operations.close")}}
+        }}}}
         if let Some(command)=pending(){for key in [format!("{}:{}:{:?}",command.row.id(),command.row.version(),command.action)]{
             CommandDialog {key:"{key}",scope,pending:command.clone(),on_close:move |_|pending.set(None),on_success:move |result:String|{pending.set(None);details.set(None);message.set(result);data.restart();}}
         }}

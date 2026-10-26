@@ -20,7 +20,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("tenant_providers.accounts", "账号管理");
     m.insert("tenant_providers.bindings", "透传绑定");
-    m.insert("tenant_providers.apply", "应用");
+    m.insert("tenant_providers.apply", "搜索");
     m.insert("tenant_providers.add_account", "新增账号");
     m.insert("tenant_providers.add_binding", "新增绑定");
     m.insert("tenant_providers.empty_accounts", "暂无租户账号");
@@ -90,7 +90,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.home", "首页");
     m.insert("nav.usage", "用量统计");
     m.insert("nav.billing", "账单管理");
-    m.insert("nav.api_keys", "API Keys");
+    m.insert("nav.api_keys", "API 密钥");
     m.insert("nav.payments", "支付中心");
     m.insert("nav.payments.balance", "余额查询");
     m.insert("nav.payments.orders", "订单列表");
@@ -198,7 +198,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("page.home", "仪表盘");
     m.insert("page.usage", "用量统计");
     m.insert("page.billing", "账单管理");
-    m.insert("page.api_keys", "API Key 管理");
+    m.insert("page.api_keys", "API 密钥");
     m.insert("page.model_management", "模型管理");
     m.insert("api_keys.mode_account_pool", "账号池");
     m.insert("api_keys.mode_passthrough", "透传模式");
@@ -223,6 +223,13 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "passthrough.subtitle",
         "按账号—租户授权全部已声明模型；模型与健康状态仅作只读信息。",
     );
+    m.insert(
+        "passthrough.relation_aria",
+        "上游账号通过透传绑定授权给工作区",
+    );
+    m.insert("passthrough.relation_account", "提供模型与凭证");
+    m.insert("passthrough.relation_grant", "定义授权范围");
+    m.insert("passthrough.relation_tenant", "获得只读模型能力");
     m.insert("passthrough.edit_title", "编辑透传绑定");
     m.insert(
         "passthrough.no_accounts",
@@ -319,6 +326,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.pagination_total", "共 {total} 条");
     m.insert("common.loading", "加载中");
     m.insert("common.more", "更多");
+    m.insert("common.details", "详细信息");
     m.insert("common.error", "出错了");
     m.insert("common.success", "操作成功");
     m.insert("common.confirm_delete", "确定要删除吗？此操作不可撤销。");
@@ -389,19 +397,19 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("dashboard.weekly_cost", "本周消耗");
     m.insert("dashboard.used", "已用");
     m.insert("dashboard.quick_links", "快速入口");
-    m.insert("dashboard.manage_api_keys", "管理 API Key");
+    m.insert("dashboard.manage_api_keys", "管理 API 密钥");
     m.insert("dashboard.recharge", "充値余额");
     m.insert("dashboard.account_settings", "账户设置");
     m.insert(
         "api_keys.subtitle",
         "管理 OpenAI 兼容接口访问密钥。明文默认隐藏，仅在你主动显示时展示。",
     );
-    m.insert("api_keys.create", "创建 API Key");
+    m.insert("api_keys.create", "创建 API 密钥");
     m.insert("api_keys.active", "活跃");
-    m.insert("api_keys.current", "当前 Key");
+    m.insert("api_keys.current", "有效密钥");
     m.insert("api_keys.expired", "已过期");
     m.insert("api_keys.all_with_revoked", "全部（含已撤销）");
-    m.insert("api_keys.created_title", "API Key 已创建");
+    m.insert("api_keys.created_title", "API 密钥已创建");
     m.insert(
         "api_keys.created_once",
         "Key 已为当前账号加密保存并默认隐藏；本页面仅在关闭明文区域或离开页面前，于内存中短暂持有副本。",
@@ -470,12 +478,12 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         " 的值为左侧列表中的任一模型即可。",
     );
     m.insert("api_keys.close_saved", "我已记录，关闭");
-    m.insert("api_keys.create_title", "创建 API Key");
+    m.insert("api_keys.create_title", "创建 API 密钥");
     m.insert("api_keys.name", "名称");
     m.insert("api_keys.name_placeholder", "为此 Key 取个名字");
     m.insert("api_keys.creating", "创建中...");
     m.insert("api_keys.create_failed", "创建失败");
-    m.insert("api_keys.delete_confirm_title", "删除 API Key");
+    m.insert("api_keys.delete_confirm_title", "删除 API 密钥");
     m.insert(
         "api_keys.delete_confirm_message",
         "确定永久删除 API Key“{name}”吗？其凭证及可恢复明文将立即移除且无法还原；安全审计历史仍会保留，以该 Key 为目标的待处理轮换申请也会同时取消。",
@@ -496,6 +504,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     // ── Layout ──────────────────────────────────
     m.insert("layout.back_to_home", "返回首页");
     m.insert("layout.open_menu", "打开菜单");
+    m.insert("layout.main_navigation", "主导航");
+    m.insert("layout.product_label", "AI 计算平台");
     m.insert("layout.close_menu", "关闭菜单");
     m.insert("layout.user_menu", "用户菜单");
     m.insert("layout.switch_to_light", "切换到亮色主题");
@@ -745,6 +755,18 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("usage.no_records", "暂无记录");
     m.insert("usage.model", "模型");
     m.insert("usage.total_token", "总 Token");
+    m.insert("usage.filters", "筛选调用记录");
+    m.insert("usage.start_date", "开始日期");
+    m.insert("usage.end_date", "结束日期");
+    m.insert("usage.model_placeholder", "输入完整模型名称");
+    m.insert(
+        "usage.timezone_hint",
+        "日期范围按 UTC 计算，结束日期包含当天。",
+    );
+    m.insert(
+        "usage.trend_summary",
+        "近 7 天共 {total} 次调用；峰值为 {day} 的 {calls} 次。",
+    );
 
     // ── Payments ────────────────────────────────
     m.insert("payments.title", "支付与账单");
@@ -774,6 +796,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("payment_orders.col_tenant", "租户");
     m.insert("payment_orders.col_user", "用户");
     m.insert("payment_orders.verification_tenant", "验证归属租户");
+    m.insert("payment_orders.provider_diagnostics", "支付渠道诊断");
     m.insert(
         "payment_orders.select_verification_tenant",
         "请选择活跃租户",
@@ -839,6 +862,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "当前暂无可用支付方式，请稍后再试或联系管理员",
     );
     m.insert("recharge.amount_label", "充值金额（元）");
+    m.insert("recharge.amount_range", "可充值范围：¥{min}–¥{max}");
     m.insert("recharge.custom_amount", "或输入自定义金额");
     m.insert("recharge.creating_order", "订单创建中…");
     m.insert("recharge.confirm_recharge", "确认充值");
@@ -902,6 +926,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("distribution.status_failed", "失败");
     m.insert("distribution.referral_count", "推荐人数");
     m.insert("distribution.my_invite_link", "我的邀请链接");
+    m.insert("distribution.copy_share_text", "复制分享文案");
+    m.insert("distribution.share_text", "邀请你加入 KeyCompute：{link}");
     m.insert("distribution.referral_users", "推荐用户");
     m.insert("distribution.user", "用户");
     m.insert("distribution.joined_at", "加入时间");
@@ -925,6 +951,22 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("settings.load_failed", "设置加载失败");
     m.insert("settings.saved", "设置已保存");
+    m.insert("settings.save_item", "保存此项");
+    m.insert("settings.save_section", "保存本分区");
+    m.insert("settings.unsaved", "有未保存更改");
+    m.insert(
+        "settings.site_name_invalid",
+        "平台名称不能为空，且不能超过 100 个字符。",
+    );
+    m.insert("settings.currency_invalid", "默认货币必须为 CNY 或 USD。");
+    m.insert(
+        "settings.recharge_range_invalid",
+        "充值金额必须是非负数，且最低金额不能高于最高金额。",
+    );
+    m.insert(
+        "settings.jwt_range_invalid",
+        "登录有效期必须是 1–8760 之间的整数小时。",
+    );
     m.insert("settings.basic_title", "基础配置");
     m.insert(
         "settings.basic_desc",
@@ -1126,6 +1168,15 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("system.provider_health", "Provider 健康状态");
     m.insert("system.no_healthy_provider", "当前没有健康 Provider");
     m.insert("system.gateway_stats", "网关运行统计");
+    m.insert(
+        "system.diagnostics_purpose",
+        "用于排查当前网关的路由与上游状态",
+    );
+    m.insert(
+        "system.diagnostics_purpose_hint",
+        "诊断只读取运行状态；路由探测可能调用上游并产生少量费用。",
+    );
+    m.insert("system.gateway_instance", "当前网关地址");
     m.insert("system.total_requests", "总请求数");
     m.insert("system.success_rate", "成功率");
     m.insert("system.avg_latency", "平均响应时间");
@@ -1406,6 +1457,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.map_router_subtitle", "原始模型 → 在线节点");
     m.insert("monitoring.map_node", "节点");
     m.insert("monitoring.time_range", "时间范围");
+    m.insert("monitoring.filters", "筛选条件");
     m.insert("monitoring.range_1h", "最近 1 小时");
     m.insert("monitoring.range_6h", "最近 6 小时");
     m.insert("monitoring.range_24h", "最近 24 小时");
@@ -1572,6 +1624,18 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.account_status", "账号状态");
     m.insert("users.status_active", "正常");
     m.insert("users.status_suspended", "已停用");
+    m.insert("users.detail_title", "用户详情");
+    m.insert("users.user_id", "用户 ID");
+    m.insert("users.wallet_scope", "钱包范围");
+    m.insert(
+        "users.wallet_scope_hint",
+        "钱包按工作区隔离；管理余额时需先选择目标工作区。",
+    );
+    m.insert("users.last_login", "最近登录");
+    m.insert("users.filter_role", "按平台角色筛选");
+    m.insert("users.filter_status", "按状态筛选");
+    m.insert("users.all_roles", "全部角色");
+    m.insert("users.all_statuses", "全部状态");
     m.insert("users.security_reason", "安全变更原因");
     m.insert("users.security_reason_placeholder", "角色或状态变更时必填");
     m.insert("users.security_reason_required", "请填写角色或状态变更原因");
@@ -1675,6 +1739,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.empty", "暂无租户数据");
     m.insert("tenants.tenant_id", "租户 ID");
     m.insert("tenants.active", "活跃");
+    m.insert("tenants.status_filter", "按状态筛选工作区");
+    m.insert("tenants.all_statuses", "全部状态");
     m.insert("tenants.create", "创建租户");
     m.insert("tenants.create_title", "创建租户");
     m.insert("tenants.name", "租户名称");
@@ -1749,6 +1815,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "查看您通过邀请获得的分销收益明细",
     );
     m.insert("distribution_records.rules_title", "分销规则（只读）");
+    m.insert("distribution_records.records_title", "分成记录");
+    m.insert("distribution_records.view_tabs", "分成规则与记录");
     m.insert(
         "distribution_records.rules_hint",
         "分销规则由平台运营方统一配置，如需调整请联系平台管理员。",
@@ -1803,6 +1871,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("accounts.update_failed", "更新失败");
     m.insert("accounts.resetting", "重置中...");
     m.insert("accounts.reset_health", "重置健康状态");
+    m.insert("accounts.health_filter", "按健康状态筛选渠道");
+    m.insert("accounts.health_all", "全部健康状态");
     m.insert("accounts.add_channel", "+ 新增渠道");
     m.insert("accounts.empty", "暂无渠道配置，请点击“新增渠道”添加");
     m.insert("accounts.search_placeholder", "搜索渠道名称、供应商或 ID");
@@ -2092,6 +2162,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("node_earnings.total_meta", "累计产生的小费收益");
     m.insert("node_earnings.history_title", "小费历史");
     m.insert("node_earnings.withdrawals_title", "提现记录");
+    m.insert("node_earnings.records_tabs", "收益记录类型");
     m.insert("node_earnings.no_history", "暂无小费记录");
     m.insert("node_earnings.no_withdrawals", "暂无提现记录");
     m.insert("node_earnings.col_time", "时间");
@@ -2133,6 +2204,19 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "node_earnings.withdraw_hint",
         "支付宝提现需管理员审批，审批通过后将在 7 个工作日内打款。",
+    );
+    m.insert(
+        "node_earnings.withdraw_minimum",
+        "门槛：有可提现收益即可发起，系统会提取全部可用金额。",
+    );
+    m.insert("node_earnings.withdraw_fee", "费率：平台当前不另收手续费。");
+    m.insert(
+        "node_earnings.withdraw_time_balance",
+        "处理时间：转入余额即时完成。",
+    );
+    m.insert(
+        "node_earnings.withdraw_time_alipay",
+        "处理时间：需管理员审批，审批后 7 个工作日内打款。",
     );
     m.insert("node_earnings.withdraw_failed", "提现失败");
     m.insert(
@@ -2350,7 +2434,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "platform_pricing.invalid_target",
         "请输入真实租户 UUID；无效选择不会查询所有租户。",
     );
-    m.insert("platform_pricing.apply", "应用目标");
+    m.insert("platform_pricing.apply", "切换范围");
+    m.insert("platform_pricing.choose_tenant", "选择工作区");
     m.insert(
         "platform_pricing.explicit_scope",
         "平台定价与租户定价分别管理；切换目标会清除未保存的表单。",

@@ -22,6 +22,7 @@ pub fn ResetPassword(token: String) -> Element {
             .site_name()
             .unwrap_or_else(|| "KeyCompute".to_string())
     });
+    let document_title = format!("{} · {}", i18n.t("auth.reset_password"), site_name());
 
     let mut password = use_signal(String::new);
     let mut confirm = use_signal(String::new);
@@ -72,8 +73,8 @@ pub fn ResetPassword(token: String) -> Element {
     };
 
     rsx! {
-        document::Title { "{site_name}" }
-        div { class: "kc-login-page",
+        document::Title { "{document_title}" }
+        div { class: "kc-login-page kc-auth-task-page",
             div { class: "kc-login-bg-grid" }
             if is_dark {
                 div { class: "kc-login-bg-glow kc-login-glow-one" }

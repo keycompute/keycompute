@@ -84,6 +84,7 @@ async fn test_get_my_usage_with_date_range() {
         .and(path("/api/v1/usage"))
         .and(query_param("start_date", "2024-01-01"))
         .and(query_param("end_date", "2024-01-31"))
+        .and(query_param("model", "gpt-4"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
             {
                 "id": "usage_003",
@@ -102,7 +103,8 @@ async fn test_get_my_usage_with_date_range() {
 
     let params = UsageQueryParams::new()
         .with_start_date("2024-01-01")
-        .with_end_date("2024-01-31");
+        .with_end_date("2024-01-31")
+        .with_model("gpt-4");
     let result = usage_api
         .get_my_usage(Some(&params), fixtures::TEST_ACCESS_TOKEN)
         .await;

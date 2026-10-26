@@ -28,6 +28,7 @@ pub struct PlatformAuditScope {
 pub struct PlatformAuditFilter {
     pub tenant_id: Option<Uuid>,
     pub request_id: Option<Uuid>,
+    pub actor_user_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,9 +60,35 @@ pub struct PlatformAuditRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlatformAuditTenantOption {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlatformAuditActorOption {
+    pub id: Uuid,
+    pub email: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlatformAuditOptions {
+    pub tenants: Vec<PlatformAuditTenantOption>,
+    pub actors: Vec<PlatformAuditActorOption>,
+}
+
 #[derive(Debug, FromQueryResult)]
 struct PageRow {
     items: serde_json::Value,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct OptionsRow {
+    tenants: serde_json::Value,
+    actors: serde_json::Value,
 }
 
 fn denied() -> DbError {
@@ -110,6 +137,7 @@ impl PlatformAuditScope {
     ) -> Result<Vec<Value>, DbError> {
         if filter.tenant_id.is_some_and(|id| id.is_nil())
             || filter.request_id.is_some_and(|id| id.is_nil())
+            || filter.actor_user_id.is_some_and(|id| id.is_nil())
             || cursor.is_some_and(|value| value.id.is_nil())
             || !(1..=100).contains(&limit)
         {
@@ -119,11 +147,50 @@ impl PlatformAuditScope {
         values.extend([
             filter.tenant_id.into(),
             filter.request_id.into(),
+            filter.actor_user_id.into(),
             cursor.map(|value| value.created_at).into(),
             cursor.map(|value| value.id).into(),
             (limit + 1).into(),
         ]);
         Ok(values)
+    }
+
+    /// Search only identities already represented in the immutable audit
+    /// stream. This gives an audit reader a useful selector without granting
+    /// access to the platform tenant or user management APIs.
+    pub async fn options(
+        self,
+        db: &impl ConnectionTrait,
+        tenant_search: Option<&str>,
+        actor_search: Option<&str>,
+        limit: i64,
+    ) -> Result<PlatformAuditOptions, DbError> {
+        let tenant_search = tenant_search.unwrap_or("").trim();
+        let actor_search = actor_search.unwrap_or("").trim();
+        if !(1..=50).contains(&limit)
+            || [tenant_search, actor_search]
+                .into_iter()
+                .any(|value| value.len() > 128 || value.chars().any(char::is_control))
+        {
+            return Err(invalid());
+        }
+        let mut values = self.authority_values();
+        values.extend([tenant_search.into(), actor_search.into(), limit.into()]);
+        let sql = format!(
+            "WITH authority AS MATERIALIZED (SELECT 1 AS granted WHERE {AUTHORITY}), tenant_options AS (SELECT t.id,t.name,t.slug FROM tenants t CROSS JOIN authority WHERE EXISTS(SELECT 1 FROM tenant_audit_events a WHERE a.tenant_id=t.id) AND ($5='' OR strpos(lower(t.name),lower($5))>0 OR strpos(lower(t.slug),lower($5))>0 OR strpos(lower(t.id::text),lower($5))>0) ORDER BY t.name,t.id LIMIT $7), actor_options AS (SELECT u.id,u.email,u.name FROM users u CROSS JOIN authority WHERE EXISTS(SELECT 1 FROM tenant_audit_events a WHERE a.actor_user_id=u.id) AND ($6='' OR strpos(lower(u.email),lower($6))>0 OR strpos(lower(COALESCE(u.name,'')),lower($6))>0 OR strpos(lower(u.id::text),lower($6))>0) ORDER BY u.email,u.id LIMIT $7) SELECT COALESCE((SELECT jsonb_agg(to_jsonb(t) ORDER BY t.name,t.id) FROM tenant_options t),'[]'::jsonb) AS tenants,COALESCE((SELECT jsonb_agg(to_jsonb(u) ORDER BY u.email,u.id) FROM actor_options u),'[]'::jsonb) AS actors FROM authority"
+        );
+        let row = OptionsRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            values,
+        ))
+        .one(db)
+        .await?
+        .ok_or_else(denied)?;
+        Ok(PlatformAuditOptions {
+            tenants: serde_json::from_value(row.tenants).map_err(|_| invalid())?,
+            actors: serde_json::from_value(row.actors).map_err(|_| invalid())?,
+        })
     }
 
     /// Read a stable keyset page while revalidating the platform authority in
@@ -162,9 +229,10 @@ impl PlatformAuditScope {
                  LEFT JOIN users u ON u.id=a.actor_user_id
                  WHERE ($5::uuid IS NULL OR a.tenant_id=$5)
                    AND ($6::uuid IS NULL OR a.request_id=$6)
-                   AND ($7::timestamptz IS NULL OR (a.created_at,a.id)<($7::timestamptz,$8::uuid))
+                   AND ($7::uuid IS NULL OR a.actor_user_id=$7)
+                   AND ($8::timestamptz IS NULL OR (a.created_at,a.id)<($8::timestamptz,$9::uuid))
                  ORDER BY a.created_at DESC,a.id DESC
-                 LIMIT $9
+                 LIMIT $10
              ) entry ON TRUE
              GROUP BY authority.granted"
         );
@@ -222,6 +290,7 @@ mod tests {
                         PlatformAuditFilter {
                             tenant_id: Some(Uuid::nil()),
                             request_id: None,
+                            actor_user_id: None,
                         },
                         None,
                         20,

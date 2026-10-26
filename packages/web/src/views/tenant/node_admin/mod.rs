@@ -156,6 +156,11 @@ fn TenantNodeWorkspace(scope: NodeAdminScope) -> Element {
         ui::PageHeader {title:i18n.t("tenant_nodes.title").to_string(),description:i18n.t("tenant_nodes.hint").to_string()}
         WorkspaceLinks {}
         WorkspaceContext {}
+        ol {class:"node-lifecycle-flow",aria_label:i18n.t("tenant_nodes.flow_label"),
+            li {strong {"1"} span {{i18n.t("tenant_nodes.flow_register")}}}
+            li {strong {"2"} span {{i18n.t("tenant_nodes.flow_node")}}}
+            li {strong {"3"} span {{i18n.t("tenant_nodes.flow_task")}}}
+        }
         NodeResourceConsole { scope }
     }}
 }

@@ -231,7 +231,9 @@ fn TenantSettingsPage(
                         dl { class: "detail-grid tenant-settings-metadata",
                             div { dt { {i18n.t("tenants.tenant_id")} } dd { TechnicalId { value: value.id.to_string() } } }
                             div { dt { {i18n.t("tenants.slug")} } dd { code { "{value.slug}" } } }
-                            div { dt { {i18n.t("table.status")} } dd { span { class: "badge", "{value.status}" } } }
+                            div { dt { {i18n.t("table.status")} } dd { span { class: "badge",
+                                if value.status == "active" { {i18n.t("tenant.status_active")} } else { {i18n.t("common.disabled")} }
+                            } } }
                         }
                         if embedded { Link { class: "btn btn-secondary btn-sm", to: Route::PlatformTenantAccess { tenant_id: value.id.to_string() }, {i18n.t("tenants.manage_access")} } }
                         div { class: "form-field",

@@ -13,7 +13,7 @@ use client_api::{
     AuthApi,
     api::{
         auth::SelectTenantRequest,
-        tenant_control::{InvitationToken, accept_invitation},
+        tenant_control::{InvitationToken, accept_invitation, preview_invitation},
     },
 };
 use dioxus::prelude::*;
@@ -63,6 +63,9 @@ impl PendingState {
     }
     pub fn has_token(&self) -> bool {
         self.token.is_some()
+    }
+    pub fn preview_token(&self) -> Option<InvitationToken> {
+        self.token.clone()
     }
 }
 #[derive(Clone, Copy)]
@@ -142,6 +145,15 @@ fn InvitationAcceptPage() -> Element {
     let observed = (auth.state)();
     let ready = observed.is_authenticated && (users.loaded_session_id)() == observed.session_id;
     let user = if ready { (users.info)() } else { None };
+    let preview = use_resource(move || {
+        let token = invitation.0.read().preview_token();
+        async move {
+            match token {
+                Some(token) => preview_invitation(&get_client(), &token).await.map(Some),
+                None => Ok(None),
+            }
+        }
+    });
     let accept = move |_| {
         if busy() {
             return;
@@ -237,6 +249,24 @@ fn InvitationAcceptPage() -> Element {
         ui::PageHeader {title:i18n.t("tenant.accept_title").to_string(),description:i18n.t("tenant.accept_hint").to_string()}
         if !message().is_empty(){div {class:if failed(){"alert alert-error"}else{"alert alert-success"},role:"status","{message}"}}
         if invitation.0.read().invalid {p {role:"alert",{i18n.t("tenant.invalid_invitation")}}}
+        match preview() {
+            None => rsx! { p { role:"status", {i18n.t("common.loading")} } },
+            Some(Err(error)) => rsx! { div { class:"alert alert-error", role:"alert", {user_error_message(i18n, &error)} } },
+            Some(Ok(Some(value))) => rsx! {
+                section { class:"card invitation-preview",
+                    div { class:"card-body",
+                        h2 { class:"card-title", "{value.tenant_name}" }
+                        dl { class:"detail-grid",
+                            div { dt { {i18n.t("tenant.invite_inviter")} } dd { "{value.inviter}" } }
+                            div { dt { {i18n.t("tenant.role")} } dd { {i18n.t(if value.tenant_role == client_api::TenantRole::Admin {"tenant.role_admin"} else {"tenant.role_member"})} } }
+                            div { dt { {i18n.t("tenant.invite_recipient")} } dd { "{value.invited_email}" } }
+                            div { dt { {i18n.t("tenant.expires")} } dd { {crate::utils::time::format_time(&value.expires_at)} } }
+                        }
+                    }
+                }
+            },
+            Some(Ok(None)) => rsx! {},
+        }
         if !observed.is_authenticated {
             p {{i18n.t("tenant.invite_login")}}
             Link {class:"btn btn-primary",to:Route::Login {},{i18n.t("auth.login")}}

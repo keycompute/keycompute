@@ -1198,6 +1198,9 @@ fn AdminUsersView() -> Element {
     let auth_store = use_context::<AuthStore>();
     let mut ui_store = use_context::<UiStore>();
     let mut search = use_signal(String::new);
+    let mut role_filter = use_signal(|| "all".to_string());
+    let mut status_filter = use_signal(|| "all".to_string());
+    let mut selected_user = use_signal(|| Option::<UserDetail>::None);
     let debounced_search = use_debounced_search(search);
     let mut query = use_signal(UserListQuery::default);
     let current_user = user_store.info.read().clone();
@@ -1263,16 +1266,26 @@ fn AdminUsersView() -> Element {
 
     let mut users_resource = use_resource(move || {
         let current_query = query();
-        let request_key = current_query.clone();
+        let request_key = (current_query.clone(), role_filter(), status_filter());
         async move {
             let params = UserQueryParams::new()
-                .with_page_size(request_key.page_size as i64)
-                .with_page(request_key.page as i64);
-            let params = if !request_key.search.is_empty() {
-                params.with_search(request_key.search.clone())
+                .with_page_size(request_key.0.page_size as i64)
+                .with_page(request_key.0.page as i64);
+            let params = if !request_key.0.search.is_empty() {
+                params.with_search(request_key.0.search.clone())
             } else {
                 params
             };
+            let params = request_key
+                .1
+                .parse::<PlatformRole>()
+                .ok()
+                .map_or(params.clone(), |role| params.with_platform_role(role));
+            let params = request_key
+                .2
+                .parse::<UserStatus>()
+                .ok()
+                .map_or(params.clone(), |status| params.with_status(status));
             let result = with_auto_refresh(auth_store, move |token| {
                 let params = params.clone();
                 async move {
@@ -1287,7 +1300,7 @@ fn AdminUsersView() -> Element {
         }
     });
 
-    let users_request_key = query();
+    let users_request_key = (query(), role_filter(), status_filter());
     let users_result = current_keyed_value(
         &users_request_key,
         users_resource.state().cloned(),
@@ -1862,6 +1875,31 @@ fn AdminUsersView() -> Element {
                             }
                         }
                     }
+                    select {
+                        class: "input-field compact-filter",
+                        aria_label: i18n.t("users.filter_role"),
+                        value: "{role_filter}",
+                        onchange: move |event| {
+                            role_filter.set(event.value());
+                            query.write().page = 1;
+                        },
+                        option { value: "all", {i18n.t("users.all_roles")} }
+                        option { value: "none", {i18n.t("users.role_none")} }
+                        option { value: "operator", {i18n.t("users.role_operator")} }
+                        option { value: "root", {i18n.t("users.role_root")} }
+                    }
+                    select {
+                        class: "input-field compact-filter",
+                        aria_label: i18n.t("users.filter_status"),
+                        value: "{status_filter}",
+                        onchange: move |event| {
+                            status_filter.set(event.value());
+                            query.write().page = 1;
+                        },
+                        option { value: "all", {i18n.t("users.all_statuses")} }
+                        option { value: "active", {i18n.t("users.status_active")} }
+                        option { value: "suspended", {i18n.t("users.status_suspended")} }
+                    }
                 }
             }
 
@@ -1890,7 +1928,13 @@ fn AdminUsersView() -> Element {
                                     tr {
                                         td {
                                             div { class: "user-cell",
-                                                span { class: "user-name", {u.name.clone().unwrap_or_else(|| u.email.clone())} }
+                                                button {
+                                                    id: "user-detail-trigger-{u.id}",
+                                                    class: "btn btn-ghost user-name",
+                                                    r#type: "button",
+                                                    onclick: { let user = u.clone(); move |_| selected_user.set(Some(user.clone())) },
+                                                    {u.name.clone().unwrap_or_else(|| u.email.clone())}
+                                                }
                                                 span { class: "user-email text-secondary", "{u.email}" }
                                             }
                                         }
@@ -1909,7 +1953,9 @@ fn AdminUsersView() -> Element {
                                         td { {i18n.t("users.select_wallet_tenant")} }
                                         td { {format_time(&u.created_at)} }
                                         td {
-                                            div { class: "btn-group",
+                                            details { class: "row-action-menu",
+                                                summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), "⋯" }
+                                                div { class: "btn-group row-action-menu-popover",
                                                 // root/operator identities are protected from operator edits.
                                                 if !matches!(u.platform_role, Some(PlatformRole::Root | PlatformRole::Operator))
                                                     || can_current_user_manage_roles
@@ -1985,6 +2031,7 @@ fn AdminUsersView() -> Element {
                                                     }
                                                 }
                                             }
+                                            }
                                         }
                                     }
                                 }
@@ -2018,6 +2065,78 @@ fn AdminUsersView() -> Element {
                         on_page_change: move |p| query.write().page = p,
                         on_page_size_change: move |size| query.write().set_page_size(size),
                     }
+                }
+            }
+
+            if let Some(ref user) = selected_user() {
+                for opener_id in [format!("user-detail-trigger-{}", user.id)] {
+                div {
+                    class: "modal-backdrop detail-drawer-backdrop",
+                    tabindex: "-1",
+                    onclick: {
+                        let opener_id = opener_id.clone();
+                        move |_| {
+                            selected_user.set(None);
+                            crate::utils::restore_focus_after_dialog(&opener_id);
+                        }
+                    },
+                    onkeydown: {
+                        let opener_id = opener_id.clone();
+                        move |event| {
+                            if event.key() == Key::Escape {
+                                event.stop_propagation();
+                                selected_user.set(None);
+                                crate::utils::restore_focus_after_dialog(&opener_id);
+                            } else {
+                                ui::components::modal::contain_modal_focus(&event);
+                            }
+                        }
+                    },
+                    aside { class: "detail-drawer", role: "dialog", aria_modal: "true", aria_label: i18n.t("users.detail_title"), onclick: move |event| event.stop_propagation(),
+                        div { class: "modal-header",
+                            h2 { class: "modal-title", {i18n.t("users.detail_title")} }
+                            button {
+                                class: "btn btn-ghost",
+                                r#type: "button",
+                                autofocus: true,
+                                aria_label: i18n.t("common.close"),
+                                onclick: {
+                                    let opener_id = opener_id.clone();
+                                    move |_| {
+                                        selected_user.set(None);
+                                        crate::utils::restore_focus_after_dialog(&opener_id);
+                                    }
+                                },
+                                "×"
+                            }
+                        }
+                        dl { class: "audit-detail-list",
+                            dt { {i18n.t("users.user")} }
+                            dd { strong { {user.name.as_deref().unwrap_or(&user.email)} } p { class: "text-secondary", "{user.email}" } }
+                            dt { {i18n.t("users.user_id")} }
+                            dd { code { "{user.id}" } }
+                            dt { {i18n.t("table.role")} }
+                            dd { {platform_role_label(user.platform_role, &i18n)} }
+                            dt { {i18n.t("common.status")} }
+                            dd { {if user.status == Some(UserStatus::Suspended) { i18n.t("users.status_suspended") } else { i18n.t("users.status_active") }} }
+                            dt { {i18n.t("users.tenant")} }
+                            dd {
+                                if let Some(memberships) = &user.memberships {
+                                    if memberships.is_empty() { "—" }
+                                    for membership in memberships {
+                                        p { "{membership.tenant_name.as_deref().unwrap_or(&membership.tenant_id)} · {membership.tenant_role}" }
+                                    }
+                                } else { "—" }
+                            }
+                            dt { {i18n.t("users.wallet_scope")} }
+                            dd { {i18n.t("users.wallet_scope_hint")} }
+                            dt { {i18n.t("users.registered_at")} }
+                            dd { {format_time(&user.created_at)} }
+                            dt { {i18n.t("users.last_login")} }
+                            dd { {user.last_login_at.as_deref().map(format_time).unwrap_or_else(|| "—".to_string())} }
+                        }
+                    }
+                }
                 }
             }
 

@@ -34,15 +34,6 @@ enum Action {
     Suspend,
     Remove,
 }
-impl Action {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Suspend => "tenant.change_status",
-            Self::Remove => "tenant.remove",
-        }
-    }
-}
-
 fn can_manage_member(member: &TenantMember) -> bool {
     member.tenant_role == TenantRole::Member
         && member.membership_status != MembershipStatus::Removed
@@ -223,7 +214,9 @@ fn TenantMembersPage() -> Element {
                                         td {{status_label(i18n, member.user_status.as_str())}}
                                         td {
                                             if manageable {
-                                                button {class:"btn btn-secondary btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:suspend_member.clone(),action:Action::Suspend})),{i18n.t("tenant.change_status")}}
+                                                button {class:"btn btn-secondary btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:suspend_member.clone(),action:Action::Suspend})),
+                                                    {i18n.t(if member.membership_status == MembershipStatus::Active {"tenant.suspend_member"} else {"tenant.resume_member"})}
+                                                }
                                                 button {class:"btn btn-danger btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:remove_member.clone(),action:Action::Remove})),{i18n.t("tenant.remove")}}
                                             }
                                             if member.tenant_role == TenantRole::Admin {span {class:"text-secondary",{i18n.t("tenant.peer_admin_protected")}}}
@@ -239,7 +232,7 @@ fn TenantMembersPage() -> Element {
                 Pager {page:page(),total_pages:value.page.total_pages,total:value.page.total,on_page:move |p|page.set(p)}
             },
         }
-        if let Some(command)=pending(){CommandDialog {title:i18n.t(command.action.label()).to_string(),target:command.member.email.clone(),busy:busy(),on_cancel:move |_|pending.set(None),on_confirm:confirm}}
+        if let Some(command)=pending(){CommandDialog {title:i18n.t(match command.action {Action::Remove=>"tenant.remove",Action::Suspend if command.member.membership_status==MembershipStatus::Active=>"tenant.suspend_member",Action::Suspend=>"tenant.resume_member"}).to_string(),target:command.member.email.clone(),busy:busy(),on_cancel:move |_|pending.set(None),on_confirm:confirm}}
     }}
 }
 

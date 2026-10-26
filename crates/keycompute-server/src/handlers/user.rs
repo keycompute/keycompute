@@ -18,7 +18,7 @@ use axum::{
     http::header,
     response::{IntoResponse, Response},
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use keycompute_auth::{
     DEFAULT_LOCK_DURATION_MINUTES, DEFAULT_MAX_FAILED_ATTEMPTS, PasswordHasher, PasswordValidator,
     ProduceAiKeyValidator,
@@ -759,10 +759,31 @@ pub struct UsageRecord {
 
 #[derive(Debug, Deserialize)]
 pub struct UsageQueryParams {
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub model: Option<String>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+fn parse_usage_date(value: Option<&str>, inclusive_end: bool) -> Result<Option<DateTime<Utc>>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| ApiError::BadRequest("usage date must use YYYY-MM-DD".into()))?;
+    let date = if inclusive_end {
+        date.succ_opt()
+            .ok_or_else(|| ApiError::BadRequest("usage end date is out of range".into()))?
+    } else {
+        date
+    };
+    let timestamp = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| ApiError::BadRequest("usage date is out of range".into()))?;
+    Ok(Some(DateTime::from_naive_utc_and_offset(timestamp, Utc)))
 }
 
 #[derive(Debug, Serialize)]
@@ -794,15 +815,33 @@ pub async fn get_my_usage(
     let modern_pagination = params.page.is_some() || params.page_size.is_some();
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
+    let from = parse_usage_date(params.start_date.as_deref(), false)?;
+    let to = parse_usage_date(params.end_date.as_deref(), true)?;
+    if matches!((from, to), (Some(from), Some(to)) if from >= to) {
+        return Err(ApiError::BadRequest(
+            "usage start date must not be after end date".into(),
+        ));
+    }
+    let model = params
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if model.is_some_and(|value| value.len() > 128) {
+        return Err(ApiError::BadRequest(
+            "usage model filter is too long".into(),
+        ));
+    }
     let scope = UserUsageScope::new(auth.require_owner(
         auth.user_id,
         keycompute_auth::AuthorizationAction::ReadPersonalResource,
     )?);
     let logs = scope
-        .list(
+        .list_filtered(
             pool.write_conn(),
-            None,
-            None,
+            from,
+            to,
+            model,
             if has_pagination { page_size } else { 100 },
             if has_pagination { offset } else { 0 },
         )
@@ -826,7 +865,7 @@ pub async fn get_my_usage(
 
     if modern_pagination {
         let total = scope
-            .count(pool.write_conn(), None, None)
+            .count_filtered(pool.write_conn(), from, to, model)
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to count usage logs: {}", e)))?;
         Ok(Json(

@@ -191,15 +191,16 @@ impl PlatformIdentity {
         db: &impl ConnectionTrait,
         scope: FinancialScope,
         search: Option<&str>,
+        status: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<PlatformPage<PlatformTenantInfo>, DbError> {
         scope.require_platform_global()?;
         let search = page(limit, offset, search)?;
         let mut values = scope.values();
-        values.extend([search.into(), limit.into(), offset.into()]);
+        values.extend([search.into(), status.into(), limit.into(), offset.into()]);
         let sql = format!(
-            "WITH authority AS MATERIALIZED(SELECT 1 WHERE {}),visible AS MATERIALIZED(SELECT t.id,t.name,t.slug,t.description,t.status,t.created_at,t.updated_at FROM tenants t CROSS JOIN authority WHERE ($10='' OR strpos(lower(t.name||' '||t.slug),lower($10))>0)),selected AS (SELECT * FROM visible ORDER BY created_at DESC,id DESC LIMIT $11 OFFSET $12),page AS (SELECT {TENANT_COLUMNS} FROM selected t) SELECT (SELECT COUNT(*)::bigint FROM visible) AS total,(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY p.created_at DESC,p.id DESC),'[]'::jsonb) FROM page p) AS items FROM authority",
+            "WITH authority AS MATERIALIZED(SELECT 1 WHERE {}),visible AS MATERIALIZED(SELECT t.id,t.name,t.slug,t.description,t.status,t.created_at,t.updated_at FROM tenants t CROSS JOIN authority WHERE ($10='' OR strpos(lower(t.name||' '||t.slug),lower($10))>0) AND ($11::text IS NULL OR t.status=$11)),selected AS (SELECT * FROM visible ORDER BY created_at DESC,id DESC LIMIT $12 OFFSET $13),page AS (SELECT {TENANT_COLUMNS} FROM selected t) SELECT (SELECT COUNT(*)::bigint FROM visible) AS total,(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY p.created_at DESC,p.id DESC),'[]'::jsonb) FROM page p) AS items FROM authority",
             scope.predicate()
         );
         let row = db

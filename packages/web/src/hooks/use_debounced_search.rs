@@ -132,6 +132,21 @@ mod tests {
                 include_str!("../views/shared/users.rs"),
                 "use_debounced_search(search)",
             ),
+            (
+                "operations tenant picker",
+                include_str!("../views/operations/usage.rs"),
+                "use_debounced_search(tenant)",
+            ),
+            (
+                "platform audit tenant picker",
+                include_str!("../views/shared/platform_audit.rs"),
+                "use_debounced_search(tenant_input)",
+            ),
+            (
+                "platform audit actor picker",
+                include_str!("../views/shared/platform_audit.rs"),
+                "use_debounced_search(actor_input)",
+            ),
         ] {
             assert_eq!(
                 source.matches(expected_call).count(),

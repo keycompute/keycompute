@@ -40,6 +40,7 @@ fn parse_models_input(value: &str) -> Vec<String> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AccountListQuery {
     search: String,
+    health_status: String,
     page: u32,
     page_size: u32,
 }
@@ -48,6 +49,7 @@ impl Default for AccountListQuery {
     fn default() -> Self {
         Self {
             search: String::new(),
+            health_status: String::new(),
             page: 1,
             page_size: PAGE_SIZE as u32,
         }
@@ -308,6 +310,7 @@ fn AdminAccountsView() -> Element {
     let mut search = use_signal(String::new);
     let debounced_search = use_debounced_search(search);
     let mut query = use_signal(AccountListQuery::default);
+    let mut health_status = use_signal(String::new);
 
     // 全局重置健康状态
     let mut resetting = use_signal(|| false);
@@ -357,6 +360,9 @@ fn AdminAccountsView() -> Element {
                 .with_page_size(current_query.page_size);
             if !current_query.search.is_empty() {
                 params = params.with_search(current_query.search);
+            }
+            if !current_query.health_status.is_empty() {
+                params = params.with_health_status(current_query.health_status);
             }
             let result = with_auto_refresh(auth_store, move |token| {
                 let params = params.clone();
@@ -599,6 +605,22 @@ fn AdminAccountsView() -> Element {
                                 "×"
                             }
                         }
+                    }
+                    select {
+                        class: "input-field compact-filter",
+                        aria_label: i18n.t("accounts.health_filter"),
+                        value: "{health_status}",
+                        onchange: move |event| {
+                            let next = event.value();
+                            health_status.set(next.clone());
+                            query.write().health_status = next;
+                            query.write().reset_page();
+                        },
+                        option { value: "", {i18n.t("accounts.health_all")} }
+                        option { value: "healthy", {i18n.t("system.healthy")} }
+                        option { value: "degraded", {i18n.t("system.degraded")} }
+                        option { value: "unhealthy", {i18n.t("system.unhealthy")} }
+                        option { value: "unknown", {i18n.t("dashboard.pending_check")} }
                     }
                     Button {
                         variant: ButtonVariant::Ghost,
@@ -847,7 +869,9 @@ fn AdminAccountsView() -> Element {
                                             }
                                         }
                                         td {
-                                            div { class: "accounts-actions",
+                                            details { class: "row-action-menu",
+                                                summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), "⋯" }
+                                                div { class: "btn-group row-action-menu-popover",
                                                 Button {
                                                     variant: ButtonVariant::Ghost,
                                                     size: ButtonSize::Small,
@@ -953,6 +977,7 @@ fn AdminAccountsView() -> Element {
                                                         }
                                                     },
                                                     {i18n.t("form.delete")}
+                                                }
                                                 }
                                             }
                                         }
@@ -1431,6 +1456,7 @@ mod tests {
     fn account_search_resets_the_database_page() {
         let mut query = AccountListQuery {
             search: "old".to_string(),
+            health_status: String::new(),
             page: 5,
             page_size: PAGE_SIZE as u32,
         };
@@ -1443,6 +1469,7 @@ mod tests {
     fn account_mutations_can_reset_an_orphaned_last_page() {
         let mut query = AccountListQuery {
             search: "matched before editing".to_string(),
+            health_status: String::new(),
             page: 2,
             page_size: PAGE_SIZE as u32,
         };

@@ -22,6 +22,10 @@ fn UsageContent() -> Element {
     let auth_store = use_context::<AuthStore>();
     let mut page = use_signal(|| 1u32);
     let mut page_size = use_signal(|| PAGE_SIZE as u32);
+    let mut start_date = use_signal(String::new);
+    let mut end_date = use_signal(String::new);
+    let mut model = use_signal(String::new);
+    let mut applied_filters = use_signal(|| (String::new(), String::new(), String::new()));
 
     // 汇总统计
     let stats = use_resource(move || async move {
@@ -33,15 +37,26 @@ fn UsageContent() -> Element {
 
     // 明细记录（服务端分页）
     let records = use_resource(move || async move {
-        let request_key = (page(), page_size());
-        let result = with_auto_refresh(auth_store, |token| async move {
-            usage_service::list_page(
-                &client_api::api::usage::UsageQueryParams::new()
-                    .with_page(request_key.0 as i32)
-                    .with_page_size(request_key.1 as i32),
-                &token,
-            )
-            .await
+        let filters = applied_filters();
+        let request_key = (page(), page_size(), filters.0, filters.1, filters.2);
+        let query_key = request_key.clone();
+        let result = with_auto_refresh(auth_store, move |token| {
+            let query_key = query_key.clone();
+            async move {
+                let mut query = client_api::api::usage::UsageQueryParams::new()
+                    .with_page(query_key.0 as i32)
+                    .with_page_size(query_key.1 as i32);
+                if !query_key.2.is_empty() {
+                    query = query.with_start_date(query_key.2);
+                }
+                if !query_key.3.is_empty() {
+                    query = query.with_end_date(query_key.3);
+                }
+                if !query_key.4.is_empty() {
+                    query = query.with_model(query_key.4);
+                }
+                usage_service::list_page(&query, &token).await
+            }
         })
         .await;
         KeyedResourceValue::new(request_key, result)
@@ -68,6 +83,30 @@ fn UsageContent() -> Element {
         ),
         _ => (vec![], vec![]),
     };
+    let trend_summary = trend().and_then(|result| result.ok()).map(|value| {
+        let total = value
+            .buckets
+            .iter()
+            .map(|bucket| bucket.requests)
+            .sum::<i64>();
+        let peak = value.buckets.iter().max_by_key(|bucket| bucket.requests);
+        let (peak_day, peak_calls) = peak
+            .map(|bucket| {
+                (
+                    bucket.start.get(..10).unwrap_or(&bucket.start).to_string(),
+                    bucket.requests,
+                )
+            })
+            .unwrap_or_else(|| ("—".to_string(), 0));
+        i18n.t_with_args(
+            "usage.trend_summary",
+            &[
+                ("total", &total.to_string()),
+                ("day", &peak_day),
+                ("calls", &peak_calls.to_string()),
+            ],
+        )
+    });
 
     rsx! {
         div { class: "page-container",
@@ -89,14 +128,14 @@ fn UsageContent() -> Element {
                         div { class: "stat-card",
                             div { class: "stat-body",
                                 p { class: "stat-title", {i18n.t("usage.total_calls")} }
-                                p { class: "stat-value", "{s.total_requests}" }
+                                p { class: "stat-value", {crate::utils::format_count(s.total_requests)} }
                                 p { class: "stat-label", "{i18n.t(\"usage.period\")}：{s.period}" }
                             }
                         }
                         div { class: "stat-card",
                             div { class: "stat-body",
                                 p { class: "stat-title", {i18n.t("usage.total_tokens")} }
-                                p { class: "stat-value", "{s.total_tokens}" }
+                                p { class: "stat-value", {crate::utils::format_count(s.total_tokens)} }
                                 p { class: "stat-label",
                                     "{i18n.t(\"usage.prompt_tokens\")}：{s.total_prompt_tokens} / {i18n.t(\"usage.completion_tokens\")}：{s.total_completion_tokens}"
                                 }
@@ -117,7 +156,7 @@ fn UsageContent() -> Element {
                 p { class: "alert alert-error", role: "alert", {format!("{}: {}", i18n.t("common.load_failed"), crate::services::api_client::user_error_message(i18n, &error))} }
             }
             if let Some(Ok(value)) = trend() {
-                p { class: "text-secondary", {format!("UTC · {}: {}", i18n.t("common.display_snapshot"), format_time(&value.as_of))} }
+                p { class: "text-secondary", {format!("{}: {}", i18n.t("common.display_snapshot"), format_time(&value.as_of))} }
             }
             // 调用趋势折线图
             if !chart_x.is_empty() {
@@ -133,12 +172,74 @@ fn UsageContent() -> Element {
                             height: 300,
                         }
                     }
+                    if let Some(summary) = trend_summary.as_ref() {
+                        p { class: "text-secondary", {summary.clone()} }
+                    }
                 }
+            }
+
+            section { class: "section", aria_label: i18n.t("usage.filters"),
+                form {
+                    class: "filter-bar",
+                    onsubmit: move |event| {
+                        event.prevent_default();
+                        applied_filters.set((
+                            start_date().trim().to_string(),
+                            end_date().trim().to_string(),
+                            model().trim().to_string(),
+                        ));
+                        page.set(1);
+                    },
+                    label { class: "form-field",
+                        span { {i18n.t("usage.start_date")} }
+                        input {
+                            class: "input",
+                            r#type: "date",
+                            value: start_date(),
+                            oninput: move |event| start_date.set(event.value()),
+                        }
+                    }
+                    label { class: "form-field",
+                        span { {i18n.t("usage.end_date")} }
+                        input {
+                            class: "input",
+                            r#type: "date",
+                            value: end_date(),
+                            oninput: move |event| end_date.set(event.value()),
+                        }
+                    }
+                    label { class: "form-field",
+                        span { {i18n.t("usage.model")} }
+                        input {
+                            class: "input",
+                            value: model(),
+                            placeholder: i18n.t("usage.model_placeholder"),
+                            oninput: move |event| model.set(event.value()),
+                        }
+                    }
+                    div { class: "filter-actions",
+                        button { class: "btn btn-primary", r#type: "submit", {i18n.t("common.search")} }
+                        button {
+                            class: "btn btn-secondary",
+                            r#type: "button",
+                            onclick: move |_| {
+                                start_date.set(String::new());
+                                end_date.set(String::new());
+                                model.set(String::new());
+                                applied_filters.set((String::new(), String::new(), String::new()));
+                                page.set(1);
+                            },
+                            {i18n.t("common.clear")}
+                        }
+                    }
+                }
+                p { class: "text-secondary", {i18n.t("usage.timezone_hint")} }
             }
 
             // 明细记录表格
             {
-                let request_key = (page(), page_size());
+                let filters = applied_filters();
+                let request_key = (page(), page_size(), filters.0, filters.1, filters.2);
                 let current_records = current_keyed_value(
                     &request_key,
                     records.state().cloned(),
@@ -182,9 +283,9 @@ fn UsageContent() -> Element {
                                             tr {
                                                 td { {format_time(&r.created_at)} }
                                                 td { "{r.model}" }
-                                                td { "{r.prompt_tokens}" }
-                                                td { "{r.completion_tokens}" }
-                                                td { "{r.total_tokens}" }
+                                                td { {crate::utils::format_count(r.prompt_tokens)} }
+                                                td { {crate::utils::format_count(r.completion_tokens)} }
+                                                td { {crate::utils::format_count(r.total_tokens)} }
                                                 td { {if r.cost > 0.0 { format!("¥{:.6}", r.cost) } else { "—".to_string() }} }
                                             }
                                         }

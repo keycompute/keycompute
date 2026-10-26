@@ -32,6 +32,12 @@ pub struct TenantHealthPage {
     pub offset: i64,
     pub as_of: String,
 }
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct OperationsTenantOption {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+}
 #[derive(Debug, Clone, Deserialize)]
 pub struct CurrencyOperations {
     pub currency: String,
@@ -112,6 +118,33 @@ impl PlatformOperationsApi {
         self.client
             .get_json_fresh(
                 &with_query("/api/v1/platform/operations/tenants", values),
+                Some(token),
+            )
+            .await
+    }
+    pub async fn tenant_options(
+        &self,
+        search: Option<&str>,
+        limit: u32,
+        token: &str,
+    ) -> Result<Vec<OperationsTenantOption>> {
+        if limit == 0 || limit > 50 {
+            return Err(ClientError::Config(
+                "Tenant option limit is outside the supported range".into(),
+            ));
+        }
+        let mut values = vec![("limit", limit.to_string())];
+        if let Some(search) = search.map(str::trim).filter(|value| !value.is_empty()) {
+            if search.len() > 128 || search.chars().any(char::is_control) {
+                return Err(ClientError::Config(
+                    "Tenant option search is invalid".into(),
+                ));
+            }
+            values.push(("search", search.to_string()));
+        }
+        self.client
+            .get_json_fresh(
+                &with_query("/api/v1/platform/operations/tenant-options", values),
                 Some(token),
             )
             .await

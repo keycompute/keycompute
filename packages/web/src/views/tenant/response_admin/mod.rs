@@ -134,11 +134,16 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
                         td{TechnicalId{value:row.owner().to_string()}}td{p{{response_status_label(i18n,row.status())}}if let Row::Conversation(c)=row{if let Some(active)=&c.active_response_id{details{summary{{i18n.t("tenant_responses.active")}}code{"{active}"}}}}}
                         td{p{{format_time(row.created())}}details{summary{{i18n.t("tenant_responses.expires")}}{format_time(row.expires())}}}
                         td{
-                            button{class:"btn btn-secondary btn-sm",onclick:move |_|inspect(Inspection{row:detail.clone(),read:ReadKind::Detail}),{i18n.t("tenant_responses.inspect")}}
-                            button{class:"btn btn-secondary btn-sm",onclick:move |_|inspect(Inspection{row:items.clone(),read:ReadKind::Items}),{i18n.t("tenant_responses.items")}}
-                            if row.can_cancel(){button{class:"btn btn-secondary btn-sm",onclick:move |_|mutate(Mutation::Cancel(cancel.clone())),{i18n.t("tenant_responses.cancel")}}}
-                            if row.is_conversation(){button{class:"btn btn-secondary btn-sm",onclick:move |_|mutate(Mutation::Metadata(meta.clone())),{i18n.t("tenant_responses.metadata")}}button{class:"btn btn-secondary btn-sm",onclick:move |_|mutate(Mutation::Append(append.clone())),{i18n.t("tenant_responses.append")}}}
-                            button{class:"btn btn-danger btn-sm",onclick:move |_|mutate(Mutation::Delete(delete.clone())),{i18n.t("tenant_responses.delete")}}
+                            details { class: "row-action-menu",
+                                summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), "⋯" }
+                                div { class: "row-action-menu-popover",
+                                    button{class:"btn btn-ghost btn-sm",onclick:move |_|inspect(Inspection{row:detail.clone(),read:ReadKind::Detail}),{i18n.t("tenant_responses.inspect")}}
+                                    button{class:"btn btn-ghost btn-sm",onclick:move |_|inspect(Inspection{row:items.clone(),read:ReadKind::Items}),{i18n.t("tenant_responses.items")}}
+                                    if row.can_cancel(){button{class:"btn btn-ghost btn-sm",onclick:move |_|mutate(Mutation::Cancel(cancel.clone())),{i18n.t("tenant_responses.cancel")}}}
+                                    if row.is_conversation(){button{class:"btn btn-ghost btn-sm",onclick:move |_|mutate(Mutation::Metadata(meta.clone())),{i18n.t("tenant_responses.metadata")}}button{class:"btn btn-ghost btn-sm",onclick:move |_|mutate(Mutation::Append(append.clone())),{i18n.t("tenant_responses.append")}}}
+                                    button{class:"btn btn-danger btn-sm",onclick:move |_|mutate(Mutation::Delete(delete.clone())),{i18n.t("tenant_responses.delete")}}
+                                }
+                            }
                         }
                     }}}}}
                 }}if page.rows.is_empty(){div{class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}}

@@ -49,6 +49,12 @@ pub struct TenantHealthPage {
     pub offset: i64,
     pub as_of: DateTime<Utc>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperationsTenantOption {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurrencyOperations {
     pub currency: String,
@@ -128,6 +134,35 @@ impl PlatformOperationsScope {
             return Err(denied());
         }
         Ok(())
+    }
+    /// Minimal active-tenant projection for the aggregate-usage target picker.
+    /// It deliberately excludes health counters and remains authorized by the
+    /// same live platform scope as the aggregate query that consumes it.
+    pub async fn tenant_options(
+        self,
+        db: &impl ConnectionTrait,
+        search: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<OperationsTenantOption>, DbError> {
+        let search = search.unwrap_or("").trim();
+        if !(1..=50).contains(&limit) || search.len() > 128 || search.chars().any(char::is_control)
+        {
+            return Err(invalid());
+        }
+        let mut values = self.values();
+        values.extend([search.into(), limit.into()]);
+        let sql = format!(
+            "WITH authority AS MATERIALIZED (SELECT 1 AS granted WHERE {AUTHORITY}), options AS (SELECT t.id,t.name,t.slug FROM tenants t CROSS JOIN authority WHERE t.status='active' AND ($5='' OR strpos(lower(t.name),lower($5))>0 OR strpos(lower(t.slug),lower($5))>0 OR strpos(lower(t.id::text),lower($5))>0) ORDER BY t.name,t.id LIMIT $6) SELECT COALESCE((SELECT jsonb_agg(to_jsonb(o) ORDER BY o.name,o.id) FROM options o),'[]'::jsonb) AS items FROM authority"
+        );
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                sql,
+                values,
+            ))
+            .await?
+            .ok_or_else(denied)?;
+        serde_json::from_value(row.try_get("", "items")?).map_err(|_| invalid())
     }
     pub async fn tenants(
         self,

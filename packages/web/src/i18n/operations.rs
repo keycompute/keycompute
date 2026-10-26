@@ -9,8 +9,8 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ),
     (
         "operations.boundary",
-        "这是平台只读运维入口，不授予租户成员身份，不提供订单明细、余额变更、对话正文或凭证明文。",
-        "Read-only platform operations do not grant tenant membership, raw orders, wallet changes, conversation bodies or credentials.",
+        "只读运维视图，不授予工作区权限，也不显示敏感业务数据。",
+        "Read-only operations view that grants no workspace access and exposes no sensitive business data.",
     ),
     (
         "operations.denied",
@@ -76,10 +76,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "指定租户汇总",
         "Explicit tenant aggregate",
     ),
+    ("operations.tenant_id", "目标工作区", "Target workspace"),
     (
-        "operations.tenant_id",
-        "目标租户 UUID",
-        "Target tenant UUID",
+        "operations.tenant_search_placeholder",
+        "搜索工作区名称或标识",
+        "Search by workspace name or slug",
     ),
     (
         "operations.from",

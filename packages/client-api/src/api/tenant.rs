@@ -161,6 +161,7 @@ impl UpdateTenantRequest {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TenantQueryParams {
     pub search: Option<String>,
+    pub status: Option<String>,
     pub page: Option<u32>,
     pub page_size: Option<u32>,
     pub limit: Option<i32>,
@@ -179,6 +180,11 @@ impl TenantQueryParams {
 
     pub fn with_search(mut self, search: impl Into<String>) -> Self {
         self.search = Some(search.into());
+        self
+    }
+
+    pub fn with_status(mut self, status: impl Into<String>) -> Self {
+        self.status = Some(status.into());
         self
     }
 
@@ -210,6 +216,12 @@ impl TenantQueryParams {
             params.push(format!(
                 "search={}",
                 crate::api::common::encode_query_value(search)
+            ));
+        }
+        if let Some(ref status) = self.status {
+            params.push(format!(
+                "status={}",
+                crate::api::common::encode_query_value(status)
             ));
         }
         if let Some(page) = self.page {

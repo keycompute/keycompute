@@ -35,6 +35,39 @@ async fn operational_tenant_metadata_reads_are_fresh_and_filter_values_are_encod
     }
     server.verify().await;
 }
+
+#[tokio::test]
+async fn aggregate_usage_tenant_options_use_the_bounded_operations_route() {
+    let server = MockServer::start().await;
+    let client = ApiClient::new(ClientConfig::new(server.uri()).with_no_proxy(true)).unwrap();
+    let api = PlatformOperationsApi::new(&client);
+    let tenant = Uuid::new_v4();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/platform/operations/tenant-options"))
+        .and(query_param("search", "tenant %&="))
+        .and(query_param("limit", "20"))
+        .and(header("authorization", "Bearer operator-session"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "id": tenant,
+            "name": "Tenant",
+            "slug": "tenant"
+        }])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let options = api
+        .tenant_options(Some(" tenant %&= "), 20, "operator-session")
+        .await
+        .unwrap();
+    assert_eq!(options[0].id, tenant);
+    assert!(
+        api.tenant_options(None, 0, "operator-session")
+            .await
+            .is_err()
+    );
+    server.verify().await;
+}
 #[tokio::test]
 async fn platform_and_named_tenant_usage_have_distinct_routes_without_float_amounts() {
     let server = MockServer::start().await;

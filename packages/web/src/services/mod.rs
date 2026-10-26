@@ -2,7 +2,6 @@ pub mod account_service;
 pub mod api_client;
 pub mod api_key_service;
 pub mod auth_service;
-pub mod billing_service;
 pub mod debug_service;
 pub mod distribution_service;
 pub mod health_service;

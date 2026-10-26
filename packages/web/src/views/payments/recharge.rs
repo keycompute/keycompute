@@ -422,6 +422,11 @@ fn RechargeContent() -> Element {
                                         value: "{amount}",
                                         oninput: move |e| amount.set(e.value()),
                                     }
+                                    if let Some(Ok(response)) = methods() {
+                                        p { class: "form-hint",
+                                            {i18n.t_with_args("recharge.amount_range", &[("min", &response.min_amount), ("max", &response.max_amount)])}
+                                        }
+                                    }
                                 }
 
                                 // 提交按钮
@@ -436,7 +441,7 @@ fn RechargeContent() -> Element {
                                             let amt_label = if amount().is_empty() {
                                                 String::new()
                                             } else {
-                                                format!(" CNY {}", amount())
+                                                format!(" ¥{}", amount())
                                             };
                                             format!(
                                                 "{} {}{}",
@@ -525,9 +530,12 @@ fn RechargeContent() -> Element {
                                         style: "width:220px;height:220px;display:block;margin:0 auto;border-radius:16px;border:1px solid var(--border-color);background:white;padding:12px",
                                     }
                                     if let Some(code) = qr_code {
-                                        p { style: "font-size:12px;color:var(--text-secondary);margin-top:8px;text-align:center;word-break:break-all",
-                                            {i18n.t("recharge.qr_code_content")}
-                                            "{code}"
+                                        details { class: "payment-technical-details",
+                                            summary { {i18n.t("common.details")} }
+                                            code { style: "font-size:12px;word-break:break-all",
+                                                {i18n.t("recharge.qr_code_content")}
+                                                "{code}"
+                                            }
                                         }
                                     }
                                 }

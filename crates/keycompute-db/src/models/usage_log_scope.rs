@@ -21,6 +21,14 @@ impl Window {
     }
 }
 
+#[derive(Default, Clone, Copy)]
+struct QueryFilters<'a> {
+    pagination: Option<(i64, i64)>,
+    id: Option<Uuid>,
+    owner: Option<Uuid>,
+    model: Option<&'a str>,
+}
+
 /// Stable, secret-free tenant reporting projection, independent of future ledger fields.
 #[derive(Debug, Clone, FromQueryResult, Serialize)]
 pub struct UsageLogReportRow {
@@ -56,7 +64,17 @@ fn query(
     pagination: Option<(i64, i64)>,
     id: Option<Uuid>,
 ) -> Result<Statement, DbError> {
-    query_filtered(scope, select, suffix, window, pagination, id, None)
+    query_filtered(
+        scope,
+        select,
+        suffix,
+        window,
+        QueryFilters {
+            pagination,
+            id,
+            ..Default::default()
+        },
+    )
 }
 
 fn query_filtered(
@@ -64,9 +82,7 @@ fn query_filtered(
     select: &str,
     suffix: &str,
     window: Window,
-    pagination: Option<(i64, i64)>,
-    id: Option<Uuid>,
-    owner: Option<Uuid>,
+    filters: QueryFilters<'_>,
 ) -> Result<Statement, DbError> {
     if matches!((window.from, window.to), (Some(from), Some(to)) if from >= to) {
         return Err(DbError::Other(
@@ -107,20 +123,28 @@ fn query_filtered(
         from_index + 1,
         from_index + 1,
     );
-    if let Some(id) = id {
+    if let Some(id) = filters.id {
         values.push(id.into());
         sql.push_str(&format!(" AND l.id=${}", values.len()));
     }
-    if let Some(owner) = owner {
+    if let Some(owner) = filters.owner {
         if owner.is_nil() {
             return Err(DbError::Other("usage owner must be a real UUID".into()));
         }
         values.push(owner.into());
         sql.push_str(&format!(" AND l.user_id=${}", values.len()));
     }
+    if let Some(model) = filters
+        .model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        values.push(model.into());
+        sql.push_str(&format!(" AND l.model_name=${}", values.len()));
+    }
     sql.push(' ');
     sql.push_str(suffix);
-    if let Some((limit, offset)) = pagination {
+    if let Some((limit, offset)) = filters.pagination {
         let limit_index = values.len() + 1;
         values.extend([limit.clamp(1, 100).into(), offset.max(0).into()]);
         sql.push_str(&format!(
@@ -251,6 +275,29 @@ impl UserUsageScope {
         )
         .await
     }
+    pub async fn list_filtered(
+        &self,
+        db: &impl ConnectionTrait,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        model: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<UsageLog>, DbError> {
+        Ok(UsageLog::find_by_statement(query_filtered(
+            ReadScope::Personal(self.0),
+            "l.*",
+            "ORDER BY l.created_at DESC, l.id DESC",
+            Window::new(from, to),
+            QueryFilters {
+                pagination: Some((limit, offset)),
+                model,
+                ..Default::default()
+            },
+        )?)
+        .all(db)
+        .await?)
+    }
     pub async fn count(
         &self,
         db: &impl ConnectionTrait,
@@ -258,6 +305,28 @@ impl UserUsageScope {
         to: Option<DateTime<Utc>>,
     ) -> Result<i64, DbError> {
         count(db, ReadScope::Personal(self.0), Window::new(from, to)).await
+    }
+    pub async fn count_filtered(
+        &self,
+        db: &impl ConnectionTrait,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        model: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let row = db
+            .query_one(query_filtered(
+                ReadScope::Personal(self.0),
+                "COUNT(*)",
+                "",
+                Window::new(from, to),
+                QueryFilters {
+                    model,
+                    ..Default::default()
+                },
+            )?)
+            .await?
+            .ok_or_else(|| DbError::Other("usage count returned no row".into()))?;
+        Ok(row.try_get_by_index(0)?)
     }
     pub async fn stats(
         &self,
@@ -431,9 +500,10 @@ impl PlatformTenantUsageScope {
             REPORT_COLUMNS,
             "",
             Window::default(),
-            None,
-            Some(id),
-            None,
+            QueryFilters {
+                id: Some(id),
+                ..Default::default()
+            },
         )?)
         .one(db)
         .await?)
@@ -453,9 +523,11 @@ impl PlatformTenantUsageScope {
             REPORT_COLUMNS,
             "ORDER BY l.created_at DESC,l.id DESC",
             Window::new(from, to),
-            Some((limit, offset)),
-            None,
-            owner,
+            QueryFilters {
+                pagination: Some((limit, offset)),
+                owner,
+                ..Default::default()
+            },
         )?)
         .all(db)
         .await?)
@@ -474,9 +546,10 @@ impl PlatformTenantUsageScope {
                 "COUNT(*)",
                 "",
                 Window::new(from, to),
-                None,
-                None,
-                owner,
+                QueryFilters {
+                    owner,
+                    ..Default::default()
+                },
             )?)
             .await?
             .ok_or_else(|| DbError::Other("usage report count returned no row".into()))?;
@@ -495,9 +568,10 @@ impl PlatformTenantUsageScope {
             &format!("l.currency,{TOTALS}"),
             "GROUP BY l.currency ORDER BY l.currency",
             Window::new(from, to),
-            None,
-            None,
-            owner,
+            QueryFilters {
+                owner,
+                ..Default::default()
+            },
         )?)
         .all(db)
         .await?)
@@ -558,9 +632,10 @@ impl TenantUsageScope {
             REPORT_COLUMNS,
             "",
             Window::default(),
-            None,
-            Some(id),
-            None,
+            QueryFilters {
+                id: Some(id),
+                ..Default::default()
+            },
         )?)
         .one(db)
         .await?)
@@ -579,9 +654,11 @@ impl TenantUsageScope {
             REPORT_COLUMNS,
             "ORDER BY l.created_at DESC,l.id DESC",
             Window::new(from, to),
-            Some((limit, offset)),
-            None,
-            owner,
+            QueryFilters {
+                pagination: Some((limit, offset)),
+                owner,
+                ..Default::default()
+            },
         )?)
         .all(db)
         .await?)
@@ -599,9 +676,10 @@ impl TenantUsageScope {
                 "COUNT(*)",
                 "",
                 Window::new(from, to),
-                None,
-                None,
-                owner,
+                QueryFilters {
+                    owner,
+                    ..Default::default()
+                },
             )?)
             .await?
             .ok_or_else(|| DbError::Other("usage report count returned no row".into()))?;
@@ -619,9 +697,10 @@ impl TenantUsageScope {
             &format!("l.currency,{TOTALS}"),
             "GROUP BY l.currency ORDER BY l.currency",
             Window::new(from, to),
-            None,
-            None,
-            owner,
+            QueryFilters {
+                owner,
+                ..Default::default()
+            },
         )?)
         .all(db)
         .await?)
@@ -637,16 +716,26 @@ mod reporting_tests {
             TenantScope::checked(Uuid::new_v4(), Uuid::new_v4(), TenantRole::Admin).unwrap(),
         );
         let owner = Some(Uuid::new_v4());
-        let count =
-            query_filtered(scope, "COUNT(*)", "", Window::default(), None, None, owner).unwrap();
+        let count = query_filtered(
+            scope,
+            "COUNT(*)",
+            "",
+            Window::default(),
+            QueryFilters {
+                owner,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let stats = query_filtered(
             scope,
             "l.currency",
             "GROUP BY l.currency",
             Window::default(),
-            None,
-            None,
-            owner,
+            QueryFilters {
+                owner,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(count.values, stats.values);
@@ -654,5 +743,39 @@ mod reporting_tests {
         assert!(count.sql.contains("l.user_id=$5"));
         assert!(!count.sql.contains("ORDER BY"));
         assert!(!count.sql.contains("FOR UPDATE"));
+    }
+
+    #[test]
+    fn personal_model_filter_is_bound_equally_for_list_and_count() {
+        let scope = ReadScope::Personal(
+            TenantScope::checked(Uuid::new_v4(), Uuid::new_v4(), TenantRole::Member).unwrap(),
+        );
+        let list = query_filtered(
+            scope,
+            "l.*",
+            "ORDER BY l.created_at DESC,l.id DESC",
+            Window::default(),
+            QueryFilters {
+                pagination: Some((20, 0)),
+                model: Some("gpt-4.1"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let count = query_filtered(
+            scope,
+            "COUNT(*)",
+            "",
+            Window::default(),
+            QueryFilters {
+                model: Some("gpt-4.1"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(list.sql.contains("l.model_name=$5"));
+        assert!(count.sql.contains("l.model_name=$5"));
+        assert!(format!("{:?}", list.values).contains("gpt-4.1"));
+        assert!(format!("{:?}", count.values).contains("gpt-4.1"));
     }
 }

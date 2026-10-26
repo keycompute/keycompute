@@ -76,8 +76,8 @@ pub use payment_order::{
 };
 pub use pending_registration::{PendingRegistration, UpsertPendingRegistrationRequest};
 pub use platform_audit::{
-    PlatformAuditCursor, PlatformAuditFilter, PlatformAuditRecord, PlatformAuditScope,
-    PlatformAuditSession,
+    PlatformAuditActorOption, PlatformAuditCursor, PlatformAuditFilter, PlatformAuditOptions,
+    PlatformAuditRecord, PlatformAuditScope, PlatformAuditSession, PlatformAuditTenantOption,
 };
 pub use pricing_model::{
     CreatePricingRequest, PricingModel, PricingScopeType, UpdatePricingRequest,

@@ -38,6 +38,7 @@ pub fn ForgotPassword() -> Element {
             .site_name()
             .unwrap_or_else(|| "KeyCompute".to_string())
     });
+    let document_title = format!("{} · {}", i18n.t("auth.forgot_password"), site_name());
     let mut name = use_signal(String::new);
     let mut email = use_signal(String::new);
     let mut loading = use_signal(|| false);
@@ -100,9 +101,9 @@ pub fn ForgotPassword() -> Element {
     };
 
     rsx! {
-        document::Title { "{site_name}" }
+        document::Title { "{document_title}" }
 
-        div { class: "kc-login-page",
+        div { class: "kc-login-page kc-auth-task-page",
             div { class: "kc-login-bg-grid" }
             if is_dark {
                 div { class: "kc-login-bg-glow kc-login-glow-one" }
@@ -167,10 +168,12 @@ pub fn ForgotPassword() -> Element {
                             }
                             form { onsubmit: on_submit,
                                 div { class: "kc-login-form-group",
-                                    label { class: "kc-login-form-label", {i18n.t("auth.username")} }
+                                    label { class: "kc-login-form-label", r#for: "forgot-username", {i18n.t("auth.username")} }
                                     input {
+                                        id: "forgot-username",
                                         class: "kc-login-form-input",
                                         r#type: "text",
+                                        autocomplete: "username",
                                         placeholder: i18n.t("auth.reset_username_placeholder"),
                                         value: "{name}",
                                         oninput: move |e| name.set(e.value()),
@@ -178,10 +181,12 @@ pub fn ForgotPassword() -> Element {
                                     div { class: "kc-login-input-glow" }
                                 }
                                 div { class: "kc-login-form-group",
-                                    label { class: "kc-login-form-label", {i18n.t("auth.email")} }
+                                    label { class: "kc-login-form-label", r#for: "forgot-email", {i18n.t("auth.email")} }
                                     input {
+                                        id: "forgot-email",
                                         class: "kc-login-form-input",
                                         r#type: "email",
+                                        autocomplete: "email",
                                         placeholder: i18n.t("auth.reset_email_placeholder"),
                                         value: "{email}",
                                         oninput: move |e| email.set(e.value()),

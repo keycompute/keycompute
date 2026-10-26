@@ -10,6 +10,26 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("tenant_nodes.tasks", "任务", "Tasks"),
     ("tenant_nodes.registrations", "注册审批", "Registrations"),
     (
+        "tenant_nodes.flow_label",
+        "节点接入流程",
+        "Node onboarding flow",
+    ),
+    (
+        "tenant_nodes.flow_register",
+        "审批注册申请并签发接入凭证",
+        "Approve registration and issue access credentials",
+    ),
+    (
+        "tenant_nodes.flow_node",
+        "节点上线并持续上报运行状态",
+        "The node connects and reports health continuously",
+    ),
+    (
+        "tenant_nodes.flow_task",
+        "任务按能力分配到可用节点",
+        "Tasks are assigned to available capable nodes",
+    ),
+    (
         "tenant_nodes.empty_hint",
         "当前范围和筛选条件下没有记录。可调整筛选或刷新数据。",
         "No records match the current scope and filters. Adjust the filters or refresh.",

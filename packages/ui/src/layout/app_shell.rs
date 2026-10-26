@@ -56,6 +56,8 @@ pub fn AppShell(
     #[props(default)] home_title: String,
     #[props(default)] open_menu_title: String,
     #[props(default)] close_menu_title: String,
+    #[props(default = "Main navigation".to_string())] navigation_label: String,
+    #[props(default = "AI platform".to_string())] product_label: String,
     #[props(default)] switch_to_light_theme_title: String,
     #[props(default)] switch_to_dark_theme_title: String,
     #[props(default)] switch_to_zh_title: String,
@@ -180,6 +182,8 @@ pub fn AppShell(
                 expand_label: expand_label.clone(),
                 collapse_label: collapse_label.clone(),
                 close_menu_title: close_menu_title.clone(),
+                navigation_label: navigation_label.clone(),
+                product_label: product_label.clone(),
                 site_name: site_name.clone(),
                 site_logo_src: site_logo_src.clone(),
             }

@@ -72,10 +72,10 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "透传绑定",
         "Passthrough binding",
     ),
-    ("tenant.audit_resource_key", "API Key", "API key"),
+    ("tenant.audit_resource_key", "API 密钥", "API key"),
     (
         "tenant.audit_resource_key_issuance",
-        "Key 签发申请",
+        "密钥签发申请",
         "Key issuance request",
     ),
     (
@@ -305,7 +305,7 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("tenant.members", "成员", "Members"),
     (
         "tenant.members_hint",
-        "管理当前租户普通成员的状态和访问权。租户角色只能由 root/operator 在平台租户页面设置。",
+        "管理当前工作区普通成员的状态和访问权。管理员角色只能由平台管理员在平台工作区页面设置。",
         "Manage ordinary members' status and access. Only root/operator can assign tenant roles from the platform tenant page.",
     ),
     ("tenant.invitations", "邀请", "Invitations"),
@@ -397,6 +397,8 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "暂停／恢复成员",
         "Suspend / restore member",
     ),
+    ("tenant.suspend_member", "暂停成员", "Suspend member"),
+    ("tenant.resume_member", "恢复成员", "Restore member"),
     ("tenant.remove", "移除成员", "Remove member"),
     (
         "tenant.reinvite_required",
@@ -450,6 +452,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "tenant.duration_hours",
         "有效期（小时）",
         "Validity (hours)",
+    ),
+    (
+        "tenant.duration_presets",
+        "快捷选择有效期",
+        "Validity presets",
     ),
     (
         "tenant.recovery_link",
@@ -528,6 +535,39 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "Sign in with the invited email. You will return to this invitation after login.",
     ),
     ("tenant.accept_as", "当前登录邮箱", "Signed-in email"),
+    ("tenant.invite_inviter", "邀请人", "Invited by"),
+    ("tenant.invite_recipient", "邀请邮箱", "Invited email"),
+    ("tenant.recent_activity", "近期动态", "Recent activity"),
+    (
+        "tenant.membership_activated",
+        "已加入当前工作区",
+        "Joined the current workspace",
+    ),
+    ("tenant.pending_actions", "管理建议", "Recommended actions"),
+    (
+        "tenant.task_check_providers",
+        "检查上游渠道是否可用",
+        "Check upstream channel availability",
+    ),
+    (
+        "tenant.task_invite_members",
+        "邀请并配置协作成员",
+        "Invite and configure collaborators",
+    ),
+    (
+        "tenant.task_review_keys",
+        "处理密钥签发与权限",
+        "Review key issuance and permissions",
+    ),
+    (
+        "tenant.no_pending_actions",
+        "当前角色没有额外管理入口。",
+        "No additional management shortcuts are available for this role.",
+    ),
+    ("tenant.common_entries", "常用入口", "Common entries"),
+    ("tenant.duration_24h", "24 小时", "24 hours"),
+    ("tenant.duration_72h", "3 天", "3 days"),
+    ("tenant.duration_7d", "7 天", "7 days"),
     ("tenant.accept", "确认接受邀请", "Accept invitation"),
     (
         "tenant.reload_memberships",

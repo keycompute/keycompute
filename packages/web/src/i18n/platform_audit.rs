@@ -4,29 +4,35 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("platform_audit.title", "审计日志", "Audit log"),
     (
         "platform_audit.hint",
-        "按时间查看平台级及所有租户的管理操作，并按租户或请求 ID 精确筛选。",
-        "Review platform and cross-tenant administrative events in time order, with exact tenant or request ID filters.",
+        "按时间查看平台级及所有租户的管理操作，并按工作区、用户或请求筛选。",
+        "Review platform and cross-tenant administrative events in time order, filtered by workspace, user, or request.",
     ),
     (
         "platform_audit.boundary",
-        "该页面只读；平台角色不会因此获得任何租户成员身份。关联请求 ID 表示一次用户操作，可能包含多条不同事件；事件 ID 才是每条记录的唯一标识。审计元数据已在写入时按白名单脱敏。",
-        "This page is read-only and grants no tenant membership. A correlation request ID identifies one user operation and may contain multiple distinct events; the event ID uniquely identifies each record. Audit metadata is allowlist-redacted when written.",
+        "只读记录，不授予工作区权限；敏感元数据已脱敏。可用关联请求 ID 查看同一次操作的全部事件。",
+        "Read-only records that grant no workspace access. Sensitive metadata is redacted; use a correlation request ID to view events from the same operation.",
     ),
     (
         "platform_audit.denied",
         "当前会话没有平台审计日志读取权限。",
         "This session has no platform audit read capability.",
     ),
-    ("platform_audit.tenant_filter", "租户 UUID", "Tenant UUID"),
+    ("platform_audit.tenant_filter", "工作区", "Workspace"),
     (
         "platform_audit.tenant_placeholder",
-        "留空查看所有租户",
-        "Leave empty for all tenants",
+        "搜索或选择工作区；留空查看全部",
+        "Search or choose a workspace; leave empty for all",
     ),
     (
         "platform_audit.request_filter",
         "关联请求 UUID",
         "Correlation request UUID",
+    ),
+    ("platform_audit.actor_filter", "操作用户", "Actor user"),
+    (
+        "platform_audit.actor_placeholder",
+        "搜索当前记录中的用户，或输入用户 ID",
+        "Search users in current results or enter a user ID",
     ),
     (
         "platform_audit.request_placeholder",
@@ -38,8 +44,8 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("platform_audit.page", "第 {page} 页", "Page {page}"),
     (
         "platform_audit.invalid_filter",
-        "租户和请求筛选必须为空或有效的非零 UUID。",
-        "Tenant and request filters must be empty or valid nonzero UUIDs.",
+        "工作区、用户和请求筛选必须为空或有效的非零 UUID。",
+        "Workspace, user, and request filters must be empty or valid nonzero UUIDs.",
     ),
     ("platform_audit.empty", "没有审计记录", "No audit records"),
     (
@@ -68,6 +74,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "platform_audit.filter_request",
         "查看此请求的全部事件",
         "View every event for this request",
+    ),
+    (
+        "platform_audit.filter_actor",
+        "仅查看此用户的操作",
+        "Show actions by this user",
     ),
     ("platform_audit.result", "结果", "Result"),
     ("platform_audit.platform_scope", "平台级", "Platform"),

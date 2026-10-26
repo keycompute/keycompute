@@ -119,6 +119,7 @@ pub struct AccountListQueryParams {
     pub search: Option<String>,
     pub provider: Option<String>,
     pub status: Option<String>,
+    pub health_status: Option<String>,
     pub tenant_id: Option<Uuid>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
@@ -285,11 +286,22 @@ pub async fn list_accounts(
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let enabled = parse_account_status(params.status.as_deref())?;
+    let health_status = params
+        .health_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| match value {
+            "healthy" | "degraded" | "unhealthy" | "unknown" => Ok(value.to_string()),
+            _ => Err(ApiError::BadRequest("Invalid account health status".into())),
+        })
+        .transpose()?;
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
     let filter = AccountListFilter {
         provider: params.provider.clone(),
         enabled,
+        health_status,
         search: params.search.clone(),
         tenant_id: match scope {
             AccountManagementScope::Tenant(scope) => {

@@ -12,6 +12,7 @@ const PAGE_SIZE: usize = 20;
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct TenantListQuery {
     search: String,
+    status: String,
     page: u32,
     page_size: u32,
 }
@@ -20,6 +21,7 @@ impl TenantListQuery {
     fn new() -> Self {
         Self {
             search: String::new(),
+            status: String::new(),
             page: 1,
             page_size: PAGE_SIZE as u32,
         }
@@ -94,6 +96,7 @@ pub fn Tenants() -> Element {
     let mut search = use_signal(String::new);
     let debounced_search = use_debounced_search(search);
     let mut query = use_signal(TenantListQuery::new);
+    let mut status = use_signal(String::new);
     let mut show_create = use_signal(|| false);
     let mut delete_candidate = use_signal(|| None::<TenantInfo>);
     let mut delete_modal_open = use_signal(|| false);
@@ -123,6 +126,9 @@ pub fn Tenants() -> Element {
                 .with_page_size(current_query.page_size);
             if !current_query.search.is_empty() {
                 params = params.with_search(current_query.search);
+            }
+            if !current_query.status.is_empty() {
+                params = params.with_status(current_query.status);
             }
             let result = with_auto_refresh(auth_store, move |token| {
                 let params = params.clone();
@@ -164,6 +170,20 @@ pub fn Tenants() -> Element {
                                 *search.write() = e.value();
                             },
                         }
+                    }
+                    select {
+                        class: "input-field",
+                        aria_label: i18n.t("tenants.status_filter"),
+                        value: "{status}",
+                        onchange: move |event| {
+                            let next = event.value();
+                            status.set(next.clone());
+                            query.write().status = next;
+                            query.write().page = 1;
+                        },
+                        option { value: "", {i18n.t("tenants.all_statuses")} }
+                        option { value: "active", {i18n.t("tenants.active")} }
+                        option { value: "inactive", {i18n.t("common.disabled")} }
                     }
                 }
             }
@@ -230,58 +250,61 @@ pub fn Tenants() -> Element {
                                         }
                                         td { {format_time(&t.created_at)} }
                                         td {
-                                            div { class: "table-actions",
-                                                if t.is_active {
-                                                    Link {
-                                                        class: "btn btn-secondary btn-sm",
-                                                        to: Route::PlatformTenantAccess { tenant_id: t.id.clone() },
-                                                        {i18n.t("tenants.manage")}
-                                                    }
-                                                } else {
-                                                    span {
-                                                        title: i18n.t("tenants.enable_to_manage"),
-                                                        button {
+                                            details { class: "row-action-menu",
+                                                summary { aria_label: i18n.t("common.more"), "⋯" }
+                                                div { class: "btn-group row-action-menu-popover",
+                                                    if t.is_active {
+                                                        Link {
                                                             class: "btn btn-secondary btn-sm",
-                                                            r#type: "button",
-                                                            disabled: true,
+                                                            to: Route::PlatformTenantAccess { tenant_id: t.id.clone() },
                                                             {i18n.t("tenants.manage")}
                                                         }
-                                                    }
-                                                }
-                                                Button {
-                                                    variant: if t.is_active { ButtonVariant::Secondary } else { ButtonVariant::Primary },
-                                                    size: ButtonSize::Small,
-                                                    disabled: pending_tenant().as_deref() == Some(t.id.as_str()),
-                                                    onclick: {
-                                                        let candidate = t.clone();
-                                                        move |_| {
-                                                            if candidate.is_active
-                                                                && is_selected_tenant(user_store, &candidate.id)
-                                                            {
-                                                                operation_error.set(i18n.t("tenants.disable_selected_first").to_string());
-                                                                return;
+                                                    } else {
+                                                        span {
+                                                            title: i18n.t("tenants.enable_to_manage"),
+                                                            button {
+                                                                class: "btn btn-secondary btn-sm",
+                                                                r#type: "button",
+                                                                disabled: true,
+                                                                {i18n.t("tenants.manage")}
                                                             }
-                                                            status_candidate.set(Some(candidate.clone()));
-                                                            status_modal_open.set(true);
-                                                            operation_error.set(String::new());
                                                         }
-                                                    },
-                                                    {if t.is_active { i18n.t("tenants.disable") } else { i18n.t("tenants.enable") }}
-                                                }
-                                                Button {
-                                                    variant: ButtonVariant::Danger,
-                                                    size: ButtonSize::Small,
-                                                    disabled: pending_tenant().as_deref() == Some(t.id.as_str())
-                                                        || !can_delete_tenant(t),
-                                                    onclick: {
-                                                        let candidate = t.clone();
-                                                        move |_| {
-                                                            delete_candidate.set(Some(candidate.clone()));
-                                                            delete_modal_open.set(true);
-                                                            operation_error.set(String::new());
-                                                        }
-                                                    },
-                                                    {i18n.t("form.delete")}
+                                                    }
+                                                    Button {
+                                                        variant: if t.is_active { ButtonVariant::Secondary } else { ButtonVariant::Primary },
+                                                        size: ButtonSize::Small,
+                                                        disabled: pending_tenant().as_deref() == Some(t.id.as_str()),
+                                                        onclick: {
+                                                            let candidate = t.clone();
+                                                            move |_| {
+                                                                if candidate.is_active
+                                                                    && is_selected_tenant(user_store, &candidate.id)
+                                                                {
+                                                                    operation_error.set(i18n.t("tenants.disable_selected_first").to_string());
+                                                                    return;
+                                                                }
+                                                                status_candidate.set(Some(candidate.clone()));
+                                                                status_modal_open.set(true);
+                                                                operation_error.set(String::new());
+                                                            }
+                                                        },
+                                                        {if t.is_active { i18n.t("tenants.disable") } else { i18n.t("tenants.enable") }}
+                                                    }
+                                                    Button {
+                                                        variant: ButtonVariant::Danger,
+                                                        size: ButtonSize::Small,
+                                                        disabled: pending_tenant().as_deref() == Some(t.id.as_str())
+                                                            || !can_delete_tenant(t),
+                                                        onclick: {
+                                                            let candidate = t.clone();
+                                                            move |_| {
+                                                                delete_candidate.set(Some(candidate.clone()));
+                                                                delete_modal_open.set(true);
+                                                                operation_error.set(String::new());
+                                                            }
+                                                        },
+                                                        {i18n.t("form.delete")}
+                                                    }
                                                 }
                                             }
                                         }
@@ -609,6 +632,7 @@ mod tests {
     fn tenant_search_resets_the_database_page() {
         let mut query = TenantListQuery {
             search: "old".to_string(),
+            status: String::new(),
             page: 4,
             page_size: PAGE_SIZE as u32,
         };

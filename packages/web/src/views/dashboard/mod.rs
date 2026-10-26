@@ -1,13 +1,11 @@
 use dioxus::prelude::*;
 
 use crate::hooks::use_i18n::use_i18n;
-use crate::router::Route;
 use crate::services::{
     api_client::{user_error_message, with_auto_refresh},
-    console_service, debug_service, distribution_service, payment_service,
+    console_service, payment_service,
 };
 use crate::stores::auth_store::AuthStore;
-use crate::stores::public_settings_store::PublicSettingsStore;
 use crate::stores::user_store::UserStore;
 use crate::utils::display::usage_status_label;
 use crate::utils::time::format_time;
@@ -29,17 +27,7 @@ fn DashboardContent() -> Element {
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
-    let public_settings_store = use_context::<PublicSettingsStore>();
-
     let user_info = user_store.info.read().clone();
-    let can_manage_platform = user_info
-        .as_ref()
-        .map(|u| u.can_manage_platform())
-        .unwrap_or(false);
-    let distribution_settings_loaded = public_settings_store.loaded();
-    let show_distribution_metrics = !can_manage_platform
-        && distribution_settings_loaded
-        && public_settings_store.distribution_is_enabled();
 
     let overview = use_resource(move || async move {
         with_auto_refresh(auth_store, |token| async move {
@@ -59,68 +47,6 @@ fn DashboardContent() -> Element {
         }
     });
 
-    let distribution_earnings = use_resource(move || {
-        let auth = auth_store.clone();
-        let public_settings_store = public_settings_store;
-        async move {
-            if can_manage_platform {
-                return Some(Ok(None));
-            }
-            if !public_settings_store.loaded() {
-                return None;
-            }
-            if !public_settings_store.distribution_is_enabled() {
-                return Some(Ok(None));
-            }
-
-            Some(
-                with_auto_refresh(auth, |token| async move {
-                    distribution_service::get_earnings(&token).await.map(Some)
-                })
-                .await,
-            )
-        }
-    });
-
-    let gateway_status = use_resource(move || {
-        let auth = auth_store.clone();
-        async move {
-            if !can_manage_platform {
-                return Ok(None);
-            }
-            with_auto_refresh(auth, |token| async move {
-                debug_service::gateway_status(&token).await.map(Some)
-            })
-            .await
-        }
-    });
-
-    let gateway_stats = use_resource(move || {
-        let auth = auth_store.clone();
-        async move {
-            if !can_manage_platform {
-                return Ok(None);
-            }
-            with_auto_refresh(auth, |token| async move {
-                debug_service::gateway_stats(&token).await.map(Some)
-            })
-            .await
-        }
-    });
-
-    let provider_health = use_resource(move || {
-        let auth = auth_store.clone();
-        async move {
-            if !can_manage_platform {
-                return Ok(None);
-            }
-            with_auto_refresh(auth, |token| async move {
-                debug_service::provider_health(&token).await.map(Some)
-            })
-            .await
-        }
-    });
-
     let greeting = if let Some(ref u) = user_info {
         format!(
             "{}，{}",
@@ -134,7 +60,7 @@ fn DashboardContent() -> Element {
     let api_call_value = usage_stats()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .map(|stats| stats.total_requests.to_string())
+        .map(|stats| crate::utils::format_count(stats.total_requests))
         .unwrap_or_else(|| "—".to_string());
 
     let total_cost_value = usage_stats()
@@ -177,10 +103,6 @@ fn DashboardContent() -> Element {
         .as_ref()
         .map(|value| value.recent_usage.clone())
         .unwrap_or_default();
-    let recent_orders = summary
-        .as_ref()
-        .map(|value| value.recent_orders.clone())
-        .unwrap_or_default();
     let recent_trend = summary
         .as_ref()
         .map(|value| {
@@ -198,51 +120,6 @@ fn DashboardContent() -> Element {
 
     let trend_svg = build_trend_svg(&recent_trend);
 
-    let admin_gateway = gateway_status()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .and_then(|value| value.as_ref())
-        .cloned();
-
-    let admin_gateway_stats = gateway_stats()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .and_then(|value| value.as_ref())
-        .cloned();
-
-    let admin_provider_health = provider_health()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .and_then(|value| value.as_ref())
-        .cloned();
-    let distribution_earnings_value = distribution_earnings();
-    let distribution_earnings_data = distribution_earnings_value
-        .as_ref()
-        .and_then(|result| result.as_ref())
-        .and_then(|result| result.as_ref().ok())
-        .and_then(|earnings| earnings.as_ref());
-    let total_distribution_earnings_value = distribution_earnings_data
-        .map(|earnings| {
-            format!(
-                "{} {}",
-                earnings.currency,
-                crate::utils::format_precise_money_str(&earnings.total_earnings)
-            )
-        })
-        .unwrap_or_else(|| "—".to_string());
-    let pending_distribution_earnings_value = distribution_earnings_data
-        .map(|earnings| {
-            format!(
-                "{} {}",
-                earnings.currency,
-                crate::utils::format_precise_money_str(&earnings.pending_earnings)
-            )
-        })
-        .unwrap_or_else(|| "—".to_string());
-    let distribution_referral_count_value = distribution_earnings_data
-        .map(|earnings| earnings.referral_count.to_string())
-        .unwrap_or_else(|| "—".to_string());
-
     rsx! {
         div { class: "page-container dashboard-console",
             div { class: "page-header dashboard-console-header",
@@ -256,7 +133,7 @@ fn DashboardContent() -> Element {
                 p { class: "alert alert-error", role: "alert", "{error}" }
             }
             if let Some(time) = snapshot_time {
-                p { class: "text-secondary", {format!("{}: {} · UTC", i18n.t("common.display_snapshot"), time)} }
+                p { class: "text-secondary", {format!("{}: {}", i18n.t("common.display_snapshot"), time)} }
             }
             div { class: "dashboard-stats-row",
                 DashboardStatCard {
@@ -302,8 +179,10 @@ fn DashboardContent() -> Element {
                         div { class: "dashboard-trend-chart",
                             svg {
                                 class: "dashboard-trend-svg",
+                                role: "img",
                                 view_box: "0 0 640 220",
                                 preserve_aspect_ratio: "none",
+                                title { {i18n.t("dashboard.recent_active_days_desc")} }
                                 defs {
                                     linearGradient { id: "dashboardTrendFill", x1: "0", y1: "0", x2: "0", y2: "1",
                                         stop { offset: "0%", stop_color: "rgba(71, 132, 255, 0.30)" }
@@ -361,40 +240,6 @@ fn DashboardContent() -> Element {
                     }
                 }
 
-                div { class: "dashboard-panel dashboard-panel-side",
-                    div { class: "dashboard-panel-head",
-                        div {
-                            h2 { class: "dashboard-panel-title", {i18n.t("dashboard.quick_links")} }
-                            p { class: "dashboard-panel-copy", {i18n.t("dashboard.quick_links_desc")} }
-                        }
-                    }
-                    div { class: "dashboard-panel-body dashboard-quick-links",
-                        DashboardQuickLink {
-                            route: Route::ApiKeyList {},
-                            tone: "blue",
-                            title: i18n.t("dashboard.manage_api_keys").to_string(),
-                            description: i18n.t("dashboard.manage_api_keys_desc").to_string()
-                        }
-                        DashboardQuickLink {
-                            route: Route::PaymentsOverview {},
-                            tone: "green",
-                            title: i18n.t("dashboard.payments").to_string(),
-                            description: i18n.t("dashboard.payments_desc").to_string()
-                        }
-                        DashboardQuickLink {
-                            route: Route::Usage {},
-                            tone: "orange",
-                            title: i18n.t("dashboard.usage_details").to_string(),
-                            description: i18n.t("dashboard.usage_details_desc").to_string()
-                        }
-                        DashboardQuickLink {
-                            route: Route::UserProfile {},
-                            tone: "violet",
-                            title: i18n.t("dashboard.account_settings").to_string(),
-                            description: i18n.t("dashboard.account_settings_desc").to_string()
-                        }
-                    }
-                }
             }
 
             div { class: "dashboard-bottom-row",
@@ -480,89 +325,6 @@ fn DashboardContent() -> Element {
                     }
                 }
 
-                div { class: "dashboard-panel",
-                    div { class: "dashboard-panel-head",
-                        div {
-                            h2 { class: "dashboard-panel-title",
-                                if can_manage_platform { {i18n.t("dashboard.system_status")} } else { {i18n.t("dashboard.account_status")} }
-                            }
-                            p { class: "dashboard-panel-copy",
-                                if can_manage_platform {
-                                    {i18n.t("dashboard.system_status_desc")}
-                                } else {
-                                    {i18n.t("dashboard.account_status_desc")}
-                                }
-                            }
-                        }
-                        if can_manage_platform {
-                            span {
-                                class: if admin_gateway.as_ref().map(|g| g.available).unwrap_or(false) {
-                                    "dashboard-status-pill dashboard-status-pill-ok"
-                                } else {
-                                    "dashboard-status-pill"
-                                },
-                                if admin_gateway.as_ref().map(|g| g.available).unwrap_or(false) { {i18n.t("dashboard.online")} } else { {i18n.t("dashboard.pending_check")} }
-                            }
-                        }
-                    }
-                    div { class: "dashboard-panel-body",
-                        if can_manage_platform {
-                            DashboardStatusMetric {
-                                label: i18n.t("dashboard.gateway_providers").to_string(),
-                                value: admin_gateway.as_ref()
-                                    .map(|gateway| gateway.providers.len().to_string())
-                                    .unwrap_or_else(|| "—".to_string()),
-                                sub: i18n.t("dashboard.gateway_providers_desc").to_string()
-                            }
-                            DashboardStatusMetric {
-                                label: i18n.t("dashboard.healthy_providers").to_string(),
-                                value: admin_provider_health.as_ref()
-                                    .map(|health| health.healthy_providers.len().to_string())
-                                    .unwrap_or_else(|| "—".to_string()),
-                                sub: i18n.t("dashboard.healthy_providers_desc").to_string()
-                            }
-                            DashboardStatusMetric {
-                                label: i18n.t("dashboard.account_cache").to_string(),
-                                value: admin_provider_health.as_ref()
-                                    .map(|health| health.account_count.to_string())
-                                    .unwrap_or_else(|| "—".to_string()),
-                                sub: i18n.t("dashboard.account_cache_desc").to_string()
-                            }
-                            DashboardStatusMetric {
-                                label: i18n.t("dashboard.fallback_count").to_string(),
-                                value: admin_gateway_stats.as_ref()
-                                    .map(|stats| stats.fallback_count.to_string())
-                                    .unwrap_or_else(|| "—".to_string()),
-                                sub: i18n.t("dashboard.fallback_count_desc").to_string()
-                            }
-                        } else {
-                            if show_distribution_metrics {
-                                DashboardStatusMetric {
-                                    label: i18n.t("dashboard.total_distribution_earnings").to_string(),
-                                    value: total_distribution_earnings_value.clone(),
-                                    sub: i18n.t("dashboard.total_distribution_earnings_desc").to_string()
-                                }
-                                DashboardStatusMetric {
-                                    label: i18n.t("dashboard.pending_distribution_earnings").to_string(),
-                                    value: pending_distribution_earnings_value.clone(),
-                                    sub: i18n.t("dashboard.pending_distribution_earnings_desc").to_string()
-                                }
-                                DashboardStatusMetric {
-                                    label: i18n.t("distribution.referral_count").to_string(),
-                                    value: distribution_referral_count_value.clone(),
-                                    sub: i18n.t("dashboard.referral_count_desc").to_string()
-                                }
-                            }
-                            DashboardStatusMetric {
-                                label: i18n.t("dashboard.latest_order").to_string(),
-                                value: recent_orders.first()
-                                    .map(|order| order.status.clone())
-                                    .unwrap_or_else(|| if summary_ready { i18n.t("dashboard.none").to_string() } else { "—".into() }),
-                                sub: i18n.t("dashboard.latest_order_desc").to_string()
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -667,35 +429,6 @@ fn DashboardStatCard(
             }
             div { class: "dashboard-stat-value", "{value}" }
             div { class: "dashboard-stat-meta", "{meta}" }
-        }
-    }
-}
-
-#[component]
-fn DashboardQuickLink(route: Route, tone: String, title: String, description: String) -> Element {
-    let nav = use_navigator();
-    rsx! {
-        button {
-            class: "dashboard-quick-link dashboard-quick-link-{tone}",
-            onclick: move |_| {
-                nav.push(route.clone());
-            },
-            div { class: "dashboard-quick-link-main",
-                div { class: "dashboard-quick-link-title", "{title}" }
-                div { class: "dashboard-quick-link-desc", "{description}" }
-            }
-            span { class: "dashboard-quick-link-arrow", "→" }
-        }
-    }
-}
-
-#[component]
-fn DashboardStatusMetric(label: String, value: String, sub: String) -> Element {
-    rsx! {
-        div { class: "dashboard-status-metric",
-            div { class: "dashboard-status-label", "{label}" }
-            div { class: "dashboard-status-value", "{value}" }
-            div { class: "dashboard-status-sub", "{sub}" }
         }
     }
 }

@@ -24,6 +24,10 @@ const FALLBACK_ROUTING_PROBE_MODEL: &str = "gpt-4o";
 /// 将候选诊断限制在较小常数内，避免异常账号较多时一次页面加载放大调试请求。
 const MAX_ROUTING_PROBES: usize = 8;
 
+fn current_gateway_instance() -> String {
+    crate::services::api_client::public_api_root_url()
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum RoutingEntry {
     OpenAi,
@@ -543,6 +547,13 @@ fn DiagnosticsSections(
 
     rsx! {
         div { class: "system-diagnostics",
+            div { class: "alert alert-info diagnostics-context",
+                div {
+                    strong { {i18n.t("system.diagnostics_purpose")} }
+                    p { {i18n.t("system.diagnostics_purpose_hint")} }
+                }
+                span { {i18n.t("system.gateway_instance")} "：" code { {current_gateway_instance()} } }
+            }
             div { class: "section",
                 h2 { class: "section-title", {i18n.t("system.provider_health")} }
                 div { class: "section-body", {provider_health} }

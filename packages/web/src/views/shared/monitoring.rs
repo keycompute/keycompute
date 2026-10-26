@@ -297,7 +297,10 @@ pub fn Monitoring() -> Element {
             MonitoringTabs { active: MonitoringView::Overview }
 
             div { class: "monitoring-toolbar",
-                select {
+                details { class: "monitoring-filter-disclosure",
+                    summary { class: "btn btn-secondary", {i18n.t("monitoring.filters")} }
+                    div { class: "monitoring-filter-fields",
+                    select {
                     value: "{range}",
                     aria_label: i18n.t("monitoring.time_range"),
                     onchange: move |event| {
@@ -342,7 +345,7 @@ pub fn Monitoring() -> Element {
                         }
                     }
                 }
-                select {
+                    select {
                     value: "{status_filter}",
                     aria_label: i18n.t("monitoring.status_filter"),
                     onchange: move |event| {
@@ -359,7 +362,7 @@ pub fn Monitoring() -> Element {
                     option { value: "running", {i18n.t("monitoring.running")} }
                     option { value: "queued", {i18n.t("monitoring.queued")} }
                 }
-                select {
+                    select {
                     value: "{route_filter}",
                     aria_label: i18n.t("monitoring.route_filter"),
                     onchange: move |event| {
@@ -373,6 +376,8 @@ pub fn Monitoring() -> Element {
                     option { value: "provider_account", {i18n.t("monitoring.route_provider_account")} }
                     option { value: "passthrough_binding", {i18n.t("monitoring.route_passthrough_binding")} }
                     option { value: "node", {i18n.t("monitoring.route_node")} }
+                    }
+                    }
                 }
                 button {
                     class: "btn btn-secondary",

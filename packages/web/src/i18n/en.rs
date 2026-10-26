@@ -17,7 +17,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("tenant_providers.accounts", "Accounts");
     m.insert("tenant_providers.bindings", "Passthrough bindings");
-    m.insert("tenant_providers.apply", "Apply");
+    m.insert("tenant_providers.apply", "Search");
     m.insert("tenant_providers.add_account", "Add account");
     m.insert("tenant_providers.add_binding", "Add binding");
     m.insert("tenant_providers.empty_accounts", "No tenant accounts");
@@ -247,6 +247,19 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("upstreams.passthrough", "Passthrough bindings");
     m.insert("upstreams.nodes", "Node gateway");
     m.insert("passthrough.subtitle", "Grant an account to a tenant; all declared account models are inherited and remain read-only here.");
+    m.insert(
+        "passthrough.relation_aria",
+        "An upstream account is granted to a workspace through a passthrough binding",
+    );
+    m.insert(
+        "passthrough.relation_account",
+        "Provides models and credentials",
+    );
+    m.insert("passthrough.relation_grant", "Defines the access scope");
+    m.insert(
+        "passthrough.relation_tenant",
+        "Receives read-only model access",
+    );
     m.insert("passthrough.edit_title", "Edit Passthrough Binding");
     m.insert(
         "passthrough.no_accounts",
@@ -340,6 +353,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.pagination_total", "Total: {total}");
     m.insert("common.loading", "Loading");
     m.insert("common.more", "More");
+    m.insert("common.details", "Details");
     m.insert("common.error", "Something went wrong");
     m.insert("common.success", "Success");
     m.insert(
@@ -538,6 +552,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     // ── Layout ──────────────────────────────────
     m.insert("layout.back_to_home", "Back to Home");
     m.insert("layout.open_menu", "Open menu");
+    m.insert("layout.main_navigation", "Main navigation");
+    m.insert("layout.product_label", "AI compute platform");
     m.insert("layout.close_menu", "Close menu");
     m.insert("layout.user_menu", "User menu");
     m.insert("layout.switch_to_light", "Switch to light theme");
@@ -823,6 +839,18 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("usage.no_records", "No records yet");
     m.insert("usage.model", "Model");
     m.insert("usage.total_token", "Total Tokens");
+    m.insert("usage.filters", "Filter call records");
+    m.insert("usage.start_date", "Start date");
+    m.insert("usage.end_date", "End date");
+    m.insert("usage.model_placeholder", "Enter the full model name");
+    m.insert(
+        "usage.timezone_hint",
+        "Date ranges use UTC and include the selected end date.",
+    );
+    m.insert(
+        "usage.trend_summary",
+        "{total} calls in the last 7 days; the peak was {calls} on {day}.",
+    );
 
     // ── Payments ────────────────────────────────
     m.insert("payments.title", "Payments and Billing");
@@ -858,6 +886,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("payment_orders.col_tenant", "Tenant");
     m.insert("payment_orders.col_user", "User");
     m.insert("payment_orders.verification_tenant", "Verification tenant");
+    m.insert(
+        "payment_orders.provider_diagnostics",
+        "Payment provider diagnostics",
+    );
     m.insert(
         "payment_orders.select_verification_tenant",
         "Select an active tenant",
@@ -923,6 +955,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("recharge.wechat_pay", "WeChat Pay");
     m.insert("recharge.no_payment_methods", "No payment method is currently available. Please try again later or contact an administrator.");
     m.insert("recharge.amount_label", "Amount (CNY)");
+    m.insert("recharge.amount_range", "Allowed range: ¥{min}–¥{max}");
     m.insert("recharge.custom_amount", "Or enter a custom amount");
     m.insert("recharge.creating_order", "Creating order...");
     m.insert("recharge.confirm_recharge", "Confirm & Pay");
@@ -1013,6 +1046,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("distribution.status_failed", "Failed");
     m.insert("distribution.referral_count", "Referral Count");
     m.insert("distribution.my_invite_link", "My Invite Link");
+    m.insert("distribution.copy_share_text", "Copy share message");
+    m.insert("distribution.share_text", "Join me on KeyCompute: {link}");
     m.insert("distribution.referral_users", "Referred Users");
     m.insert("distribution.user", "User");
     m.insert("distribution.joined_at", "Joined At");
@@ -1036,6 +1071,25 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("settings.admin_only_hint", "Only admins can modify system settings. Personal language and theme preferences can be changed from the top-right navigation controls.");
     m.insert("settings.load_failed", "Failed to load settings");
     m.insert("settings.saved", "Settings saved");
+    m.insert("settings.save_item", "Save this setting");
+    m.insert("settings.save_section", "Save section");
+    m.insert("settings.unsaved", "Unsaved changes");
+    m.insert(
+        "settings.site_name_invalid",
+        "The platform name is required and cannot exceed 100 characters.",
+    );
+    m.insert(
+        "settings.currency_invalid",
+        "The default currency must be CNY or USD.",
+    );
+    m.insert(
+        "settings.recharge_range_invalid",
+        "Recharge amounts must be non-negative and the minimum cannot exceed the maximum.",
+    );
+    m.insert(
+        "settings.jwt_range_invalid",
+        "Session lifetime must be an integer from 1 to 8760 hours.",
+    );
     m.insert("settings.basic_title", "Basic Configuration");
     m.insert("settings.basic_desc", "Define the platform name and recharge baseline settings. The form stays intentionally narrow on wide screens.");
     m.insert("settings.site_name_label", "Platform Name");
@@ -1298,6 +1352,15 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "No healthy providers right now",
     );
     m.insert("system.gateway_stats", "Gateway Stats");
+    m.insert(
+        "system.diagnostics_purpose",
+        "Troubleshoot routing and upstream health for this gateway",
+    );
+    m.insert(
+        "system.diagnostics_purpose_hint",
+        "Diagnostics are read-only; routing probes may call an upstream and incur a small charge.",
+    );
+    m.insert("system.gateway_instance", "Current gateway endpoint");
     m.insert("system.total_requests", "Total Requests");
     m.insert("system.success_rate", "Success Rate");
     m.insert("system.avg_latency", "Average Latency");
@@ -1605,6 +1668,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.map_router_subtitle", "raw model → ready node");
     m.insert("monitoring.map_node", "Node");
     m.insert("monitoring.time_range", "Time range");
+    m.insert("monitoring.filters", "Filters");
     m.insert("monitoring.range_1h", "Last 1 hour");
     m.insert("monitoring.range_6h", "Last 6 hours");
     m.insert("monitoring.range_24h", "Last 24 hours");
@@ -1804,6 +1868,18 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.account_status", "Account status");
     m.insert("users.status_active", "Active");
     m.insert("users.status_suspended", "Suspended");
+    m.insert("users.detail_title", "User details");
+    m.insert("users.user_id", "User ID");
+    m.insert("users.wallet_scope", "Wallet scope");
+    m.insert(
+        "users.wallet_scope_hint",
+        "Wallets are isolated by workspace; select a workspace before managing balance.",
+    );
+    m.insert("users.last_login", "Last sign-in");
+    m.insert("users.filter_role", "Filter by platform role");
+    m.insert("users.filter_status", "Filter by status");
+    m.insert("users.all_roles", "All roles");
+    m.insert("users.all_statuses", "All statuses");
     m.insert("users.security_reason", "Security change reason");
     m.insert(
         "users.security_reason_placeholder",
@@ -1949,6 +2025,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.empty", "No tenants yet");
     m.insert("tenants.tenant_id", "Tenant ID");
     m.insert("tenants.active", "Active");
+    m.insert("tenants.status_filter", "Filter workspaces by status");
+    m.insert("tenants.all_statuses", "All statuses");
     m.insert("tenants.create", "Create tenant");
     m.insert("tenants.create_title", "Create tenant");
     m.insert("tenants.name", "Tenant name");
@@ -2044,6 +2122,11 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "distribution_records.rules_title",
         "Distribution Rules (Read Only)",
     );
+    m.insert("distribution_records.records_title", "Distribution Records");
+    m.insert(
+        "distribution_records.view_tabs",
+        "Distribution rules and records",
+    );
     m.insert("distribution_records.rules_hint", "Distribution rules are managed centrally by the platform. Contact a platform administrator to change them.");
     m.insert(
         "distribution_records.no_rules",
@@ -2107,6 +2190,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("accounts.update_failed", "Update failed");
     m.insert("accounts.resetting", "Resetting...");
     m.insert("accounts.reset_health", "Reset Health");
+    m.insert("accounts.health_filter", "Filter channels by health");
+    m.insert("accounts.health_all", "All health states");
     m.insert("accounts.add_channel", "+ Add Channel");
     m.insert(
         "accounts.empty",
@@ -2426,6 +2511,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("node_earnings.total_meta", "Total tip earnings generated");
     m.insert("node_earnings.history_title", "Tip History");
     m.insert("node_earnings.withdrawals_title", "Withdrawal Records");
+    m.insert("node_earnings.records_tabs", "Earnings record type");
     m.insert("node_earnings.no_history", "No tip records yet");
     m.insert("node_earnings.no_withdrawals", "No withdrawal records yet");
     m.insert("node_earnings.col_time", "Time");
@@ -2470,6 +2556,22 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "node_earnings.withdraw_hint",
         "Alipay withdrawals require admin approval and will be processed within 7 business days.",
+    );
+    m.insert(
+        "node_earnings.withdraw_minimum",
+        "Minimum: any available earnings; the full available amount is withdrawn.",
+    );
+    m.insert(
+        "node_earnings.withdraw_fee",
+        "Fee: no additional platform fee is currently charged.",
+    );
+    m.insert(
+        "node_earnings.withdraw_time_balance",
+        "Processing: balance credit is immediate.",
+    );
+    m.insert(
+        "node_earnings.withdraw_time_alipay",
+        "Processing: admin approval, then payment within 7 business days.",
     );
     m.insert("node_earnings.withdraw_failed", "Withdrawal request failed");
     m.insert(
@@ -2669,7 +2771,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "platform_pricing.invalid_target",
         "Enter a real tenant UUID. An invalid selector never means all tenants.",
     );
-    m.insert("platform_pricing.apply", "Apply target");
+    m.insert("platform_pricing.apply", "Switch scope");
+    m.insert("platform_pricing.choose_tenant", "Choose a workspace");
     m.insert(
         "platform_pricing.explicit_scope",
         "Platform and tenant prices are managed separately. Changing target clears unsaved forms.",

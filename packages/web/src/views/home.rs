@@ -1,3 +1,4 @@
+use chrono::Datelike;
 use dioxus::prelude::*;
 
 use crate::hooks::use_i18n::use_i18n;
@@ -6,6 +7,7 @@ use crate::router::Route;
 use crate::services::api_client::{get_client, user_error_message};
 use crate::services::auth_service;
 use crate::services::requirement_service::{RequirementSubmission, submit_requirement};
+use crate::stores::auth_entry_store::{AuthEntry, AuthEntryStore};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::public_settings_store::PublicSettingsStore;
 use crate::stores::referral_store::ReferralStore;
@@ -13,42 +15,6 @@ use crate::stores::user_store::{UserInfo, UserStore};
 use crate::views::tenant::common::WorkspaceScope;
 use ui::components::modal::Modal;
 use ui::{GITHUB_REPOSITORY_URL, ThemeCtx};
-
-// ── 赞助者数据 ───────────────────────────────────
-const SPONSOR_DATA: &str = include_str!("sponsors.txt");
-
-/// 从单行解析赞助者名字，仅当金额 >= 10 且名字有效时返回
-fn extract_sponsor_name(line: &str) -> Option<String> {
-    let line = line.trim();
-    if line.is_empty() {
-        return None;
-    }
-    // 跳过 "序号. " 前缀
-    let content = line.split_once(". ")?.1;
-    let parts: Vec<&str> = content.split_whitespace().collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    // 最后一个 token 为金额
-    let amount: f64 = parts.last()?.parse().ok()?;
-    if amount < 10.0 {
-        return None;
-    }
-    // 剩余部分为名字
-    let name = parts[..parts.len() - 1].join(" ");
-    let name = name.trim();
-    if name.is_empty() {
-        return None;
-    }
-    // 过滤无意义的纯标点符号/空格名字（如 "."、"~"）
-    if !name
-        .chars()
-        .any(|c| c.is_alphabetic() || c.is_ascii_digit())
-    {
-        return None;
-    }
-    Some(name.to_string())
-}
 
 /// 首页组件 - 现代化自适应设计
 #[component]
@@ -59,6 +25,7 @@ pub fn Home() -> Element {
     let mut show_login_modal = use_signal(|| false);
     let mut show_register_modal = use_signal(|| false);
     let mut show_requirement_modal = use_signal(|| false);
+    let mut auth_entry = use_context::<AuthEntryStore>();
 
     // 推荐码：从 ReferralStore 中读取（由 /auth/register?ref=xxx 重定向时设置）
     let mut referral_store = use_context::<ReferralStore>();
@@ -69,6 +36,12 @@ pub fn Home() -> Element {
     // 会被再次触发；但 take_code() 以 is_some() 为守卫，第二次返回 None 且不再写入，
     // 故 effect 会自然收敛，不会形成无限循环。
     use_effect(move || {
+        if let Some(entry) = auth_entry.take() {
+            match entry {
+                AuthEntry::Login => show_login_modal.set(true),
+                AuthEntry::Register => show_register_modal.set(true),
+            }
+        }
         if let Some(code) = referral_store.take_code() {
             referral_code.set(Some(code));
             show_register_modal.set(true);
@@ -119,14 +92,6 @@ pub fn Home() -> Element {
             .unwrap_or_else(|| "KeyCompute".to_string())
     });
 
-    // 赞助者列表（编译时从 sponsors.txt 解析）
-    let sponsors = use_memo(|| {
-        SPONSOR_DATA
-            .lines()
-            .filter_map(extract_sponsor_name)
-            .collect::<Vec<_>>()
-    });
-
     // 提前提取所有 i18n 文本
     let t_toggle_theme = i18n.t("home.toggle_theme");
     let t_toggle_lang = if is_zh {
@@ -141,114 +106,21 @@ pub fn Home() -> Element {
     let t_tagline_2 = i18n.t("login.tagline_2");
     let t_description = i18n.t("login.description");
     let t_features_title = i18n.t("home.features.title");
-    let t_feature_routing = i18n.t("login.feature_routing");
-    let t_feature_billing = i18n.t("login.feature_billing");
-    let t_feature_ha = i18n.t("login.feature_ha");
-    let t_feature_api = i18n.t("login.feature_api");
-    let t_feature_metering = i18n.t("login.feature_metering");
-    let t_feature_custom = i18n.t("login.feature_custom");
     let t_routing_title = i18n.t("home.features.routing.title");
     let t_routing_desc = i18n.t("home.features.routing.desc");
     let t_billing_title = i18n.t("home.features.billing.title");
     let t_billing_desc = i18n.t("home.features.billing.desc");
     let t_cluster_title = i18n.t("home.features.cluster.title");
     let t_cluster_desc = i18n.t("home.features.cluster.desc");
-    let t_node_rental_title = i18n.t("home.features.node_rental.title");
-    let t_node_rental_desc = i18n.t("home.features.node_rental.desc");
-    let t_distribution_title = i18n.t("home.features.distribution.title");
-    let t_distribution_desc = i18n.t("home.features.distribution.desc");
-    let t_custom_title = i18n.t("home.features.custom.title");
-    let t_custom_desc = i18n.t("home.features.custom.desc");
     let t_menu = i18n.t("home.menu");
     let t_lang_switch = i18n.t("home.lang_switch_label");
-    let t_tip_title = i18n.t("home.tip.title");
-    let t_tip_subtitle_prefix = i18n.t("home.tip.subtitle_prefix");
-    let t_tip_subtitle_suffix = i18n.t("home.tip.subtitle_suffix");
-    let t_tip_wechat_qr_alt = i18n.t("home.tip.wechat_qr_alt");
-    let t_tip_wechat_label = i18n.t("home.tip.wechat_label");
-    let t_tip_alipay_qr_alt = i18n.t("home.tip.alipay_qr_alt");
-    let t_tip_alipay_label = i18n.t("home.tip.alipay_label");
-    let t_contributors_title = i18n.t("home.contributors.title");
-    let t_contributors_subtitle = i18n.t("home.contributors.subtitle");
-    let t_sponsors_title = i18n.t("home.sponsors.title");
-    let t_sponsors_subtitle = i18n.t("home.sponsors.subtitle");
     let t_req_bubble = i18n.t("req.bubble");
+    let current_year = chrono::Utc::now().year();
 
     rsx! {
         document::Title { "{site_name}" }
 
         div { class: "kc-home-page",
-            // 背景动画效果 - 根据主题显示不同背景
-            if is_dark {
-                // 黑暗主题：星空背景
-                div { class: "kc-home-stars-container",
-                    // 生成星星（减少到50个，增大尺寸，增强缩放效果）
-                    {
-                        (0..50)
-                            .map(|i| {
-                                let style = format!(
-                                    "--star-left: {}%; --star-top: {}%; --star-size: {}; --star-delay: {}s; --star-duration: {}s;",
-                                    (i * 37 % 100),
-                                    (i * 53 % 100),
-                                    if i % 5 == 0 {
-                                        "4px"
-                                    } else if i % 5 == 1 {
-                                        "5px"
-                                    } else if i % 5 == 2 {
-                                        "3px"
-                                    } else {
-                                        "2px"
-                                    },
-                                    (i % 10) as f64 * 0.5,
-                                    (2 + (i % 4)) as f64,
-                                );
-                                rsx! {
-                                    div { class: "kc-home-star", style: "{style}" }
-                                }
-                            })
-                    }
-                }
-                div { class: "kc-home-shooting-stars",
-                    {
-                        (0..5)
-                            .map(|i| {
-                                let style = format!(
-                                    "--shooting-delay: {}s; --shooting-duration: {}s; --shooting-top: {}%;",
-                                    (i * 3) as f64 * 1.5,
-                                    1.5 + (i % 3) as f64 * 0.5,
-                                    10 + (i * 20) % 70,
-                                );
-                                rsx! {
-                                    div { class: "kc-home-shooting-star", style: "{style}" }
-                                }
-                            })
-                    }
-                }
-            } else {
-                // 明亮主题：晴空白云
-                div { class: "kc-home-sky" }
-                div { class: "kc-home-clouds-container",
-                    {
-                        (0..8)
-                            .map(|i| {
-                                let style = format!(
-                                    "--cloud-left: {}%; --cloud-top: {}%; --cloud-scale: {}; --cloud-delay: {}s; --cloud-duration: {}s; --cloud-opacity: {};",
-                                    (i * 47 % 100),
-                                    5 + (i * 23 % 60),
-                                    0.4 + (i % 5) as f64 * 0.2,
-                                    (i % 8) as f64 * 2.0,
-                                    30.0 + (i % 5) as f64 * 10.0,
-                                    0.6 + (i % 4) as f64 * 0.1,
-                                );
-                                rsx! {
-                                    div { class: "kc-home-cloud", style: "{style}" }
-                                }
-                            })
-                    }
-                }
-            }
-            div { class: "kc-home-grid-overlay" }
-
             // 导航栏
             header { class: "kc-home-header",
                 div { class: "kc-home-nav container",
@@ -500,14 +372,34 @@ pub fn Home() -> Element {
                             }
                             p { class: "kc-home-hero-description", "{t_description}" }
 
-                            // 功能特性标签
-                            div { class: "kc-home-features-tags",
-                                span { class: "kc-home-feature-tag", "{t_feature_routing}" }
-                                span { class: "kc-home-feature-tag", "{t_feature_billing}" }
-                                span { class: "kc-home-feature-tag", "{t_feature_ha}" }
-                                span { class: "kc-home-feature-tag", "{t_feature_api}" }
-                                span { class: "kc-home-feature-tag", "{t_feature_metering}" }
-                                span { class: "kc-home-feature-tag", "{t_feature_custom}" }
+                            div { class: "kc-home-hero-actions",
+                                if is_authenticated() {
+                                    button {
+                                        class: "kc-home-btn-register",
+                                        r#type: "button",
+                                        onclick: move |_| {
+                                            nav.push(if has_workspace() {
+                                                Route::Dashboard {}
+                                            } else {
+                                                Route::TenantWorkspace {}
+                                            });
+                                        },
+                                        {i18n.t("home.console")}
+                                    }
+                                } else {
+                                    button {
+                                        class: "kc-home-btn-register",
+                                        r#type: "button",
+                                        onclick: move |_| show_register_modal.set(true),
+                                        "{t_register}"
+                                    }
+                                    button {
+                                        class: "kc-home-btn-login",
+                                        r#type: "button",
+                                        onclick: move |_| show_login_modal.set(true),
+                                        "{t_login}"
+                                    }
+                                }
                             }
                         }
                     }
@@ -618,167 +510,6 @@ pub fn Home() -> Element {
                                 p { "{t_cluster_desc}" }
                             }
 
-                            // 节点租赁卡片
-                            div { class: "kc-home-feature-card",
-                                div { class: "kc-home-feature-icon",
-                                    svg {
-                                        width: "32",
-                                        height: "32",
-                                        view_box: "0 0 24 24",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        rect {
-                                            x: "2",
-                                            y: "4",
-                                            width: "20",
-                                            height: "12",
-                                            rx: "2",
-                                            ry: "2",
-                                        }
-                                        line {
-                                            x1: "6",
-                                            y1: "20",
-                                            x2: "18",
-                                            y2: "20",
-                                        }
-                                        line {
-                                            x1: "12",
-                                            y1: "16",
-                                            x2: "12",
-                                            y2: "20",
-                                        }
-                                        line {
-                                            x1: "6",
-                                            y1: "10",
-                                            x2: "10",
-                                            y2: "10",
-                                        }
-                                    }
-                                }
-                                h3 { "{t_node_rental_title}" }
-                                p { "{t_node_rental_desc}" }
-                            }
-
-                            // 传播裂变卡片（二级分销）
-                            div { class: "kc-home-feature-card",
-                                div { class: "kc-home-feature-icon",
-                                    svg {
-                                        width: "32",
-                                        height: "32",
-                                        view_box: "0 0 24 24",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        circle { cx: "18", cy: "5", r: "3" }
-                                        circle { cx: "6", cy: "12", r: "3" }
-                                        circle { cx: "18", cy: "19", r: "3" }
-                                        line {
-                                            x1: "8.59",
-                                            y1: "13.51",
-                                            x2: "15.42",
-                                            y2: "17.49",
-                                        }
-                                        line {
-                                            x1: "15.41",
-                                            y1: "6.51",
-                                            x2: "8.59",
-                                            y2: "10.49",
-                                        }
-                                    }
-                                }
-                                h3 { "{t_distribution_title}" }
-                                p { "{t_distribution_desc}" }
-                            }
-
-                            // 定制服务卡片
-                            div { class: "kc-home-feature-card",
-                                div { class: "kc-home-feature-icon",
-                                    svg {
-                                        width: "32",
-                                        height: "32",
-                                        view_box: "0 0 24 24",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        circle { cx: "12", cy: "12", r: "3" }
-                                        path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" }
-                                    }
-                                }
-                                h3 { "{t_custom_title}" }
-                                p { "{t_custom_desc}" }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 赞赏码区域
-            section { class: "kc-home-tip-section",
-                div { class: "container",
-                    h2 { class: "kc-home-tip-title",
-                        span { "☕ " }
-                        "{t_tip_title}"
-                    }
-                    p { class: "kc-home-tip-subtitle",
-                        "{t_tip_subtitle_prefix}"
-                        {site_name}
-                        "{t_tip_subtitle_suffix}"
-                    }
-                    div { class: "kc-home-tip-cards",
-                        div { class: "kc-home-tip-card",
-                            img {
-                                class: "kc-home-tip-qr",
-                                src: asset!("/assets/wechat_tip.jpg"),
-                                alt: "{t_tip_wechat_qr_alt}",
-                            }
-                            span { class: "kc-home-tip-label", "{t_tip_wechat_label}" }
-                        }
-                        div { class: "kc-home-tip-card",
-                            img {
-                                class: "kc-home-tip-qr",
-                                src: asset!("/assets/alipay_tip.png"),
-                                alt: "{t_tip_alipay_qr_alt}",
-                            }
-                            span { class: "kc-home-tip-label", "{t_tip_alipay_label}" }
-                        }
-                    }
-                }
-            }
-
-            // 社区贡献者区域
-            section { class: "kc-home-tip-section",
-                a {
-                    href: "https://github.com/keycompute/keycompute/graphs/contributors?all=1",
-                    target: "_blank",
-                    rel: "noopener noreferrer",
-                    class: "kc-home-contributors-wrap",
-                    div { class: "container",
-                        h2 { class: "kc-home-tip-title",
-                            span { "👥 " }
-                            "{t_contributors_title}"
-                        }
-                        p { class: "kc-home-tip-subtitle", "{t_contributors_subtitle}" }
-                        img {
-                            src: "https://contrib.rocks/image?repo=keycompute/keycompute",
-                            alt: "KeyCompute Contributors",
-                            class: "kc-home-contributors-img",
-                        }
-                    }
-                }
-            }
-
-            // 社区赞助者区域
-            section { class: "kc-home-tip-section",
-                div { class: "container",
-                    h2 { class: "kc-home-tip-title",
-                        span { "🌟 " }
-                        "{t_sponsors_title}"
-                    }
-                    p { class: "kc-home-tip-subtitle", "{t_sponsors_subtitle}" }
-                    div { class: "kc-home-sponsors-grid",
-                        for name in sponsors() {
-                            div { class: "kc-home-sponsor-card", "{name}" }
                         }
                     }
                 }
@@ -787,7 +518,7 @@ pub fn Home() -> Element {
             // Footer
             footer { class: "footer",
                 span { class: "footer-text",
-                    "© 2026 "
+                    "© {current_year} "
                     a {
                         class: "footer-link",
                         href: GITHUB_REPOSITORY_URL,
@@ -795,7 +526,6 @@ pub fn Home() -> Element {
                         rel: "noopener noreferrer",
                         {site_name}
                     }
-                    ". All Rights Reserved."
                 }
             }
 
@@ -948,8 +678,9 @@ fn LoginModal(
 
                 form { autocomplete: "on", onsubmit: on_submit,
                     div { class: "kc-auth-form-group",
-                        label { class: "kc-auth-form-label", "{t_email}" }
+                        label { class: "kc-auth-form-label", r#for: "login-email", "{t_email}" }
                         input {
+                            id: "login-email",
                             class: "kc-auth-form-input",
                             r#type: "email",
                             autocomplete: "username",
@@ -960,9 +691,10 @@ fn LoginModal(
                     }
 
                     div { class: "kc-auth-form-group",
-                        label { class: "kc-auth-form-label", "{t_password}" }
+                        label { class: "kc-auth-form-label", r#for: "login-password", "{t_password}" }
                         div { class: "kc-auth-password-wrapper",
                             input {
+                                id: "login-password",
                                 class: "kc-auth-form-input",
                                 r#type: "{password_type}",
                                 autocomplete: "current-password",
@@ -973,6 +705,7 @@ fn LoginModal(
                             button {
                                 class: "kc-auth-toggle-password",
                                 r#type: "button",
+                                aria_label: i18n.t(if show_password() { "login.hide_password" } else { "login.show_password" }),
                                 onclick: move |_| show_password.set(!show_password()),
                                 if show_password() {
                                     svg {
@@ -1266,10 +999,12 @@ fn RegisterModal(
                 } else {
                     form { onsubmit: on_submit,
                         div { class: "kc-auth-form-group",
-                            label { class: "kc-auth-form-label", "{t_name}" }
+                            label { class: "kc-auth-form-label", r#for: "register-name", "{t_name}" }
                             input {
+                                id: "register-name",
                                 class: "kc-auth-form-input",
                                 r#type: "text",
+                                autocomplete: "name",
                                 placeholder: "{t_name_placeholder}",
                                 value: "{name}",
                                 oninput: move |e| name.set(e.value()),
@@ -1277,10 +1012,12 @@ fn RegisterModal(
                         }
 
                         div { class: "kc-auth-form-group",
-                            label { class: "kc-auth-form-label", "{t_email}" }
+                            label { class: "kc-auth-form-label", r#for: "register-email", "{t_email}" }
                             input {
+                                id: "register-email",
                                 class: "kc-auth-form-input",
                                 r#type: "email",
+                                autocomplete: "email",
                                 placeholder: "{t_email_placeholder}",
                                 value: "{email}",
                                 disabled: code_requested(),
@@ -1289,10 +1026,12 @@ fn RegisterModal(
                         }
 
                         div { class: "kc-auth-form-group",
-                            label { class: "kc-auth-form-label", "{t_password}" }
+                            label { class: "kc-auth-form-label", r#for: "register-password", "{t_password}" }
                             input {
+                                id: "register-password",
                                 class: "kc-auth-form-input",
                                 r#type: "password",
+                                autocomplete: "new-password",
                                 placeholder: "{t_password_min8}",
                                 value: "{password}",
                                 oninput: move |e| password.set(e.value()),
@@ -1300,10 +1039,12 @@ fn RegisterModal(
                         }
 
                         div { class: "kc-auth-form-group",
-                            label { class: "kc-auth-form-label", "{t_confirm_password}" }
+                            label { class: "kc-auth-form-label", r#for: "register-confirm-password", "{t_confirm_password}" }
                             input {
+                                id: "register-confirm-password",
                                 class: "kc-auth-form-input",
                                 r#type: "password",
+                                autocomplete: "new-password",
                                 placeholder: "{t_confirm_password_placeholder}",
                                 value: "{confirm_password}",
                                 oninput: move |e| confirm_password.set(e.value()),
@@ -1312,10 +1053,12 @@ fn RegisterModal(
 
                         if code_requested() {
                             div { class: "kc-auth-form-group",
-                                label { class: "kc-auth-form-label", "{t_verification_code}" }
+                                label { class: "kc-auth-form-label", r#for: "register-verification-code", "{t_verification_code}" }
                                 input {
+                                    id: "register-verification-code",
                                     class: "kc-auth-form-input",
                                     r#type: "text",
+                                    autocomplete: "one-time-code",
                                     maxlength: "6",
                                     placeholder: "{t_verification_code_placeholder}",
                                     value: "{verification_code}",

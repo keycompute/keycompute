@@ -946,6 +946,32 @@ fn token_hash(token: &str) -> Result<String, DbError> {
     Ok(hex::encode(Sha256::digest(token.as_bytes())))
 }
 
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct InvitationPreviewRecord {
+    pub tenant_name: String,
+    pub inviter_name: Option<String>,
+    pub inviter_email: String,
+    pub invited_email: String,
+    pub tenant_role: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Resolve the minimum read-only context needed to confirm an invitation.
+/// The token remains hash-only and no membership or audit mutation occurs.
+pub async fn preview_invitation(
+    db: &impl ConnectionTrait,
+    token: &str,
+) -> Result<Option<InvitationPreviewRecord>, DbError> {
+    let hash = token_hash(token)?;
+    Ok(InvitationPreviewRecord::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT t.name AS tenant_name,u.name AS inviter_name,u.email AS inviter_email,i.email AS invited_email,i.tenant_role,i.expires_at FROM tenant_invitations i JOIN tenants t ON t.id=i.tenant_id JOIN users u ON u.id=i.invited_by WHERE i.token_hash=$1 AND i.status='pending' AND i.expires_at>clock_timestamp() AND t.status='active' AND u.status='active'",
+        [hash.into()],
+    ))
+    .one(db)
+    .await?)
+}
+
 pub async fn accept_invitation(
     tx: &DatabaseTransaction,
     actor_user_id: Uuid,

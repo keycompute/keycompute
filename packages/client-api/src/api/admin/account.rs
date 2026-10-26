@@ -10,6 +10,7 @@ pub struct AccountQueryParams {
     pub search: Option<String>,
     pub provider: Option<String>,
     pub status: Option<String>,
+    pub health_status: Option<String>,
     pub page: Option<u32>,
     pub page_size: Option<u32>,
     pub limit: Option<i32>,
@@ -33,6 +34,11 @@ impl AccountQueryParams {
 
     pub fn with_status(mut self, status: impl Into<String>) -> Self {
         self.status = Some(status.into());
+        self
+    }
+
+    pub fn with_health_status(mut self, status: impl Into<String>) -> Self {
+        self.health_status = Some(status.into());
         self
     }
 
@@ -73,6 +79,12 @@ impl AccountQueryParams {
         }
         if let Some(ref status) = self.status {
             params.push(format!("status={}", encode_query_value(status)));
+        }
+        if let Some(ref health_status) = self.health_status {
+            params.push(format!(
+                "health_status={}",
+                encode_query_value(health_status)
+            ));
         }
         if let Some(page) = self.page {
             params.push(format!("page={page}"));

@@ -13,6 +13,7 @@ use keycompute_server::{AppState, AppStateConfig, create_router};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 struct InvitationFixture {
     db: DatabaseConnection,
@@ -162,6 +163,78 @@ async fn invitation_create_reports_notification_state_and_never_lists_secret() {
     assert!(body["invitation"].get("token_hash").is_none());
     assert!(body["invitation"].get("token").is_none());
     assert!(body["acceptance_link"].is_string());
+    f.guard.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn invitation_preview_is_masked_and_rejects_unusable_invitations() {
+    let mut f = InvitationFixture::new().await;
+    let (status, _) = f
+        .request(Method::GET, "/api/v1/invitations/not-a-token", "", None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (_, created) = f
+        .request(
+            Method::POST,
+            format!("/api/v1/tenants/{}/invitations", f.tenant.id),
+            &f.inviter_token,
+            Some(json!({
+                "email": f.invitee.email,
+                "tenant_role": "member",
+                "expires_in_seconds": 3600
+            })),
+        )
+        .await;
+    let token = token_from_fragment(&created);
+    let preview_path = format!("/api/v1/invitations/{token}");
+    let (status, preview) = f.request(Method::GET, &preview_path, "", None).await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["tenant_name"], f.tenant.name);
+    assert_eq!(preview["tenant_role"], "member");
+    let (_, domain) = f.invitee.email.split_once('@').unwrap();
+    let masked_email = format!("{}***@{domain}", f.invitee.email.chars().next().unwrap());
+    assert_eq!(preview["invited_email"], masked_email);
+    assert!(!preview.to_string().contains(&f.invitee.email));
+
+    let invitation_id = Uuid::parse_str(created["invitation"]["id"].as_str().unwrap()).unwrap();
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE tenant_invitations SET status='revoked' WHERE id=$1",
+        [invitation_id.into()],
+    ))
+    .await
+    .unwrap();
+    let (status, _) = f.request(Method::GET, &preview_path, "", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE tenant_invitations SET status='pending',expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+        [invitation_id.into()],
+    ))
+    .await
+    .unwrap();
+    let (status, _) = f.request(Method::GET, &preview_path, "", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE tenant_invitations SET expires_at=NOW()+INTERVAL '1 hour' WHERE id=$1",
+        [invitation_id.into()],
+    ))
+    .await
+    .unwrap();
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE users SET status='suspended' WHERE id=$1",
+        [f.inviter.id.into()],
+    ))
+    .await
+    .unwrap();
+    let (status, _) = f.request(Method::GET, &preview_path, "", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     f.guard.cleanup().await.unwrap();
 }
 

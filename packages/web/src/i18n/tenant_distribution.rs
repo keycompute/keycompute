@@ -40,7 +40,7 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         (
             "tenant_distribution.rate_hint",
             "Exact decimal from 0 to 1 with at most four decimal places; no percentage or float conversion.",
-            "使用 0 到 1 的精确小数，最多四位小数；不使用百分号或浮点转换。",
+            "输入 0 到 1 的小数，例如 0.125 表示 12.5%。",
         ),
         ("tenant_distribution.priority", "Priority", "优先级"),
         ("tenant_distribution.state", "State", "状态"),

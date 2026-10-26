@@ -5,6 +5,7 @@ use crate::i18n::{I18n, Lang};
 use crate::router::Route;
 use crate::services::{api_client::get_client, settings_service, user_service};
 use crate::stores::{
+    auth_entry_store::{AuthEntry, AuthEntryStore},
     auth_store::AuthStore,
     public_settings_store::{PublicSettingsState, PublicSettingsStore},
     referral_store::ReferralStore,
@@ -76,6 +77,8 @@ pub fn App() -> Element {
     // 推荐码存储：分销链接 /auth/register?ref=xxx 中的推荐码在重定向到首页时通过此 store 传递
     let referral_code_signal = use_signal(|| None::<String>);
     let _referral_store = use_context_provider(|| ReferralStore::new(referral_code_signal));
+    let auth_entry_signal = use_signal(|| None::<AuthEntry>);
+    let _auth_entry_store = use_context_provider(|| AuthEntryStore::new(auth_entry_signal));
 
     use_effect(move || {
         let auth = (auth_store.state)();
@@ -149,33 +152,38 @@ pub fn App() -> Element {
     }
     rsx! {
         WorkspaceUnloadGuard {}
-        Router::<Route> {
-            config: move |_| {
-                RouterConfig::default().on_update(move |router| {
-                    let next = router.current();
-                    let previous = workspace_routes.current();
-                    let same_route = previous.as_ref() == Some(&next);
-                    // Authentication loss must always reach the public route;
-                    // otherwise a stale draft could trap the app on the
-                    // protected-layout loading screen.
-                    let blocked = auth_store.state.peek().is_authenticated
-                        && workspace_drafts.is_blocked();
-                    let confirmed = !blocked || same_route || {
-                        let i18n = I18n::new(Lang::from_str(&lang_signal.peek()));
-                        crate::views::tenant::workspace_switcher::confirm_discard(
-                            i18n.t("tenant.unsaved_switch_confirm"),
-                        )
-                    };
-                    if crate::views::tenant::workspace_switcher::should_restore_route(
-                        blocked,
-                        same_route,
-                        confirmed,
-                    ) {
-                        return previous.map(NavigationTarget::Internal);
-                    }
-                    workspace_routes.track(next);
-                    None
-                })
+        div {
+            class: "app-keyboard-boundary",
+            style: "display: contents",
+            onkeydown: move |event| ui::components::modal::contain_modal_focus(&event),
+            Router::<Route> {
+                config: move |_| {
+                    RouterConfig::default().on_update(move |router| {
+                        let next = router.current();
+                        let previous = workspace_routes.current();
+                        let same_route = previous.as_ref() == Some(&next);
+                        // Authentication loss must always reach the public route;
+                        // otherwise a stale draft could trap the app on the
+                        // protected-layout loading screen.
+                        let blocked = auth_store.state.peek().is_authenticated
+                            && workspace_drafts.is_blocked();
+                        let confirmed = !blocked || same_route || {
+                            let i18n = I18n::new(Lang::from_str(&lang_signal.peek()));
+                            crate::views::tenant::workspace_switcher::confirm_discard(
+                                i18n.t("tenant.unsaved_switch_confirm"),
+                            )
+                        };
+                        if crate::views::tenant::workspace_switcher::should_restore_route(
+                            blocked,
+                            same_route,
+                            confirmed,
+                        ) {
+                            return previous.map(NavigationTarget::Internal);
+                        }
+                        workspace_routes.track(next);
+                        None
+                    })
+                }
             }
         }
     }
@@ -418,6 +426,7 @@ pub fn AppLayout() -> Element {
 
     let mut nav_sections = vec![
         NavSection {
+            id: "primary".to_string(),
             title: None,
             items: vec![
                 NavItem::new(i18n.t("page.home"), r_dashboard, NavIcon::Home),
@@ -425,6 +434,7 @@ pub fn AppLayout() -> Element {
             ],
         },
         NavSection {
+            id: "usage".to_string(),
             title: Some(i18n.t("nav.group.usage").to_string()),
             items: vec![NavItem::new(
                 i18n.t("nav.usage"),
@@ -433,10 +443,12 @@ pub fn AppLayout() -> Element {
             )],
         },
         NavSection {
+            id: "billing".to_string(),
             title: Some(i18n.t("nav.group.billing").to_string()),
             items: billing_nav_items,
         },
         NavSection {
+            id: "account".to_string(),
             title: Some(i18n.t("nav.group.account").to_string()),
             items: vec![
                 NavItem::new(i18n.t("nav.user.profile"), r_profile, NavIcon::User),
@@ -449,6 +461,7 @@ pub fn AppLayout() -> Element {
         },
         // 节点分组（所有已登录用户可见）
         NavSection {
+            id: "node".to_string(),
             title: Some(i18n.t("nav.group.node").to_string()),
             items: vec![
                 NavItem::new(i18n.t("nav.node_token"), r_node_token, NavIcon::Key),
@@ -536,6 +549,7 @@ pub fn AppLayout() -> Element {
         }
         if !resource_items.is_empty() {
             tenant_sections.push(NavSection {
+                id: "tenant-resources".to_string(),
                 title: Some(i18n.t("tenant.resources_group").into()),
                 items: resource_items,
             });
@@ -571,6 +585,7 @@ pub fn AppLayout() -> Element {
         }
         if !commerce_items.is_empty() {
             tenant_sections.push(NavSection {
+                id: "tenant-commerce".to_string(),
                 title: Some(i18n.t("tenant.commerce_group").into()),
                 items: commerce_items,
             });
@@ -579,6 +594,7 @@ pub fn AppLayout() -> Element {
     tenant_sections.insert(
         0,
         NavSection {
+            id: "tenant-management".to_string(),
             title: Some(i18n.t("tenant.management").into()),
             items: workspace_items,
         },
@@ -638,6 +654,7 @@ pub fn AppLayout() -> Element {
     }
     if !platform_management_items.is_empty() {
         nav_sections.push(NavSection {
+            id: "platform-management".to_string(),
             title: Some(i18n.t("nav.group.admin").to_string()),
             items: platform_management_items,
         });
@@ -659,6 +676,8 @@ pub fn AppLayout() -> Element {
             home_title: i18n.t("layout.back_to_home"),
             open_menu_title: i18n.t("layout.open_menu"),
             close_menu_title: i18n.t("layout.close_menu"),
+            navigation_label: i18n.t("layout.main_navigation"),
+            product_label: i18n.t("layout.product_label"),
             switch_to_light_theme_title: i18n.t("layout.switch_to_light"),
             switch_to_dark_theme_title: i18n.t("layout.switch_to_dark"),
             switch_to_zh_title: i18n.t("layout.switch_to_zh"),
@@ -944,6 +963,22 @@ mod tests {
                     "custom modal close button is missing an accessible name: {attributes}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn detail_drawers_support_keyboard_entry_exit_and_focus_restore() {
+        for source in [
+            include_str!("views/shared/users.rs"),
+            include_str!("views/tenant/node_admin/table.rs"),
+        ] {
+            let compact = source
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            assert!(compact.contains("autofocus:true"));
+            assert!(compact.contains("Key::Escape"));
+            assert!(compact.contains("restore_focus_after_dialog"));
         }
     }
 }

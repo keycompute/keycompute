@@ -8,7 +8,7 @@ pub fn Footer(#[props(default = "KeyCompute".to_string())] site_name: String) ->
     rsx! {
         footer { class: "footer",
             span { class: "footer-text",
-                "© 2026 "
+                "© "
                 a {
                     class: "footer-link",
                     href: GITHUB_REPOSITORY_URL,
@@ -16,7 +16,6 @@ pub fn Footer(#[props(default = "KeyCompute".to_string())] site_name: String) ->
                     rel: "noopener noreferrer",
                     "{site_name}"
                 }
-                ". All Rights Reserved."
             }
         }
     }

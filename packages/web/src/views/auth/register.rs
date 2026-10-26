@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::{RegisterQuery, Route};
+use crate::stores::auth_entry_store::{AuthEntry, AuthEntryStore};
 use crate::stores::referral_store::ReferralStore;
 
 /// 注册页面 - 读取推荐码后重定向到首页（注册功能已移至首页弹窗）
@@ -10,6 +11,7 @@ pub fn Register(query: RegisterQuery) -> Element {
     let i18n = use_i18n();
     let nav = use_navigator();
     let mut referral_store = use_context::<ReferralStore>();
+    let mut auth_entry = use_context::<AuthEntryStore>();
 
     // 从路由 query 参数读取推荐码存入全局 store，然后重定向到首页。
     // 注意不能读 window.location.search：Router 初始化时会规范化地址栏，
@@ -18,6 +20,7 @@ pub fn Register(query: RegisterQuery) -> Element {
         if let Some(ref_code) = query.ref_code.clone() {
             referral_store.set_code(ref_code);
         }
+        auth_entry.request(AuthEntry::Register);
         nav.replace(Route::Home {});
     });
 

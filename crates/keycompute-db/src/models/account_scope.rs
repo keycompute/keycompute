@@ -58,6 +58,7 @@ pub struct AccountManagementView {
 pub struct AccountListFilter {
     pub provider: Option<String>,
     pub enabled: Option<bool>,
+    pub health_status: Option<String>,
     pub search: Option<String>,
     pub tenant_id: Option<Uuid>,
 }
@@ -276,7 +277,8 @@ fn account_query(
                 LOWER(a.name) LIKE '%'||LOWER($6)||'%' ESCAPE '\\'
                 OR LOWER(a.provider) LIKE '%'||LOWER($6)||'%' ESCAPE '\\'
                 OR LOWER(a.id::text) LIKE '%'||LOWER($6)||'%' ESCAPE '\\'
-                OR LOWER(a.tenant_id::text) LIKE '%'||LOWER($6)||'%' ESCAPE '\\')"
+                OR LOWER(a.tenant_id::text) LIKE '%'||LOWER($6)||'%' ESCAPE '\\')
+           AND ($7::text IS NULL OR a.health_status=$7)"
     );
     let mut values = vec![
         tenant_selector.into(),
@@ -285,9 +287,10 @@ fn account_query(
         filter.provider.as_deref().into(),
         filter.enabled.into(),
         search.as_deref().into(),
+        filter.health_status.as_deref().into(),
     ];
     if let Some((limit, offset)) = page {
-        sql.push_str(" ORDER BY a.priority DESC,a.created_at ASC,a.id ASC LIMIT $7 OFFSET $8");
+        sql.push_str(" ORDER BY a.priority DESC,a.created_at ASC,a.id ASC LIMIT $8 OFFSET $9");
         values.extend([limit.clamp(1, 1000).into(), offset.max(0).into()]);
     }
     Ok(Statement::from_sql_and_values(

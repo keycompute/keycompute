@@ -253,40 +253,10 @@ fn TenantScopedChildren(children: Element) -> Element {
 
 #[component]
 pub fn WorkspaceLinks() -> Element {
-    let users = use_context::<UserStore>();
-    let i18n = use_i18n();
-    let route = use_route::<Route>();
-    let admin = users
-        .info
-        .read()
-        .as_ref()
-        .is_some_and(|u| u.can_manage_tenant());
-    let overview_active = route == (Route::TenantWorkspace {});
-    let issuance_active = route == (Route::OwnerKeyIssuance {});
-    let settings_active = route == (Route::TenantSettings {});
-    rsx! {nav {class:"tenant-workspace-links", aria_label:i18n.t("tenant.quick_links"),
-        span {class:"tenant-workspace-links-label",{i18n.t("tenant.quick_links")}}
-        Link {
-            to: Route::TenantWorkspace {},
-            class: if overview_active {"tenant-workspace-link active"} else {"tenant-workspace-link"},
-            aria_current: if overview_active {"page"} else {"false"},
-            {i18n.t("tenant.workspace")}
-        }
-        Link {
-            to: Route::OwnerKeyIssuance {},
-            class: if issuance_active {"tenant-workspace-link active"} else {"tenant-workspace-link"},
-            aria_current: if issuance_active {"page"} else {"false"},
-            {i18n.t("tenant_keys.my_requests")}
-        }
-        if admin {
-            Link {
-                to: Route::TenantSettings {},
-                class: if settings_active {"tenant-workspace-link active"} else {"tenant-workspace-link"},
-                aria_current: if settings_active {"page"} else {"false"},
-                {i18n.t("tenant.settings")}
-            }
-        }
-    }}
+    // These destinations already live in the persistent, role-aware sidebar.
+    // Rendering them again above every workspace page duplicated context and
+    // pushed the actual task below the fold.
+    rsx! {}
 }
 
 /// Compact, human-readable tenant scope. The workspace name and role are the

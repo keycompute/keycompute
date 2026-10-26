@@ -130,12 +130,14 @@ pub fn UserSettings() -> Element {
                         div { class: "setting-row",
                             div { class: "setting-row-main",
                                 div { class: "setting-row-meta",
-                                    span { class: "setting-label", {i18n.t("account_settings.current_password")} }
+                                    label { class: "setting-label", r#for: "current-password", {i18n.t("account_settings.current_password")} }
                                     p { class: "setting-description", {i18n.t("account_settings.current_password_desc")} }
                                 }
                                 input {
+                                    id: "current-password",
                                     class: "form-input setting-control",
                                     r#type: "password",
+                                    autocomplete: "current-password",
                                     placeholder: "{i18n.t(\"account_settings.current_password_placeholder\")}",
                                     value: "{current_pwd}",
                                     oninput: move |e| current_pwd.set(e.value()),
@@ -145,12 +147,14 @@ pub fn UserSettings() -> Element {
                         div { class: "setting-row",
                             div { class: "setting-row-main",
                                 div { class: "setting-row-meta",
-                                    span { class: "setting-label", {i18n.t("account_settings.new_password")} }
+                                    label { class: "setting-label", r#for: "new-password", {i18n.t("account_settings.new_password")} }
                                     p { class: "setting-description", {i18n.t("account_settings.new_password_desc")} }
                                 }
                                 input {
+                                    id: "new-password",
                                     class: "form-input setting-control",
                                     r#type: "password",
+                                    autocomplete: "new-password",
                                     placeholder: "{i18n.t(\"account_settings.new_password_placeholder\")}",
                                     value: "{new_pwd}",
                                     oninput: move |e| new_pwd.set(e.value()),
@@ -160,12 +164,14 @@ pub fn UserSettings() -> Element {
                         div { class: "setting-row",
                             div { class: "setting-row-main",
                                 div { class: "setting-row-meta",
-                                    span { class: "setting-label", {i18n.t("account_settings.confirm_password")} }
+                                    label { class: "setting-label", r#for: "confirm-password", {i18n.t("account_settings.confirm_password")} }
                                     p { class: "setting-description", {i18n.t("account_settings.confirm_password_desc")} }
                                 }
                                 input {
+                                    id: "confirm-password",
                                     class: "form-input setting-control",
                                     r#type: "password",
+                                    autocomplete: "new-password",
                                     placeholder: "{i18n.t(\"account_settings.confirm_password_placeholder\")}",
                                     value: "{confirm_pwd}",
                                     oninput: move |e| confirm_pwd.set(e.value()),

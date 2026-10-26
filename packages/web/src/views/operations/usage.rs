@@ -1,6 +1,6 @@
 use super::scope::OperationsScope;
 use crate::{
-    hooks::use_i18n::use_i18n,
+    hooks::{use_debounced_search::use_debounced_search, use_i18n::use_i18n},
     services::api_client::{get_client, user_error_message},
     stores::{auth_store::AuthStore, user_store::UserStore},
     utils::{
@@ -70,6 +70,30 @@ pub(super) fn UsagePanel(scope: OperationsScope) -> Element {
     let mut filter =
         use_signal(|| Filter::parse("platform", "", &from(), &to()).expect("one-day UTC range"));
     let mut error = use_signal(String::new);
+    let tenant_search = use_debounced_search(tenant);
+    let tenant_options = use_resource(move || {
+        let search = tenant_search();
+        let target = target();
+        async move {
+            if target != "tenant" {
+                return Ok(Vec::new());
+            }
+            scope
+                .read(auth, users, move |token| {
+                    let search = search.clone();
+                    async move {
+                        PlatformOperationsApi::new(&get_client())
+                            .tenant_options(
+                                (!search.is_empty()).then_some(search.as_str()),
+                                20,
+                                &token,
+                            )
+                            .await
+                    }
+                })
+                .await
+        }
+    });
     let mut data = use_resource(move || {
         let filter = filter();
         let key = (scope, filter.clone());
@@ -96,7 +120,11 @@ pub(super) fn UsagePanel(scope: OperationsScope) -> Element {
     let loaded = current_keyed_value(&(scope, filter()), data.state().cloned(), data());
     let shown_target = match filter().target {
         Target::Platform => i18n.t("operations.platform").to_string(),
-        Target::Tenant(id) => id.to_string(),
+        Target::Tenant(id) => tenant_options()
+            .and_then(|result| result.ok())
+            .and_then(|items| items.into_iter().find(|tenant| tenant.id == id))
+            .map(|tenant| tenant.name)
+            .unwrap_or_else(|| id.to_string()),
     };
 
     rsx! {
@@ -120,10 +148,23 @@ pub(super) fn UsagePanel(scope: OperationsScope) -> Element {
                             input {
                                 id: "operations-tenant-id",
                                 class: "input-field",
+                                list: "operations-tenant-options",
                                 value: "{tenant}",
                                 maxlength: "36",
-                                placeholder: "00000000-0000-0000-0000-000000000000",
+                                placeholder: i18n.t("operations.tenant_search_placeholder"),
                                 oninput: move |event| tenant.set(event.value()),
+                            }
+                            datalist { id: "operations-tenant-options",
+                                if let Some(Ok(items)) = tenant_options() {
+                                    for item in items {
+                                        option { value: "{item.id}", label: "{item.name} · {item.slug}" }
+                                    }
+                                }
+                            }
+                            if let Some(Err(ref option_error)) = tenant_options() {
+                                p { class: "form-hint text-error", role: "alert",
+                                    {user_error_message(i18n, option_error)}
+                                }
                             }
                         }
                     }

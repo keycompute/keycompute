@@ -64,13 +64,9 @@ fn TenantWorkspacePage() -> Element {
     let users = use_context::<UserStore>();
     let scope = WorkspaceScope::from_stores(auth, users);
     let user = (users.info)();
-    let can_manage_settings = user.as_ref().is_some_and(UserInfo::can_manage_tenant);
-    let can_manage_members = user.as_ref().is_some_and(UserInfo::can_manage_members);
     let can_invite_members = user.as_ref().is_some_and(UserInfo::can_invite_members);
     let can_manage_providers = user.as_ref().is_some_and(UserInfo::can_manage_providers);
     let can_manage_keys = user.as_ref().is_some_and(UserInfo::can_manage_api_keys);
-    let can_manage_pricing = user.as_ref().is_some_and(UserInfo::can_manage_pricing);
-    let can_manage_billing = user.as_ref().is_some_and(UserInfo::can_manage_billing);
     let context = use_resource(move || {
         let scope = WorkspaceScope::from_stores(auth, users);
         async move {
@@ -103,6 +99,16 @@ fn TenantWorkspacePage() -> Element {
         })
         .unwrap_or_default()
         .to_string();
+    let joined_at = current.as_ref().and_then(|tenant| {
+        user.as_ref()
+            .and_then(|user| {
+                user.memberships
+                    .iter()
+                    .find(|item| item.tenant_id == tenant.id.to_string())
+            })
+            .and_then(|membership| membership.joined_at.as_deref())
+            .map(crate::utils::time::format_time)
+    });
 
     rsx! {
         div { class: "page-container tenant-workspace tenant-overview",
@@ -152,7 +158,40 @@ fn TenantWorkspacePage() -> Element {
                     }
                 }
 
-                h2 { class: "tenant-overview-section-title", {i18n.t("tenant.my_workspace_actions")} }
+                div { class: "tenant-overview-summary-grid",
+                    section { class: "section",
+                        h2 { class: "section-title", {i18n.t("tenant.recent_activity")} }
+                        div { class: "section-body",
+                            strong { {i18n.t("tenant.membership_activated")} }
+                            p { class: "text-secondary",
+                                if let Some(time) = joined_at.as_ref() {
+                                    {format!("{} · {}", value.name, time)}
+                                } else {
+                                    {value.name.clone()}
+                                }
+                            }
+                        }
+                    }
+                    section { class: "section",
+                        h2 { class: "section-title", {i18n.t("tenant.pending_actions")} }
+                        div { class: "section-body tenant-overview-task-list",
+                            if can_manage_providers {
+                                Link { to: Route::TenantProviders {}, {i18n.t("tenant.task_check_providers")} span { "→" } }
+                            }
+                            if can_invite_members {
+                                Link { to: Route::TenantInvitations {}, {i18n.t("tenant.task_invite_members")} span { "→" } }
+                            }
+                            if can_manage_keys {
+                                Link { to: Route::TenantKeys {}, {i18n.t("tenant.task_review_keys")} span { "→" } }
+                            }
+                            if !can_manage_providers && !can_invite_members && !can_manage_keys {
+                                p { class: "text-secondary", {i18n.t("tenant.no_pending_actions")} }
+                            }
+                        }
+                    }
+                }
+
+                h2 { class: "tenant-overview-section-title", {i18n.t("tenant.common_entries")} }
                 div { class: "tenant-overview-grid",
                     OverviewCard { title: i18n.t("page.home").to_string(), description: i18n.t("tenant.dashboard_card").to_string(), route: Route::Dashboard {} }
                     OverviewCard { title: i18n.t("nav.api_keys").to_string(), description: i18n.t("tenant.keys_card").to_string(), route: Route::ApiKeyList {} }
@@ -160,48 +199,6 @@ fn TenantWorkspacePage() -> Element {
                     OverviewCard { title: i18n.t("nav.payments").to_string(), description: i18n.t("tenant.payments_card").to_string(), route: Route::PaymentsOverview {} }
                 }
 
-                if can_manage_settings
-                    || can_manage_members
-                    || can_invite_members
-                    || can_manage_providers
-                    || can_manage_keys
-                    || can_manage_pricing
-                    || can_manage_billing
-                {
-                    h2 { class: "tenant-overview-section-title", {i18n.t("tenant.admin_get_started")} }
-                    div { class: "tenant-overview-grid",
-                        if can_manage_settings {
-                            OverviewCard { title: i18n.t("tenant.settings").to_string(), description: i18n.t("tenant.settings_card").to_string(), route: Route::TenantSettings {} }
-                        }
-                        if can_manage_members {
-                            OverviewCard { title: i18n.t("tenant.members").to_string(), description: i18n.t("tenant.members_card").to_string(), route: Route::TenantMembers {} }
-                        }
-                        if can_invite_members {
-                            OverviewCard { title: i18n.t("tenant.invitations").to_string(), description: i18n.t("tenant.invitations_hint").to_string(), route: Route::TenantInvitations {} }
-                        }
-                        if can_manage_providers {
-                            OverviewCard { title: i18n.t("tenant_providers.title").to_string(), description: i18n.t("tenant.providers_card").to_string(), route: Route::TenantProviders {} }
-                        }
-                        if can_manage_keys {
-                            OverviewCard { title: i18n.t("tenant_keys.title").to_string(), description: i18n.t("tenant_keys.hint").to_string(), route: Route::TenantKeys {} }
-                        }
-                        if can_manage_settings {
-                            OverviewCard { title: i18n.t("tenant_responses.title").to_string(), description: i18n.t("tenant_responses.hint").to_string(), route: Route::TenantResponses {} }
-                            OverviewCard { title: i18n.t("tenant_nodes.title").to_string(), description: i18n.t("tenant_nodes.hint").to_string(), route: Route::TenantNodes {} }
-                        }
-                        if can_manage_pricing {
-                            OverviewCard { title: i18n.t("tenant_pricing.title").to_string(), description: i18n.t("tenant_pricing.hint").to_string(), route: Route::TenantPricing {} }
-                        }
-                        if can_manage_billing {
-                            OverviewCard { title: i18n.t("tenant_finance.title").to_string(), description: i18n.t("tenant.finance_card").to_string(), route: Route::TenantFinance {} }
-                            OverviewCard { title: i18n.t("tenant_financial_controls.title").to_string(), description: i18n.t("tenant_financial_controls.hint").to_string(), route: Route::TenantFinancialControls {} }
-                        }
-                        if can_manage_settings {
-                            OverviewCard { title: i18n.t("tenant_distribution.title").to_string(), description: i18n.t("tenant_distribution.hint").to_string(), route: Route::TenantDistribution {} }
-                            OverviewCard { title: i18n.t("tenant.audit").to_string(), description: i18n.t("tenant.audit_hint").to_string(), route: Route::TenantAudit {} }
-                        }
-                    }
-                }
             } else if let Some(Err(error)) = loaded {
                 div { class: "alert alert-error", role: "alert", {user_error_message(i18n, &error)} }
             } else {

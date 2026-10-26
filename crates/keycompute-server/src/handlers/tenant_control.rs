@@ -201,6 +201,15 @@ pub struct AcceptInvitationResponse {
     pub membership: TenantMemberRecord,
 }
 
+#[derive(Debug, Serialize)]
+pub struct InvitationPreviewResponse {
+    pub tenant_name: String,
+    pub inviter: String,
+    pub invited_email: String,
+    pub tenant_role: TenantRole,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 fn default_page() -> i64 {
     1
 }
@@ -764,6 +773,42 @@ pub async fn accept_invitation(
     }))
 }
 
+fn mask_email(value: &str) -> String {
+    let Some((local, domain)) = value.split_once('@') else {
+        return "***".to_string();
+    };
+    let prefix = local.chars().next().unwrap_or('*');
+    format!("{prefix}***@{domain}")
+}
+
+pub async fn preview_invitation(
+    Path(path): Path<AcceptInvitationPath>,
+    State(state): State<AppState>,
+) -> Result<Json<InvitationPreviewResponse>> {
+    if path.token.len() != 64 || !path.token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::NotFound("invitation not found".into()));
+    }
+    let preview = tenant_control::preview_invitation(pool(&state)?.write_conn(), &path.token)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| ApiError::NotFound("invitation not found".into()))?;
+    let tenant_role = preview
+        .tenant_role
+        .parse()
+        .map_err(|_| ApiError::Internal("invitation role is invalid".into()))?;
+    let inviter = preview
+        .inviter_name
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| mask_email(&preview.inviter_email));
+    Ok(Json(InvitationPreviewResponse {
+        tenant_name: preview.tenant_name,
+        inviter,
+        invited_email: mask_email(&preview.invited_email),
+        tenant_role,
+        expires_at: preview.expires_at,
+    }))
+}
+
 pub async fn list_audit_events(
     access: TenantAdministration,
     Path(path): Path<TenantPath>,
@@ -816,6 +861,7 @@ pub fn router() -> Router<AppState> {
             "/api/v1/tenants/{tenant_id}/invitations/{id}/revoke",
             post(revoke_invitation),
         )
+        .route("/api/v1/invitations/{token}", get(preview_invitation))
         .route(
             "/api/v1/invitations/{token}/accept",
             post(accept_invitation),
@@ -926,6 +972,14 @@ mod tests {
         let (_, html) = invitation_email("<tenant>", "https://console.test/invite#token=x");
         assert!(html.contains("&lt;tenant&gt;"));
         assert!(!html.contains("<tenant>"));
+    }
+
+    #[test]
+    fn invitation_preview_masks_email_without_exposing_the_local_part() {
+        assert_eq!(mask_email("alice@example.com"), "a***@example.com");
+        assert_eq!(mask_email("x@example.com"), "x***@example.com");
+        assert_eq!(mask_email("invalid-address"), "***");
+        assert!(!mask_email("alice@example.com").contains("alice"));
     }
 
     #[test]

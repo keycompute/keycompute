@@ -35,6 +35,14 @@ fn is_distribution_disabled_error<T>(result: &Option<Result<T, ClientError>>) ->
     )
 }
 
+fn mask_email(email: &str) -> String {
+    let Some((local, domain)) = email.split_once('@') else {
+        return "***".to_string();
+    };
+    let visible = local.chars().next().unwrap_or('*');
+    format!("{visible}***@{domain}")
+}
+
 #[component]
 pub fn DistributionOverview() -> Element {
     let i18n = use_i18n();
@@ -125,7 +133,12 @@ fn DistributionOverviewContent() -> Element {
     };
     let link_ready = matches!(referral_code(), Some(Ok(_)));
     let invite_link_text = invite_link.clone();
+    let share_text = i18n.t_with_args(
+        "distribution.share_text",
+        &[("link", invite_link_text.as_str())],
+    );
     let copied = use_signal(|| false);
+    let shared = use_signal(|| false);
     let copied_label = i18n.t("common.copied");
     let copy_label = i18n.t("common.copy");
     let copy_manual_hint = i18n.t("common.copy_manual_hint");
@@ -235,6 +248,12 @@ fn DistributionOverviewContent() -> Element {
                                             {copy_label}
                                         }
                                     }
+                                    button {
+                                        class: "btn btn-secondary",
+                                        r#type: "button",
+                                        onclick: on_copy(share_text.clone(), copy_manual_hint.to_string(), ui_store, shared),
+                                        if shared() { {copied_label} } else { {i18n.t("distribution.copy_share_text")} }
+                                    }
                                 }
                             }
                         } else {
@@ -265,8 +284,8 @@ fn DistributionOverviewContent() -> Element {
                                             tr {
                                                 td {
                                                     div { class: "user-cell",
-                                                        span { class: "user-name", {r.name.clone().unwrap_or_else(|| r.email.clone())} }
-                                                        span { class: "user-email", "{r.email}" }
+                                                        span { class: "user-name", {r.name.clone().unwrap_or_else(|| mask_email(&r.email))} }
+                                                        span { class: "user-email", {mask_email(&r.email)} }
                                                     }
                                                 }
                                                 td { {format_time(&r.joined_at)} }

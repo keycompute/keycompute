@@ -5,7 +5,7 @@ use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::{
     api_client::{user_error_message, with_auto_refresh},
-    billing_service, payment_service,
+    payment_service,
 };
 use crate::stores::auth_store::AuthStore;
 use crate::utils::display::payment_status_label;
@@ -63,14 +63,6 @@ fn PaymentsOverviewContent() -> Element {
         })
         .await;
         KeyedResourceValue::new(request_key, result)
-    });
-
-    // 用量统计（真实数据，来自 usage_logs 表）
-    let usage_stats = use_resource(move || async move {
-        with_auto_refresh(auth_store, |token| async move {
-            billing_service::stats(&token).await
-        })
-        .await
     });
 
     let orders_request_key = (page(), page_size());
@@ -152,17 +144,6 @@ fn PaymentsOverviewContent() -> Element {
                     }
                 }
                 div { class: "stat-card",
-                    p { class: "stat-title", {i18n.t("payments.total_recharge")} }
-                    match balance() {
-                        Some(Ok(b)) => rsx! {
-                            p { class: "stat-value", {format_cny_str(&b.total_recharged)} }
-                        },
-                        _ => rsx! {
-                            p { class: "stat-value", "—" }
-                        },
-                    }
-                }
-                div { class: "stat-card",
                     p { class: "stat-title", {i18n.t("payments.total_consumed")} }
                     match balance() {
                         Some(Ok(b)) => rsx! {
@@ -172,27 +153,6 @@ fn PaymentsOverviewContent() -> Element {
                             p { class: "stat-value", "—" }
                         },
                     }
-                }
-                match usage_stats() {
-                    Some(Ok(s)) => rsx! {
-                        div { class: "stat-card",
-                            p { class: "stat-title", {i18n.t("payments.usage_requests")} }
-                            p { class: "stat-value", "{s.total_requests}" }
-                        }
-                        div { class: "stat-card",
-                            p { class: "stat-title", {i18n.t("payments.input_tokens")} }
-                            p { class: "stat-value", "{s.input_tokens}" }
-                        }
-                        div { class: "stat-card",
-                            p { class: "stat-title", {i18n.t("payments.output_tokens")} }
-                            p { class: "stat-value", "{s.output_tokens}" }
-                        }
-                        div { class: "stat-card",
-                            p { class: "stat-title", {i18n.t("payments.total_cost")} }
-                            p { class: "stat-value", "¥{crate::utils::format_money(s.total_cost)}" }
-                        }
-                    },
-                    _ => rsx! {},
                 }
             }
 

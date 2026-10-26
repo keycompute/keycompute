@@ -38,6 +38,15 @@ fn notification_label(value: &NotificationStatus) -> &'static str {
         NotificationStatus::NotApplicable => "tenant.notification_duplicate",
     }
 }
+
+fn invitation_duration_seconds(value: &str) -> Option<i64> {
+    value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|hours| (1..=168).contains(hours))
+        .and_then(|hours| hours.checked_mul(3600))
+}
 /// The router may reuse an Outlet VNode across AppShell remounts. A page-local
 /// key must discard drafts, confirmation dialogs and one-time secrets as well.
 #[component]
@@ -95,12 +104,7 @@ fn TenantInvitationsPage() -> Element {
         let Some(scope) = WorkspaceScope::from_stores(auth, users) else {
             return;
         };
-        let Some(seconds) = hours()
-            .parse::<i64>()
-            .ok()
-            .filter(|h| (1..=168).contains(h))
-            .and_then(|h| h.checked_mul(3600))
-        else {
+        let Some(seconds) = invitation_duration_seconds(&hours()) else {
             error.set(i18n.t("tenant.invalid_duration").into());
             return;
         };
@@ -192,7 +196,33 @@ fn TenantInvitationsPage() -> Element {
                 }
                 div {class:"form-field",
                     label {class:"form-label",r#for:"invite-duration",{i18n.t("tenant.duration_hours")}}
-                    input {id:"invite-duration",class:"input-field",r#type:"number",min:"1",max:"168",value:"{hours}",disabled:busy(),oninput:move |e|hours.set(e.value())}
+                    input {
+                        id:"invite-duration",
+                        class:"input-field",
+                        r#type:"number",
+                        inputmode:"numeric",
+                        min:"1",
+                        max:"168",
+                        step:"1",
+                        value:"{hours}",
+                        disabled:busy(),
+                        oninput:move |e|hours.set(e.value()),
+                    }
+                    div {class:"invite-duration-presets",role:"group",aria_label:i18n.t("tenant.duration_presets"),
+                        for (value, label) in [
+                            ("24", i18n.t("tenant.duration_24h")),
+                            ("72", i18n.t("tenant.duration_72h")),
+                            ("168", i18n.t("tenant.duration_7d")),
+                        ] {
+                            button {
+                                class: if hours() == value {"btn btn-primary btn-sm"} else {"btn btn-secondary btn-sm"},
+                                r#type:"button",
+                                disabled:busy(),
+                                onclick:move |_|hours.set(value.to_owned()),
+                                "{label}"
+                            }
+                        }
+                    }
                 }
                 button {class:"btn btn-primary",disabled:busy()||email().trim().is_empty(),onclick:create,{i18n.t("tenant.invite")}}
             }
@@ -221,4 +251,19 @@ fn TenantInvitationsPage() -> Element {
         }
         if let Some(invitation)=pending(){CommandDialog {title:i18n.t("tenant.revoke").to_string(),target:invitation.email,busy:busy(),on_cancel:move |_|pending.set(None),on_confirm:revoke}}
     }}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invitation_duration_seconds;
+
+    #[test]
+    fn invitation_duration_accepts_every_custom_hour_within_the_documented_range() {
+        assert_eq!(invitation_duration_seconds("1"), Some(3600));
+        assert_eq!(invitation_duration_seconds("48"), Some(48 * 3600));
+        assert_eq!(invitation_duration_seconds("168"), Some(168 * 3600));
+        assert_eq!(invitation_duration_seconds("0"), None);
+        assert_eq!(invitation_duration_seconds("169"), None);
+        assert_eq!(invitation_duration_seconds("1.5"), None);
+    }
 }

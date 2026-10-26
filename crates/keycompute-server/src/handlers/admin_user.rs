@@ -919,6 +919,7 @@ pub struct UpdateTenantRequest {
 #[serde(deny_unknown_fields)]
 pub struct TenantListQueryParams {
     pub search: Option<String>,
+    pub status: Option<String>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
     pub limit: Option<i64>,
@@ -1163,10 +1164,16 @@ pub async fn list_tenants(
     let scope = crate::financial_auth::global_scope(&auth.0)?;
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
+    let status = params
+        .status
+        .as_deref()
+        .map(normalize_tenant_status)
+        .transpose()?;
     let rows = PlatformIdentity::tenants(
         identity_pool(&state)?.write_conn(),
         scope,
         params.search.as_deref(),
+        status,
         page_size,
         offset,
     )

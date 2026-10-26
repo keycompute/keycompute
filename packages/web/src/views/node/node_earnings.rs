@@ -8,7 +8,7 @@ use crate::hooks::use_i18n::use_i18n;
 use crate::services::node_tips_service;
 use crate::stores::{auth_store::AuthStore, ui_store::UiStore};
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
-use crate::utils::{display::short_id, format_precise_cny_str, time::format_time};
+use crate::utils::{display::short_id, focus_element, format_precise_cny_str, time::format_time};
 use crate::views::tenant::common::TenantRequiredPage;
 
 const HISTORY_PAGE_SIZE: u32 = 20;
@@ -169,6 +169,7 @@ fn NodeEarningsContent() -> Element {
     let mut withdraw_loading = use_signal(|| false);
     #[allow(unused_mut)]
     let mut withdraw_error = use_signal(|| None::<String>);
+    let mut show_tip_history = use_signal(|| true);
 
     let show_modal = matches!(*withdraw_modal.read(), WithdrawModalState::Open);
 
@@ -232,7 +233,54 @@ fn NodeEarningsContent() -> Element {
                 }
             }
 
+            div { class: "tabs", role: "tablist", aria_label: i18n.t("node_earnings.records_tabs"),
+                button {
+                    id: "node-earnings-history-tab",
+                    class: if show_tip_history() { "tab active" } else { "tab" },
+                    role: "tab",
+                    aria_selected: show_tip_history(),
+                    aria_controls: "node-earnings-history-panel",
+                    tabindex: if show_tip_history() { "0" } else { "-1" },
+                    onclick: move |_| show_tip_history.set(true),
+                    onkeydown: move |event| match event.key() {
+                        Key::ArrowRight | Key::ArrowLeft | Key::End => {
+                            event.prevent_default();
+                            show_tip_history.set(false);
+                            focus_element("node-earnings-withdrawals-tab");
+                        }
+                        Key::Home => event.prevent_default(),
+                        _ => {}
+                    },
+                    {i18n.t("node_earnings.history_title")}
+                }
+                button {
+                    id: "node-earnings-withdrawals-tab",
+                    class: if !show_tip_history() { "tab active" } else { "tab" },
+                    role: "tab",
+                    aria_selected: !show_tip_history(),
+                    aria_controls: "node-earnings-withdrawals-panel",
+                    tabindex: if !show_tip_history() { "0" } else { "-1" },
+                    onclick: move |_| show_tip_history.set(false),
+                    onkeydown: move |event| match event.key() {
+                        Key::ArrowLeft | Key::ArrowRight | Key::Home => {
+                            event.prevent_default();
+                            show_tip_history.set(true);
+                            focus_element("node-earnings-history-tab");
+                        }
+                        Key::End => event.prevent_default(),
+                        _ => {}
+                    },
+                    {i18n.t("node_earnings.withdrawals_title")}
+                }
+            }
+
             // 小费历史
+            if show_tip_history() {
+            section {
+                id: "node-earnings-history-panel",
+                role: "tabpanel",
+                aria_labelledby: "node-earnings-history-tab",
+                tabindex: "0",
             div { class: "card table-pagination-panel",
                 div { class: "card-header",
                     h3 { class: "card-title", {i18n.t("node_earnings.history_title")} }
@@ -304,9 +352,17 @@ fn NodeEarningsContent() -> Element {
                     },
                 }
             }
+            }
+            }
 
             // 提现记录
-            div { class: "card",
+            if !show_tip_history() {
+            section {
+                id: "node-earnings-withdrawals-panel",
+                role: "tabpanel",
+                aria_labelledby: "node-earnings-withdrawals-tab",
+                tabindex: "0",
+            div { class: "card node-earnings-withdrawals",
                 div { class: "card-header",
                     h3 { class: "card-title", {i18n.t("node_earnings.withdrawals_title")} }
                 }
@@ -363,6 +419,8 @@ fn NodeEarningsContent() -> Element {
                         },
                     }
                 }
+            }
+            }
             }
 
             // 提现弹窗
@@ -514,8 +572,16 @@ fn WithdrawModal(
                         }
                     }
 
-                    p { class: "text-secondary withdraw-hint",
-                        {i18n.t("node_earnings.withdraw_hint")}
+                    ul { class: "withdraw-policy-list",
+                        li { {i18n.t("node_earnings.withdraw_minimum")} }
+                        li { {i18n.t("node_earnings.withdraw_fee")} }
+                        li {
+                            if matches!(*withdraw_method.read(), WithdrawMethod::Balance) {
+                                {i18n.t("node_earnings.withdraw_time_balance")}
+                            } else {
+                                {i18n.t("node_earnings.withdraw_time_alipay")}
+                            }
+                        }
                     }
                 }
                 div { class: "modal-footer",

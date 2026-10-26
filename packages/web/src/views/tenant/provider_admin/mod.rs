@@ -264,6 +264,16 @@ fn AccountRow(
     let edit_row = row.clone();
     let delete_row = row.clone();
     let bound = row.passthrough_binding_count > 0;
+    let capability_key = match capability_mode(&row.provider, &row.api_capabilities) {
+        "responses" => "tenant_providers.capability_responses",
+        "chat_completions" => "tenant_providers.capability_chat",
+        _ => "tenant_providers.capability_both",
+    };
+    let capability_text = format!(
+        "{}: {}",
+        i.t("tenant_providers.capabilities"),
+        i.t(capability_key)
+    );
     let action = move |op: AccountAction| {
         let mut busy = busy;
         let mut err = err;
@@ -279,7 +289,39 @@ fn AccountRow(
             busy.set(false);
         });
     };
-    rsx! {tr{td{strong{"{row.name}"} small{class:"table-meta","{row.api_key_preview}"}} td{"{row.provider}"} td{title:row.models.join(", "),"{row.models.len()}"} td{if row.is_active{span{class:"badge badge-success",{i.t("common.enabled")}}}else{span{class:"badge badge-neutral",{i.t("common.disabled")}}} small{class:"table-meta",{health_label(i,&row.health_status)}}} td{"RPM {row.rpm_limit} · TPM {row.tpm_limit}"} td{"{row.priority}"} td{if row.pool_enabled{{i.t("common.yes")}}else{{i.t("common.no")}}} td{div{class:"table-actions",button{class:"btn btn-ghost btn-sm",disabled:busy(),onclick:move |_|onedit.call(edit_row.clone()),{i.t("form.edit")}} button{class:"btn btn-ghost btn-sm",disabled:busy(),onclick:move |_|action(AccountAction::Test),{i.t("tenant_providers.test")}} button{class:"btn btn-ghost btn-sm",disabled:busy(),onclick:move |_|action(AccountAction::Refresh),{i.t("common.refresh")}} button{class:"btn btn-danger btn-sm",disabled:busy()||bound,onclick:move |_|ondelete.call(delete_row.clone()),{i.t("form.delete")}}} if !err().is_empty(){small{class:"text-danger",role:"alert","{err}"}}}}}
+    rsx! {
+        tr {
+            td { strong { "{row.name}" } small { class:"table-meta", "{row.api_key_preview}" } }
+            td {
+                "{row.provider}"
+                details { class:"table-inline-details",
+                    summary { {i.t("common.details")} }
+                    small { class:"table-meta", "{capability_text}" }
+                }
+            }
+            td { title:row.models.join(", "), "{row.models.len()}" }
+            td {
+                if row.is_active { span { class:"badge badge-success", {i.t("common.enabled")} } }
+                else { span { class:"badge badge-neutral", {i.t("common.disabled")} } }
+                small { class:"table-meta", {health_label(i,&row.health_status)} }
+            }
+            td { "RPM {row.rpm_limit} · TPM {row.tpm_limit}" }
+            td { "{row.priority}" }
+            td { if row.pool_enabled { {i.t("common.yes")} } else { {i.t("common.no")} } }
+            td {
+                details { class:"row-action-menu",
+                    summary { class:"btn btn-ghost btn-sm", aria_label:i.t("common.more"), "⋯" }
+                    div { class:"btn-group row-action-menu-popover",
+                        button { class:"btn btn-ghost btn-sm", disabled:busy(), onclick:move |_|onedit.call(edit_row.clone()), {i.t("form.edit")} }
+                        button { class:"btn btn-ghost btn-sm", disabled:busy(), onclick:move |_|action(AccountAction::Test), {i.t("tenant_providers.test")} }
+                        button { class:"btn btn-ghost btn-sm", disabled:busy(), onclick:move |_|action(AccountAction::Refresh), {i.t("common.refresh")} }
+                        button { class:"btn btn-danger btn-sm", disabled:busy()||bound, onclick:move |_|ondelete.call(delete_row.clone()), {i.t("form.delete")} }
+                    }
+                }
+                if !err().is_empty() { small { class:"text-danger", role:"alert", "{err}" } }
+            }
+        }
+    }
 }
 #[component]
 fn AccountEditor(
@@ -555,7 +597,25 @@ fn BindingRow(
     };
     let id = row.id;
     let probe = move |_| action(BindingAction::Probe, id);
-    rsx! {tr{td{strong{"{row.account_name}"} small{class:"table-meta","rev {row.revision}"}} td{title:row.models_supported.join(", "),"{row.models_supported.len()}"} td{if row.pool_enabled{{i.t("common.yes")}}else{{i.t("common.no")}}} td{{health_label(i,&row.health_status)}} td{div{class:"table-actions",button{class:"btn btn-ghost btn-sm",disabled:busy(),onclick:move |_|onedit.call(edit_row.clone()),{i.t("form.edit")}} button{class:"btn btn-ghost btn-sm",disabled:busy(),onclick:probe,{i.t("tenant_providers.test")}} button{class:"btn btn-danger btn-sm",disabled:busy(),onclick:move |_|ondelete.call(delete_row.clone()),{i.t("form.delete")}}} if !err().is_empty(){small{class:"text-danger",role:"alert","{err}"}}}}}
+    rsx! {
+        tr {
+            td { strong { "{row.account_name}" } small { class:"table-meta", "rev {row.revision}" } }
+            td { title:row.models_supported.join(", "), "{row.models_supported.len()}" }
+            td { if row.pool_enabled { {i.t("common.yes")} } else { {i.t("common.no")} } }
+            td { {health_label(i,&row.health_status)} }
+            td {
+                details { class:"row-action-menu",
+                    summary { class:"btn btn-ghost btn-sm", aria_label:i.t("common.more"), "⋯" }
+                    div { class:"btn-group row-action-menu-popover",
+                        button { class:"btn btn-ghost btn-sm", disabled:busy(), onclick:move |_|onedit.call(edit_row.clone()), {i.t("form.edit")} }
+                        button { class:"btn btn-ghost btn-sm", disabled:busy(), onclick:probe, {i.t("tenant_providers.test")} }
+                        button { class:"btn btn-danger btn-sm", disabled:busy(), onclick:move |_|ondelete.call(delete_row.clone()), {i.t("form.delete")} }
+                    }
+                }
+                if !err().is_empty() { small { class:"text-danger", role:"alert", "{err}" } }
+            }
+        }
+    }
 }
 #[component]
 fn BindingEditor(

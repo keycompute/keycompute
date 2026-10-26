@@ -197,8 +197,30 @@ html, body {
   transition: opacity var(--transition-slow);
 }
 
+.sidebar-section-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  color: var(--text-tertiary);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.sidebar-section-toggle:hover,
+.sidebar-section-toggle:focus-visible {
+  color: var(--text-primary);
+}
+
+.sidebar-section-indicator {
+  font-size: 14px;
+  font-weight: var(--font-weight-normal);
+}
+
 .sidebar.collapsed .sidebar-section-title {
-  opacity: 0;
+  display: none;
 }
 
 .sidebar.collapsed .sidebar-nav {
@@ -241,7 +263,7 @@ html, body {
 .sidebar-item.active {
   background: var(--sidebar-item-active-bg);
   border-color: rgba(94, 106, 210, 0.22);
-  color: var(--color-primary-hover);
+  color: var(--color-primary-active);
   box-shadow: none;
 }
 
@@ -258,7 +280,7 @@ html, body {
 }
 
 .sidebar-item.active .sidebar-item-icon {
-  color: var(--color-primary-hover);
+  color: var(--color-primary-active);
 }
 
 .sidebar-item.active .sidebar-item-label {

@@ -333,7 +333,7 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
         .await
         .unwrap();
         assert_eq!(assigned.total, 0);
-        let tenants = PlatformIdentity::tenants(&f.db, scope, Some("settings"), 1, 0)
+        let tenants = PlatformIdentity::tenants(&f.db, scope, Some("settings"), None, 1, 0)
             .await
             .unwrap();
         assert_eq!(tenants.total, 1);
@@ -347,7 +347,7 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
                     .is_err()
             );
             assert!(
-                PlatformIdentity::tenants(&f.db, forged, None, 20, 0)
+                PlatformIdentity::tenants(&f.db, forged, None, None, 20, 0)
                     .await
                     .is_err()
             );

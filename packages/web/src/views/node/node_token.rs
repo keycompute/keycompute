@@ -316,8 +316,10 @@ fn TokenListItem(detail: TokenDetail) -> Element {
     rsx! {
         div { class: "node-token-card",
             // ── 摘要行 ──
-            div {
+            button {
                 class: "node-token-card-summary",
+                r#type: "button",
+                aria_expanded: expanded(),
                 onclick: move |_| expanded.toggle(),
                 div { class: "node-token-card-summary-main",
                     StatusDot { color: dot_color.to_string() }

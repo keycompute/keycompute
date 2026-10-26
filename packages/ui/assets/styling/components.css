@@ -280,6 +280,23 @@
   animation: spin 0.6s linear infinite;
 }
 
+/* Open dialogs must not leave the document scrollable behind the backdrop. */
+body:has(.modal-backdrop),
+body:has(.modal-overlay) {
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }

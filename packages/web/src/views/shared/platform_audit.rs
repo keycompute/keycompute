@@ -1,5 +1,5 @@
 use crate::{
-    hooks::use_i18n::use_i18n,
+    hooks::{use_debounced_search::use_debounced_search, use_i18n::use_i18n},
     services::api_client::{get_client, user_error_message, with_auto_refresh},
     stores::{
         auth_store::{AuthState, AuthStore},
@@ -13,7 +13,9 @@ use crate::{
 };
 use client_api::{
     ClientError, Result, UserStatus,
-    api::platform_audit::{PlatformAuditApi, PlatformAuditQuery, PlatformAuditRecord},
+    api::platform_audit::{
+        PlatformAuditApi, PlatformAuditOptions, PlatformAuditQuery, PlatformAuditRecord,
+    },
 };
 use dioxus::prelude::*;
 use std::future::Future;
@@ -82,6 +84,7 @@ impl AuditScope {
 struct AuditFilter {
     tenant_id: Option<Uuid>,
     request_id: Option<Uuid>,
+    actor_user_id: Option<Uuid>,
 }
 
 fn optional_uuid(value: &str) -> Option<Option<Uuid>> {
@@ -143,8 +146,33 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
     let mut cursor_history = use_signal(Vec::<String>::new);
     let mut tenant_input = use_signal(String::new);
     let mut request_input = use_signal(String::new);
+    let mut actor_input = use_signal(String::new);
     let mut filter = use_signal(AuditFilter::default);
     let mut filter_error = use_signal(String::new);
+    let tenant_search = use_debounced_search(tenant_input);
+    let actor_search = use_debounced_search(actor_input);
+    let option_data = use_resource(move || {
+        let tenant_search = tenant_search();
+        let actor_search = actor_search();
+        async move {
+            scope
+                .read(auth, users, move |token| {
+                    let tenant_search = tenant_search.clone();
+                    let actor_search = actor_search.clone();
+                    async move {
+                        PlatformAuditApi::new(&get_client())
+                            .options(
+                                (!tenant_search.is_empty()).then_some(tenant_search.as_str()),
+                                (!actor_search.is_empty()).then_some(actor_search.as_str()),
+                                20,
+                                &token,
+                            )
+                            .await
+                    }
+                })
+                .await
+        }
+    });
     let mut data = use_resource(move || {
         let filter = filter();
         let cursor = cursor();
@@ -154,6 +182,7 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
             let query = PlatformAuditQuery {
                 tenant_id: filter.tenant_id,
                 request_id: filter.request_id,
+                actor_user_id: filter.actor_user_id,
                 cursor: (!cursor.is_empty()).then_some(cursor),
                 page_size,
             };
@@ -194,10 +223,43 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
                             id: "platform-audit-tenant",
                             class: "input-field",
                             r#type: "text",
+                            list: "platform-audit-tenants",
                             maxlength: "36",
                             value: "{tenant_input}",
                             placeholder: i18n.t("platform_audit.tenant_placeholder"),
                             oninput: move |event| tenant_input.set(event.value()),
+                        }
+                        datalist { id: "platform-audit-tenants",
+                            if let Some(Ok(PlatformAuditOptions { tenants, .. })) = option_data() {
+                                for tenant in tenants {
+                                    option { value: "{tenant.id}", "{tenant.name} · {tenant.slug}" }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "form-field",
+                        label { class: "form-label", r#for: "platform-audit-actor",
+                            {i18n.t("platform_audit.actor_filter")}
+                        }
+                        input {
+                            id: "platform-audit-actor",
+                            class: "input-field",
+                            r#type: "text",
+                            list: "platform-audit-actors",
+                            maxlength: "36",
+                            value: "{actor_input}",
+                            placeholder: i18n.t("platform_audit.actor_placeholder"),
+                            oninput: move |event| actor_input.set(event.value()),
+                        }
+                        datalist { id: "platform-audit-actors",
+                            if let Some(Ok(PlatformAuditOptions { actors, .. })) = option_data() {
+                                for actor in actors {
+                                    option {
+                                        value: "{actor.id}",
+                                        label: actor.name.as_deref().filter(|name| !name.trim().is_empty()).unwrap_or(&actor.email),
+                                    }
+                                }
+                            }
                         }
                     }
                     div { class: "form-field",
@@ -227,8 +289,12 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
                                     filter_error.set(i18n.t("platform_audit.invalid_filter").into());
                                     return;
                                 };
+                                let Some(actor_user_id) = optional_uuid(&actor_input()) else {
+                                    filter_error.set(i18n.t("platform_audit.invalid_filter").into());
+                                    return;
+                                };
                                 filter_error.set(String::new());
-                                let next = AuditFilter { tenant_id, request_id };
+                                let next = AuditFilter { tenant_id, request_id, actor_user_id };
                                 let cursor_changed = !cursor().is_empty();
                                 let filter_changed = filter() != next;
                                 cursor.set(String::new());
@@ -248,6 +314,7 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
                             onclick: move |_| {
                                 tenant_input.set(String::new());
                                 request_input.set(String::new());
+                                actor_input.set(String::new());
                                 filter_error.set(String::new());
                                 let cursor_changed = !cursor().is_empty();
                                 cursor.set(String::new());
@@ -269,6 +336,11 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
                             onclick: move |_| data.restart(),
                             {i18n.t("tenant.reload")}
                         }
+                    }
+                }
+                if let Some(Err(ref option_error)) = option_data() {
+                    p { class: "form-hint text-error", role: "alert",
+                        {user_error_message(i18n, option_error)}
                     }
                 }
             }
@@ -311,9 +383,21 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
                                             PlatformAuditRow {
                                                 key: "{event.id}",
                                                 event: event.clone(),
+                                                on_actor_filter: move |actor_user_id: Uuid| {
+                                                    tenant_input.set(String::new());
+                                                    request_input.set(String::new());
+                                                    actor_input.set(actor_user_id.to_string());
+                                                    filter_error.set(String::new());
+                                                    cursor.set(String::new());
+                                                    cursor_history.write().clear();
+                                                    page.set(1);
+                                                    let next = AuditFilter { actor_user_id: Some(actor_user_id), ..Default::default() };
+                                                    if filter() == next { data.restart(); } else { filter.set(next); }
+                                                },
                                                 on_request_filter: move |request_id: Uuid| {
                                                     tenant_input.set(String::new());
                                                     request_input.set(request_id.to_string());
+                                                    actor_input.set(String::new());
                                                     filter_error.set(String::new());
                                                     cursor.set(String::new());
                                                     cursor_history.write().clear();
@@ -321,6 +405,7 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
                                                     let next = AuditFilter {
                                                         tenant_id: None,
                                                         request_id: Some(request_id),
+                                                        actor_user_id: None,
                                                     };
                                                     if filter() == next {
                                                         data.restart();
@@ -380,7 +465,11 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
 }
 
 #[component]
-fn PlatformAuditRow(event: PlatformAuditRecord, on_request_filter: EventHandler<Uuid>) -> Element {
+fn PlatformAuditRow(
+    event: PlatformAuditRecord,
+    on_actor_filter: EventHandler<Uuid>,
+    on_request_filter: EventHandler<Uuid>,
+) -> Element {
     let i18n = use_i18n();
     let actor_label = event
         .actor_name
@@ -396,7 +485,13 @@ fn PlatformAuditRow(event: PlatformAuditRecord, on_request_filter: EventHandler<
                 Badge { variant: BadgeVariant::Info, {i18n.t(scope_label_key(&event.scope_type))} }
             }
             td {
-                strong { class: "table-primary", "{actor_label}" }
+                button {
+                    class: "btn btn-ghost btn-sm",
+                    r#type: "button",
+                    title: i18n.t("platform_audit.filter_actor"),
+                    onclick: move |_| on_actor_filter.call(event.actor_user_id),
+                    strong { class: "table-primary", "{actor_label}" }
+                }
                 if event.actor_email.as_deref().is_some_and(|email| email != actor_label) {
                     span { class: "table-secondary", "{event.actor_email.as_deref().unwrap_or_default()}" }
                 }

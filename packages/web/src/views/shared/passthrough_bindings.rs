@@ -77,6 +77,13 @@ pub fn PassthroughBindings() -> Element {
                     button { class: "btn btn-primary", r#type: "button", onclick: move |_| open_new.set(Some(None)), {i.t("passthrough.add")} }
                 }
             }
+            div { class: "passthrough-relation", role: "img", aria_label: i.t("passthrough.relation_aria"),
+                span { strong { {i.t("passthrough.account")} } small { {i.t("passthrough.relation_account")} } }
+                b { aria_hidden: "true", "→" }
+                span { strong { {i.t("upstreams.passthrough")} } small { {i.t("passthrough.relation_grant")} } }
+                b { aria_hidden: "true", "→" }
+                span { strong { {i.t("passthrough.tenant")} } small { {i.t("passthrough.relation_tenant")} } }
+            }
             div { class: "toolbar",
                 input { class: "input-field", r#type: "search", value: "{query_input}", maxlength: SEARCH_MAX_LENGTH, placeholder: i.t("common.search"), aria_label: i.t("common.search"), oninput: move |e| query_input.set(e.value()) }
                 button { class: "btn btn-secondary", r#type: "button", onclick: move |_| refresh += 1, {i.t("common.refresh")} }

@@ -154,6 +154,14 @@ pub struct AcceptInvitationResponse {
     pub tenant: TenantContext,
     pub membership: TenantMember,
 }
+#[derive(Debug, Clone, Deserialize)]
+pub struct InvitationPreview {
+    pub tenant_name: String,
+    pub inviter: String,
+    pub invited_email: String,
+    pub tenant_role: TenantRole,
+    pub expires_at: String,
+}
 /// An in-memory one-time secret; not serializable and never included in Debug.
 #[derive(Clone, PartialEq, Eq)]
 pub struct InvitationToken(String);
@@ -467,6 +475,32 @@ pub async fn accept_invitation(
         .post_json(&path, &serde_json::json!({}), Some(token))
         .await
         .map_err(safe_invitation_error)
+}
+pub async fn preview_invitation(
+    client: &ApiClient,
+    invitation: &InvitationToken,
+) -> Result<InvitationPreview> {
+    let path = format!("/api/v1/invitations/{}", invitation.0);
+    client
+        .get_json_fresh(&path, None)
+        .await
+        .map_err(safe_invitation_preview_error)
+}
+
+fn safe_invitation_preview_error(error: ClientError) -> ClientError {
+    let message = "Invitation details are unavailable or expired".to_owned();
+    match error {
+        ClientError::NotFound(_) => ClientError::NotFound(message),
+        ClientError::RateLimited(mut info) => {
+            info.message = message;
+            info.scope = None;
+            ClientError::RateLimited(info)
+        }
+        ClientError::ServiceUnavailable(_) => ClientError::ServiceUnavailable(message),
+        ClientError::ServerError(_) => ClientError::ServerError(message),
+        ClientError::Network(_) => ClientError::Network(message),
+        _ => ClientError::Other(message),
+    }
 }
 fn safe_invitation_error(error: ClientError) -> ClientError {
     let message =

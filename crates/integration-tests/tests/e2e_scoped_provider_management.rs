@@ -231,6 +231,7 @@ async fn account_reads_are_scoped_and_list_count_filters_match() {
     let filter = AccountListFilter {
         provider: Some("openai".into()),
         enabled: Some(true),
+        health_status: None,
         search: Some("literal_%".into()),
         tenant_id: Some(f.a.id),
     };

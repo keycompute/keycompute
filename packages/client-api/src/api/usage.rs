@@ -61,6 +61,7 @@ impl UsageApi {
 pub struct UsageQueryParams {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
+    pub model: Option<String>,
     pub limit: Option<i32>,
     pub offset: Option<i32>,
     pub page: Option<i32>,
@@ -79,6 +80,11 @@ impl UsageQueryParams {
 
     pub fn with_end_date(mut self, date: impl Into<String>) -> Self {
         self.end_date = Some(date.into());
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
         self
     }
 
@@ -109,6 +115,9 @@ impl UsageQueryParams {
         }
         if let Some(ref end) = self.end_date {
             params.push(format!("end_date={}", encode_query_value(end)));
+        }
+        if let Some(ref model) = self.model {
+            params.push(format!("model={}", encode_query_value(model)));
         }
         if let Some(limit) = self.limit {
             params.push(format!("limit={}", limit));

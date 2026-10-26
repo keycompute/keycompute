@@ -10,7 +10,7 @@ use wiremock::{
 };
 
 #[tokio::test]
-async fn platform_audit_uses_exact_tenant_and_request_filters() {
+async fn platform_audit_uses_exact_tenant_request_and_actor_filters() {
     let server = MockServer::start().await;
     let client = ApiClient::new(ClientConfig::new(server.uri()).with_no_proxy(true)).unwrap();
     let api = PlatformAuditApi::new(&client);
@@ -22,6 +22,7 @@ async fn platform_audit_uses_exact_tenant_and_request_filters() {
         .and(path("/api/v1/platform/audit-events"))
         .and(query_param("tenant_id", tenant.to_string()))
         .and(query_param("request_id", request.to_string()))
+        .and(query_param("actor_user_id", actor.to_string()))
         .and(query_param("cursor", "opaque+/cursor="))
         .and(query_param("page_size", "25"))
         .and(header("authorization", "Bearer operator-session"))
@@ -58,6 +59,7 @@ async fn platform_audit_uses_exact_tenant_and_request_filters() {
             &PlatformAuditQuery {
                 tenant_id: Some(tenant),
                 request_id: Some(request),
+                actor_user_id: Some(actor),
                 cursor: Some("opaque+/cursor=".into()),
                 page_size: 25,
             },
@@ -87,6 +89,10 @@ async fn platform_audit_rejects_invalid_filters_paging_and_cursors_before_http()
             ..Default::default()
         },
         PlatformAuditQuery {
+            actor_user_id: Some(Uuid::nil()),
+            ..Default::default()
+        },
+        PlatformAuditQuery {
             page_size: 101,
             ..Default::default()
         },
@@ -98,6 +104,50 @@ async fn platform_audit_rejects_invalid_filters_paging_and_cursors_before_http()
         assert!(api.list(&query, "operator-session").await.is_err());
     }
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn platform_audit_options_searches_beyond_the_loaded_event_page() {
+    let server = MockServer::start().await;
+    let client = ApiClient::new(ClientConfig::new(server.uri()).with_no_proxy(true)).unwrap();
+    let api = PlatformAuditApi::new(&client);
+    let tenant = Uuid::new_v4();
+    let actor = Uuid::new_v4();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/platform/audit-options"))
+        .and(query_param("tenant_search", "tenant %&="))
+        .and(query_param("actor_search", "operator+name"))
+        .and(query_param("limit", "20"))
+        .and(header("authorization", "Bearer operator-session"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tenants": [{"id": tenant, "name": "Tenant", "slug": "tenant"}],
+            "actors": [{
+                "id": actor,
+                "email": "operator@example.invalid",
+                "name": "Operator"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let options = api
+        .options(
+            Some(" tenant %&= "),
+            Some("operator+name"),
+            20,
+            "operator-session",
+        )
+        .await
+        .unwrap();
+    assert_eq!(options.tenants[0].id, tenant);
+    assert_eq!(options.actors[0].id, actor);
+    assert!(
+        api.options(None, None, 0, "operator-session")
+            .await
+            .is_err()
+    );
+    server.verify().await;
 }
 
 #[test]

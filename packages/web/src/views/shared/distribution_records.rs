@@ -17,7 +17,7 @@ use crate::stores::user_store::UserStore;
 use crate::utils::display::{distribution_status_label, short_id};
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
-use crate::utils::{format_precise_cny_str, format_precise_money_str};
+use crate::utils::{focus_element, format_precise_cny_str, format_precise_money_str};
 
 const PAGE_SIZE: usize = 20;
 
@@ -40,6 +40,7 @@ pub fn DistributionRecords() -> Element {
     let mut rule_page = use_signal(|| 1u32);
     let mut rule_page_size = use_signal(|| PAGE_SIZE as u32);
     let mut selected_tenant = use_signal(String::new);
+    let mut show_rules = use_signal(|| true);
 
     let earnings = use_resource(move || async move {
         if can_manage_platform {
@@ -136,6 +137,12 @@ pub fn DistributionRecords() -> Element {
     let selected_id = Uuid::parse_str(selected_tenant().trim())
         .ok()
         .filter(|id| !id.is_nil());
+    let selected_name = tenants().and_then(|result| result.ok()).and_then(|items| {
+        items
+            .into_iter()
+            .find(|tenant| selected_id.is_some_and(|id| tenant.id == id.to_string()))
+            .map(|tenant| tenant.name)
+    });
     let page_desc = if can_manage_platform {
         i18n.t("distribution_records.admin_desc")
     } else {
@@ -178,18 +185,21 @@ pub fn DistributionRecords() -> Element {
                             Some(Ok(ref items)) => rsx! {
                                 div { class: "form-field platform-target-field",
                                     label { class: "form-label", r#for: "distribution-tenant", {i18n.t("distribution_records.target_label")} }
-                                    select {
+                                    input {
                                         id: "distribution-tenant",
                                         class: "input-field",
+                                        list: "distribution-tenant-options",
                                         value: "{selected_tenant}",
-                                        onchange: move |event| {
+                                        placeholder: i18n.t("distribution_records.target_placeholder"),
+                                        oninput: move |event| {
                                             selected_tenant.set(event.value());
                                             page.set(1);
                                             rule_page.set(1);
                                         },
-                                        option { value: "", {i18n.t("distribution_records.target_placeholder")} }
+                                    }
+                                    datalist { id: "distribution-tenant-options",
                                         for tenant in items.iter() {
-                                            option { value: "{tenant.id}", "{tenant.name} · {tenant.slug}" }
+                                            option { value: "{tenant.id}", label: "{tenant.name} · {tenant.slug}" }
                                         }
                                     }
                                     p { class: "form-hint", {i18n.t("distribution_records.target_safety_hint")} }
@@ -202,10 +212,57 @@ pub fn DistributionRecords() -> Element {
                 if let Some(tenant_id) = selected_id {
                     div { class: "scope-banner", role: "status",
                         span { class: "scope-banner-label", {i18n.t("distribution_records.current_target")} }
-                        code { "{tenant_id}" }
+                        strong { {selected_name.clone().unwrap_or_else(|| tenant_id.to_string())} }
                     }
 
-                    section { class: "section distribution-rules-section",
+                    nav { class: "tabs", role: "tablist", aria_label: i18n.t("distribution_records.view_tabs"),
+                        button {
+                            id: "distribution-rules-tab",
+                            class: if show_rules() { "tab active" } else { "tab" },
+                            role: "tab",
+                            aria_selected: show_rules(),
+                            aria_controls: "distribution-rules-panel",
+                            tabindex: if show_rules() { "0" } else { "-1" },
+                            onclick: move |_| show_rules.set(true),
+                            onkeydown: move |event| match event.key() {
+                                Key::ArrowRight | Key::ArrowLeft | Key::End => {
+                                    event.prevent_default();
+                                    show_rules.set(false);
+                                    focus_element("distribution-records-tab");
+                                }
+                                Key::Home => event.prevent_default(),
+                                _ => {}
+                            },
+                            {i18n.t("distribution_records.rules_title")}
+                        }
+                        button {
+                            id: "distribution-records-tab",
+                            class: if !show_rules() { "tab active" } else { "tab" },
+                            role: "tab",
+                            aria_selected: !show_rules(),
+                            aria_controls: "distribution-records-panel",
+                            tabindex: if !show_rules() { "0" } else { "-1" },
+                            onclick: move |_| show_rules.set(false),
+                            onkeydown: move |event| match event.key() {
+                                Key::ArrowLeft | Key::ArrowRight | Key::Home => {
+                                    event.prevent_default();
+                                    show_rules.set(true);
+                                    focus_element("distribution-rules-tab");
+                                }
+                                Key::End => event.prevent_default(),
+                                _ => {}
+                            },
+                            {i18n.t("distribution_records.records_title")}
+                        }
+                    }
+
+                    if show_rules() {
+                    section {
+                        id: "distribution-rules-panel",
+                        class: "section distribution-rules-section",
+                        role: "tabpanel",
+                        aria_labelledby: "distribution-rules-tab",
+                        tabindex: "0",
                         h2 { class: "section-title", {i18n.t("distribution_records.rules_title")} }
                         div { class: "section-body",
                             div { class: "alert alert-info",
@@ -320,7 +377,14 @@ pub fn DistributionRecords() -> Element {
                             }
                         }
                     }
+                    }
 
+                    if !show_rules() {
+                    section {
+                        id: "distribution-records-panel",
+                        role: "tabpanel",
+                        aria_labelledby: "distribution-records-tab",
+                        tabindex: "0",
                     {
                         let request_key = (selected_tenant(), page(), page_size());
                         let current_records = current_keyed_value(
@@ -414,6 +478,8 @@ pub fn DistributionRecords() -> Element {
                                 },
                             }
                         }
+                    }
+                    }
                     }
                 } else if tenants().as_ref().is_some_and(|result| result.as_ref().is_ok_and(|items| !items.is_empty())) {
                     div { class: "empty-state platform-target-empty",

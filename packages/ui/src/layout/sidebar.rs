@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use std::collections::BTreeSet;
 
 use crate::icons::{
     IconActivity, IconBarChart, IconBuilding, IconChevronLeft, IconChevronRight, IconClipboardList,
@@ -30,6 +31,8 @@ impl NavItem {
 /// 导航分组
 #[derive(Clone, PartialEq)]
 pub struct NavSection {
+    /// Stable identifier used for interaction state; must not be localized.
+    pub id: String,
     /// 分组标题（显示在侧边栏）
     pub title: Option<String>,
     pub items: Vec<NavItem>,
@@ -55,6 +58,18 @@ pub enum NavIcon {
     ClipboardList,
 }
 
+fn section_is_collapsed(section: &NavSection, collapsed: &BTreeSet<String>) -> bool {
+    section.title.is_some() && collapsed.contains(&section.id)
+}
+
+fn section_items_visible(
+    section: &NavSection,
+    collapsed: &BTreeSet<String>,
+    sidebar_collapsed: bool,
+) -> bool {
+    sidebar_collapsed || !section_is_collapsed(section, collapsed)
+}
+
 /// 侧边导航栏
 ///
 /// # Props
@@ -74,6 +89,8 @@ pub fn Sidebar(
     #[props(default)] expand_label: String,
     #[props(default)] collapse_label: String,
     #[props(default)] close_menu_title: String,
+    #[props(default = "Main navigation".to_string())] navigation_label: String,
+    #[props(default = "AI platform".to_string())] product_label: String,
     #[props(default = "KeyCompute".to_string())] site_name: String,
     #[props(default)] site_logo_src: String,
 ) -> Element {
@@ -101,6 +118,33 @@ pub fn Sidebar(
     // specific matching item once for the whole navigation so only one entry
     // can be active at a time while parent-only console routes still work.
     let active_path = active_nav_path(&sections, &current_path).map(str::to_owned);
+    let initially_collapsed = sections
+        .iter()
+        .filter_map(|section| {
+            section.title.as_ref()?;
+            (!section
+                .items
+                .iter()
+                .any(|item| active_path.as_deref() == Some(item.path.as_str())))
+            .then(|| section.id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut collapsed_sections = use_signal(move || initially_collapsed);
+    let active_section = sections.iter().find_map(|section| {
+        section.title.as_ref()?;
+        section
+            .items
+            .iter()
+            .any(|item| active_path.as_deref() == Some(item.path.as_str()))
+            .then(|| section.id.clone())
+    });
+    use_effect(use_reactive!(|active_section| {
+        if let Some(title) = active_section.as_ref()
+            && collapsed_sections.peek().contains(title)
+        {
+            collapsed_sections.write().remove(title);
+        }
+    }));
 
     // 折叠/展开图标
     let toggle_icon = if is_collapsed {
@@ -110,7 +154,7 @@ pub fn Sidebar(
     };
 
     rsx! {
-        nav { id: "app-sidebar", class: "{sidebar_class}", aria_label: "Main navigation",
+        nav { id: "app-sidebar", class: "{sidebar_class}", aria_label: "{navigation_label}",
             // Logo 区域
             div { class: "sidebar-logo",
                 if site_logo_src.trim().is_empty() {
@@ -124,7 +168,7 @@ pub fn Sidebar(
                 }
                 div { class: "sidebar-logo-copy",
                     span { class: "sidebar-logo-text", "{site_name}" }
-                    span { class: "sidebar-logo-kicker", "AI token platform" }
+                    span { class: "sidebar-logo-kicker", "{product_label}" }
                 }
                 button {
                     class: "sidebar-mobile-close",
@@ -141,13 +185,39 @@ pub fn Sidebar(
                 for section in sections.iter() {
                     div { class: "sidebar-section",
                         if let Some(title) = &section.title {
-                            div { class: "sidebar-section-title", "{title}" }
+                            {
+                                let section_id = section.id.clone();
+                                let is_open = !section_is_collapsed(section, &collapsed_sections());
+                                rsx! {
+                                    button {
+                                        class: "sidebar-section-title sidebar-section-toggle",
+                                        r#type: "button",
+                                        aria_expanded: is_open,
+                                        onclick: move |_| {
+                                            let mut state = collapsed_sections.write();
+                                            if !state.remove(&section_id) {
+                                                state.insert(section_id.clone());
+                                            }
+                                        },
+                                        span { "{title}" }
+                                        span { class: "sidebar-section-indicator", aria_hidden: "true",
+                                            if is_open { "−" } else { "+" }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        for item in section.items.iter() {
-                            SidebarNavItem {
-                                item: item.clone(),
-                                mobile_open,
-                                active: active_path.as_deref() == Some(item.path.as_str()),
+                        // Compact mode hides the section toggles, so every item
+                        // must remain reachable by its icon. Per-section
+                        // disclosure only applies while the full sidebar is
+                        // visible.
+                        if section_items_visible(section, &collapsed_sections(), is_collapsed) {
+                            for item in section.items.iter() {
+                                SidebarNavItem {
+                                    item: item.clone(),
+                                    mobile_open,
+                                    active: active_path.as_deref() == Some(item.path.as_str()),
+                                }
                             }
                         }
                     }
@@ -240,7 +310,12 @@ fn nav_item_is_active(current_path: &str, item_path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{NavIcon, NavItem, NavSection, active_nav_path, nav_item_is_active};
+    use std::collections::BTreeSet;
+
+    use super::{
+        NavIcon, NavItem, NavSection, active_nav_path, nav_item_is_active, section_is_collapsed,
+        section_items_visible,
+    };
 
     #[test]
     fn nested_console_routes_keep_their_parent_navigation_active() {
@@ -259,6 +334,7 @@ mod tests {
     #[test]
     fn the_longest_matching_route_is_the_only_active_item() {
         let sections = vec![NavSection {
+            id: "test".to_string(),
             title: None,
             items: vec![
                 NavItem::new("Finance", "/tenant/finance", NavIcon::Wallet),
@@ -278,5 +354,21 @@ mod tests {
             active_nav_path(&sections, "/tenant/finance"),
             Some("/tenant/finance")
         );
+    }
+
+    #[test]
+    fn translated_section_titles_keep_the_same_collapse_state() {
+        let mut section = NavSection {
+            id: "billing".to_string(),
+            title: Some("Billing".to_string()),
+            items: vec![],
+        };
+        let collapsed = BTreeSet::from(["billing".to_string()]);
+
+        assert!(section_is_collapsed(&section, &collapsed));
+        section.title = Some("账单".to_string());
+        assert!(section_is_collapsed(&section, &collapsed));
+        assert!(section_items_visible(&section, &collapsed, true));
+        assert!(!section_items_visible(&section, &collapsed, false));
     }
 }

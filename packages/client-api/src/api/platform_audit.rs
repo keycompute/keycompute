@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub struct PlatformAuditQuery {
     pub tenant_id: Option<Uuid>,
     pub request_id: Option<Uuid>,
+    pub actor_user_id: Option<Uuid>,
     pub cursor: Option<String>,
     pub page_size: u32,
 }
@@ -27,6 +28,7 @@ impl PlatformAuditQuery {
         }
         if self.tenant_id.is_some_and(|id| id.is_nil())
             || self.request_id.is_some_and(|id| id.is_nil())
+            || self.actor_user_id.is_some_and(|id| id.is_nil())
         {
             return Err(ClientError::Config(
                 "Platform audit filters require nonzero UUIDs".into(),
@@ -52,6 +54,9 @@ impl PlatformAuditQuery {
         }
         if let Some(request_id) = self.request_id {
             values.push(format!("request_id={request_id}"));
+        }
+        if let Some(actor_user_id) = self.actor_user_id {
+            values.push(format!("actor_user_id={actor_user_id}"));
         }
         Ok(values.join("&"))
     }
@@ -90,6 +95,26 @@ pub struct PlatformAuditPage {
     pub page_size: i64,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PlatformAuditTenantOption {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PlatformAuditActorOption {
+    pub id: Uuid,
+    pub email: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PlatformAuditOptions {
+    pub tenants: Vec<PlatformAuditTenantOption>,
+    pub actors: Vec<PlatformAuditActorOption>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PlatformAuditApi {
     client: ApiClient,
@@ -106,6 +131,40 @@ impl PlatformAuditApi {
         self.client
             .get_json_fresh(
                 &format!("/api/v1/platform/audit-events?{}", query.query_string()?),
+                Some(token),
+            )
+            .await
+    }
+
+    pub async fn options(
+        &self,
+        tenant_search: Option<&str>,
+        actor_search: Option<&str>,
+        limit: u32,
+        token: &str,
+    ) -> Result<PlatformAuditOptions> {
+        if limit == 0 || limit > 50 {
+            return Err(ClientError::Config(
+                "Platform audit option limit is outside the supported range".into(),
+            ));
+        }
+        let mut values = vec![format!("limit={limit}")];
+        for (key, value) in [
+            ("tenant_search", tenant_search),
+            ("actor_search", actor_search),
+        ] {
+            if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+                if value.len() > 128 || value.chars().any(char::is_control) {
+                    return Err(ClientError::Config(
+                        "Platform audit option search is invalid".into(),
+                    ));
+                }
+                values.push(format!("{key}={}", encode_query_value(value)));
+            }
+        }
+        self.client
+            .get_json_fresh(
+                &format!("/api/v1/platform/audit-options?{}", values.join("&")),
                 Some(token),
             )
             .await

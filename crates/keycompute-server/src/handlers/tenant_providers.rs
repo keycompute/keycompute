@@ -249,6 +249,7 @@ pub async fn list_accounts(
     let filter = AccountListFilter {
         provider: query.provider,
         enabled,
+        health_status: None,
         search: query.search,
         tenant_id: Some(path.tenant_id),
     };
