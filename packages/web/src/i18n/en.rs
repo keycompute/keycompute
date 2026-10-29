@@ -100,6 +100,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     // ── Navigation ──────────────────────────────
     m.insert("nav.home", "Home");
+    m.insert("common.skip_to_content", "Skip to main content");
     m.insert("nav.usage", "Usage");
     m.insert("nav.billing", "Billing");
     m.insert("nav.api_keys", "API Keys");
@@ -157,6 +158,14 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "auth.reset_subtitle",
         "Enter your username and email, and we'll send a reset link after verification",
+    );
+    m.insert(
+        "auth.reset_new_password_subtitle",
+        "Set a new password. You will need to sign in again when finished.",
+    );
+    m.insert(
+        "auth.reset_check_email_hint",
+        "Check your inbox and spam folder; reset links are usually valid for a limited time.",
     );
     m.insert(
         "auth.reset_sent",
@@ -427,7 +436,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.cost", "Cost");
     m.insert("dashboard.greeting", "Hello");
     m.insert("dashboard.subtitle", "Here is your console overview");
-    m.insert("dashboard.api_calls", "API Calls");
+    m.insert("dashboard.api_calls", "Total API calls");
     m.insert("dashboard.weekly_total", "This Week");
     m.insert("dashboard.balance", "Account Balance");
     m.insert("dashboard.available", "Available");
@@ -522,6 +531,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.close_saved", "Saved, close");
     m.insert("api_keys.create_title", "Create API Key");
     m.insert("api_keys.name", "Name");
+    m.insert("api_keys.name_required", "Enter a name");
     m.insert("api_keys.name_placeholder", "Name this key");
     m.insert("api_keys.creating", "Creating...");
     m.insert("api_keys.create_failed", "Create failed");
@@ -582,7 +592,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "home.features.routing.desc",
         "Intelligent model scheduling with optimal path selection",
     );
-    m.insert("home.features.billing.title", "Real-time Billing");
+    m.insert("home.features.billing.title", "Usage-based billing");
     m.insert(
         "home.features.billing.desc",
         "Precise metering, instant settlement, transparent consumption",
@@ -684,7 +694,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("req.submitting", "Submitting…");
     m.insert(
         "req.privacy",
-        "By submitting you agree to the Privacy Policy; we keep your information secure",
+        "We use this information only to contact you and handle it with care.",
     );
     m.insert("req.success", "Received. We will contact you shortly");
     m.insert("req.err.contact_required", "Please provide a contact");
@@ -704,7 +714,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Unified LLM access, intelligent routing, real-time billing, and end-to-end observability. An enterprise-ready AI token compute platform out of the box.",
     );
     m.insert("login.feature_routing", "Smart Routing");
-    m.insert("login.feature_billing", "Real-time Billing");
+    m.insert("login.feature_billing", "Usage-based billing");
     m.insert("login.feature_ha", "Node Leasing");
     m.insert("login.feature_api", "Distributed Cluster");
     m.insert("login.feature_metering", "Precise Metering");
@@ -786,6 +796,32 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Use a stronger password with more characters, mixed case, and symbols when possible.",
     );
     m.insert(
+        "account_settings.password_requirements",
+        "Password requirements:",
+    );
+    m.insert(
+        "account_settings.password_rule_length",
+        "At least 8 characters",
+    );
+    m.insert(
+        "account_settings.password_rule_uppercase",
+        "Contains an uppercase letter",
+    );
+    m.insert(
+        "account_settings.password_rule_lowercase",
+        "Contains a lowercase letter",
+    );
+    m.insert("account_settings.password_rule_digit", "Contains a number");
+    m.insert(
+        "account_settings.password_rule_special",
+        "Contains a special character",
+    );
+    m.insert("account_settings.password_match_valid", "Passwords match");
+    m.insert(
+        "account_settings.password_match_invalid",
+        "Passwords do not match",
+    );
+    m.insert(
         "account_settings.new_password_placeholder",
         "Enter a new password (at least 8 characters)",
     );
@@ -817,6 +853,11 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "The returned session does not match this identity and tenant selection",
     );
     m.insert("profile.user_id", "User ID");
+    m.insert("profile.technical_details", "Technical details");
+    m.insert(
+        "profile.technical_details_hint",
+        "Usually only needed when troubleshooting or contacting support.",
+    );
     m.insert("profile.edit", "Edit Profile");
 
     // ── Usage ───────────────────────────────────
@@ -856,7 +897,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("payments.title", "Payments and Billing");
     m.insert(
         "payments.subtitle",
-        "Review account balance, recharge records, and billing details",
+        "Review account balance, recharge records, and usage summary",
     );
     m.insert("payments.recharge_now", "Recharge Now");
     m.insert("payments.account_balance", "Account Balance");
@@ -1234,23 +1275,20 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     // ── Dashboard ───────────────────────────────
     m.insert(
         "dashboard.subtitle_long",
-        "This is your console overview, including live metrics, recent activity, and key actions for the current account.",
+        "A concise view of your latest account metrics, recent activity, and common actions.",
     );
     m.insert("dashboard.balance_available", "Available Balance");
     m.insert("dashboard.total_cost", "Total Cost");
-    m.insert("dashboard.meta_usage", "Aggregated from real usage data");
-    m.insert(
-        "dashboard.meta_balance",
-        "Returned from live account balance",
-    );
+    m.insert("dashboard.meta_usage", "Based on recorded model calls");
+    m.insert("dashboard.meta_balance", "Current available balance");
     m.insert("dashboard.meta_keys", "Currently enabled keys");
-    m.insert("dashboard.meta_cost", "Aggregated from real usage_logs");
+    m.insert("dashboard.meta_cost", "Based on recorded usage");
     m.insert("dashboard.recent_active_days", "Recent 7 Active Days");
     m.insert(
         "dashboard.recent_active_days_desc",
         "Aggregated from real request records to quickly gauge recent activity changes.",
     );
-    m.insert("dashboard.live_data", "Live Data");
+    m.insert("dashboard.live_data", "Latest data");
     m.insert(
         "dashboard.quick_links_desc",
         "Organized around recharge, keys, and account operations.",
@@ -1276,7 +1314,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("dashboard.recent_calls", "Recent Calls");
     m.insert(
         "dashboard.recent_calls_desc",
-        "Uses real usage records as the console activity stream.",
+        "Recent model call records from this account.",
     );
     m.insert("dashboard.no_recent_calls", "No recent call records.");
     m.insert("dashboard.active_keys_panel", "Active Keys");
@@ -2528,6 +2566,11 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("node_earnings.status_rejected", "Rejected");
     m.insert("node_earnings.withdraw_btn", "Request Withdrawal");
     m.insert("node_earnings.withdraw_title", "Request Withdrawal");
+    m.insert("node_earnings.withdraw_amount", "Withdrawal amount");
+    m.insert(
+        "node_earnings.withdraw_amount_hint",
+        "All available earnings are withdrawn in one request. Confirm the destination before submitting.",
+    );
     m.insert("node_earnings.withdraw_method", "Withdrawal Method");
     m.insert("node_earnings.method_balance", "To Balance");
     m.insert(

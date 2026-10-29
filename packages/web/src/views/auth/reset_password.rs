@@ -6,6 +6,7 @@ use crate::router::Route;
 use crate::services::api_client::user_error_message;
 use crate::services::auth_service;
 use crate::stores::public_settings_store::PublicSettingsStore;
+use crate::utils::password::password_rules;
 
 /// 重置密码页面
 /// 路由：/auth/reset-password/:token
@@ -29,6 +30,23 @@ pub fn ResetPassword(token: String) -> Element {
     let mut submitting = use_signal(|| false);
     let mut error_msg = use_signal(|| None::<String>);
     let mut success = use_signal(|| false);
+    let mut show_password = use_signal(|| false);
+    let mut show_confirm = use_signal(|| false);
+
+    let password_value = password();
+    let confirm_value = confirm();
+    let rules = password_rules(&password_value);
+    let passwords_match = !confirm_value.is_empty() && password_value == confirm_value;
+    let password_toggle_label = if show_password() {
+        i18n.t("login.hide_password")
+    } else {
+        i18n.t("login.show_password")
+    };
+    let confirm_toggle_label = if show_confirm() {
+        i18n.t("login.hide_password")
+    } else {
+        i18n.t("login.show_password")
+    };
 
     let on_submit = {
         let token = token.clone();
@@ -45,8 +63,33 @@ pub fn ResetPassword(token: String) -> Element {
                 error_msg.set(Some(i18n.t("form.password_mismatch").to_string()));
                 return;
             }
-            if pwd.len() < 8 {
+            let rules = password_rules(&pwd);
+            if !rules.length {
                 error_msg.set(Some(i18n.t("form.password_too_short").to_string()));
+                return;
+            }
+            if !rules.uppercase {
+                error_msg.set(Some(
+                    i18n.t("account_settings.password_no_uppercase").to_string(),
+                ));
+                return;
+            }
+            if !rules.lowercase {
+                error_msg.set(Some(
+                    i18n.t("account_settings.password_no_lowercase").to_string(),
+                ));
+                return;
+            }
+            if !rules.digit {
+                error_msg.set(Some(
+                    i18n.t("account_settings.password_no_digit").to_string(),
+                ));
+                return;
+            }
+            if !rules.special {
+                error_msg.set(Some(
+                    i18n.t("account_settings.password_no_special").to_string(),
+                ));
                 return;
             }
 
@@ -119,7 +162,7 @@ pub fn ResetPassword(token: String) -> Element {
                     div { class: "kc-login-card kc-auth-card",
                         div { class: "kc-login-header",
                             h1 { class: "kc-login-title", {i18n.t("auth.reset_password")} }
-                            p { class: "kc-login-subtitle", {i18n.t("auth.reset_subtitle")} }
+                            p { class: "kc-login-subtitle", {i18n.t("auth.reset_new_password_subtitle")} }
                         }
 
                         if success() {
@@ -143,33 +186,68 @@ pub fn ResetPassword(token: String) -> Element {
                                     label { class: "kc-login-form-label", r#for: "reset-password",
                                         {i18n.t("account_settings.new_password")}
                                     }
-                                    input {
-                                        id: "reset-password",
-                                        class: "kc-login-form-input",
-                                        r#type: "password",
-                                        autocomplete: "new-password",
-                                        placeholder: i18n.t("account_settings.new_password_placeholder"),
-                                        value: "{password}",
-                                        oninput: move |event| password.set(event.value()),
-                                        disabled: submitting(),
+                                    div { class: "kc-reset-password-wrapper",
+                                        input {
+                                            id: "reset-password",
+                                            class: "kc-login-form-input",
+                                            r#type: if show_password() { "text" } else { "password" },
+                                            autocomplete: "new-password",
+                                            placeholder: i18n.t("account_settings.new_password_placeholder"),
+                                            value: "{password}",
+                                            oninput: move |event| password.set(event.value()),
+                                            disabled: submitting(),
+                                        }
+                                        button {
+                                            class: "kc-reset-password-toggle",
+                                            r#type: "button",
+                                            aria_label: "{password_toggle_label}",
+                                            onclick: move |_| show_password.toggle(),
+                                            disabled: submitting(),
+                                            "{password_toggle_label}"
+                                        }
+                                        div { class: "kc-login-input-glow" }
                                     }
-                                    div { class: "kc-login-input-glow" }
+                                    div { class: "password-requirements kc-reset-password-requirements", aria_live: "polite",
+                                        p { class: "kc-auth-hint", {i18n.t("account_settings.password_requirements")} }
+                                        ul {
+                                            li { class: if rules.length { "password-rule valid" } else { "password-rule" }, if rules.length { "✓" } else { "•" }, " ", {i18n.t("account_settings.password_rule_length")} }
+                                            li { class: if rules.uppercase { "password-rule valid" } else { "password-rule" }, if rules.uppercase { "✓" } else { "•" }, " ", {i18n.t("account_settings.password_rule_uppercase")} }
+                                            li { class: if rules.lowercase { "password-rule valid" } else { "password-rule" }, if rules.lowercase { "✓" } else { "•" }, " ", {i18n.t("account_settings.password_rule_lowercase")} }
+                                            li { class: if rules.digit { "password-rule valid" } else { "password-rule" }, if rules.digit { "✓" } else { "•" }, " ", {i18n.t("account_settings.password_rule_digit")} }
+                                            li { class: if rules.special { "password-rule valid" } else { "password-rule" }, if rules.special { "✓" } else { "•" }, " ", {i18n.t("account_settings.password_rule_special")} }
+                                        }
+                                    }
                                 }
                                 div { class: "kc-login-form-group",
                                     label { class: "kc-login-form-label", r#for: "reset-password-confirm",
                                         {i18n.t("auth.confirm_password")}
                                     }
-                                    input {
-                                        id: "reset-password-confirm",
-                                        class: "kc-login-form-input",
-                                        r#type: "password",
-                                        autocomplete: "new-password",
-                                        placeholder: i18n.t("account_settings.confirm_password_placeholder"),
-                                        value: "{confirm}",
-                                        oninput: move |event| confirm.set(event.value()),
-                                        disabled: submitting(),
+                                    div { class: "kc-reset-password-wrapper",
+                                        input {
+                                            id: "reset-password-confirm",
+                                            class: "kc-login-form-input",
+                                            r#type: if show_confirm() { "text" } else { "password" },
+                                            autocomplete: "new-password",
+                                            placeholder: i18n.t("account_settings.confirm_password_placeholder"),
+                                            value: "{confirm}",
+                                            oninput: move |event| confirm.set(event.value()),
+                                            disabled: submitting(),
+                                        }
+                                        button {
+                                            class: "kc-reset-password-toggle",
+                                            r#type: "button",
+                                            aria_label: "{confirm_toggle_label}",
+                                            onclick: move |_| show_confirm.toggle(),
+                                            disabled: submitting(),
+                                            "{confirm_toggle_label}"
+                                        }
+                                        div { class: "kc-login-input-glow" }
                                     }
-                                    div { class: "kc-login-input-glow" }
+                                    if !confirm_value.is_empty() {
+                                        p { class: if passwords_match { "password-match valid" } else { "password-match invalid" },
+                                            if passwords_match { {i18n.t("account_settings.password_match_valid")} } else { {i18n.t("account_settings.password_match_invalid")} }
+                                        }
+                                    }
                                 }
                                 button {
                                     class: "kc-login-button",

@@ -26,6 +26,71 @@ use crate::views::{
     user::{UserProfile, UserSettings},
 };
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct OperationsQuery {
+    pub tab: Option<String>,
+}
+
+impl OperationsQuery {
+    pub fn for_tab(tab: &str) -> Self {
+        Self {
+            tab: matches!(tab, "health" | "usage" | "capacity").then(|| tab.to_string()),
+        }
+    }
+}
+
+impl From<&str> for OperationsQuery {
+    fn from(query: &str) -> Self {
+        let tab = query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == "tab" && matches!(value, "health" | "usage" | "capacity"))
+                .then(|| value.to_string())
+        });
+        Self { tab }
+    }
+}
+
+impl std::fmt::Display for OperationsQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(tab) = &self.tab {
+            write!(f, "tab={tab}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NodeEarningsQuery {
+    pub tab: Option<String>,
+}
+
+impl NodeEarningsQuery {
+    pub fn for_tab(tab: &str) -> Self {
+        Self {
+            tab: matches!(tab, "history" | "withdrawals").then(|| tab.to_string()),
+        }
+    }
+}
+
+impl From<&str> for NodeEarningsQuery {
+    fn from(query: &str) -> Self {
+        let tab = query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == "tab" && matches!(value, "history" | "withdrawals")).then(|| value.to_string())
+        });
+        Self { tab }
+    }
+}
+
+impl std::fmt::Display for NodeEarningsQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(tab) = &self.tab {
+            write!(f, "tab={tab}")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
 pub enum Route {
@@ -72,11 +137,11 @@ pub enum Route {
         UserSettings {},
         #[route("/node/token")]
         NodeToken {},
-        #[route("/node/earnings")]
-        NodeEarnings {},
+        #[route("/node/earnings?:..query")]
+        NodeEarnings { query: NodeEarningsQuery },
 
-        #[route("/platform/operations")]
-        PlatformOperations {},
+        #[route("/platform/operations?:..query")]
+        PlatformOperations { query: OperationsQuery },
 
         #[route("/platform/audit")]
         PlatformAudit {},
@@ -225,6 +290,27 @@ mod tests {
         let route = Route::from_str("/platform/audit").unwrap();
         assert_eq!(route, Route::PlatformAudit {});
         assert_eq!(route.to_string(), "/platform/audit");
+    }
+
+    #[test]
+    fn tab_queries_survive_route_round_trips() {
+        let operations = Route::from_str("/platform/operations?tab=usage").unwrap();
+        assert_eq!(
+            operations,
+            Route::PlatformOperations {
+                query: OperationsQuery::for_tab("usage")
+            }
+        );
+        assert_eq!(operations.to_string(), "/platform/operations?tab=usage");
+
+        let earnings = Route::from_str("/node/earnings?tab=withdrawals").unwrap();
+        assert_eq!(
+            earnings,
+            Route::NodeEarnings {
+                query: NodeEarningsQuery::for_tab("withdrawals")
+            }
+        );
+        assert_eq!(earnings.to_string(), "/node/earnings?tab=withdrawals");
     }
 
     /// 邀请链接的 ?ref= 参数必须能被解析，且序列化回 URL 时不丢失

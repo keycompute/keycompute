@@ -66,7 +66,7 @@ pub fn platform_role_label(role: Option<client_api::PlatformRole>, i18n: &I18n) 
     match role {
         Some(client_api::PlatformRole::Root) => i18n.t("users.role_root").to_string(),
         Some(client_api::PlatformRole::Operator) => i18n.t("users.role_operator").to_string(),
-        Some(client_api::PlatformRole::None) | None => "—".to_string(),
+        Some(client_api::PlatformRole::None) | None => i18n.t("users.role_none").to_string(),
     }
 }
 
@@ -105,6 +105,10 @@ mod tests {
         assert_eq!(
             platform_role_label(Some(client_api::PlatformRole::Root), &zh),
             "root（平台最高权限）"
+        );
+        assert_eq!(
+            platform_role_label(None, &en),
+            "none (no platform authority)"
         );
     }
 

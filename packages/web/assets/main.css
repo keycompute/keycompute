@@ -37,6 +37,27 @@ input, textarea, select {
   font-family: inherit;
 }
 
+/* Keyboard users can bypass the landing-page navigation as well as AppShell. */
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 1001;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--color-primary, #5e6ad2);
+  color: #fff;
+  text-decoration: none;
+  transform: translateY(-180%);
+  transition: transform 150ms ease;
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+  outline: 3px solid color-mix(in srgb, var(--color-primary, #5e6ad2) 45%, white);
+  outline-offset: 2px;
+}
+
 /* ── Login Experience ───────────────────────── */
 .kc-login-page {
   --kc-login-bg-primary: #050a14;
@@ -385,6 +406,64 @@ input, textarea, select {
 
 .kc-login-toggle-password:hover {
   color: var(--kc-login-accent);
+}
+
+.kc-reset-password-wrapper {
+  position: relative;
+}
+
+.kc-reset-password-wrapper .kc-login-form-input {
+  padding-right: 9.5rem;
+}
+
+.kc-reset-password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  z-index: 1;
+  padding: 5px 7px;
+  color: var(--kc-login-text-muted);
+  font: inherit;
+  font-size: 0.75rem;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.kc-reset-password-toggle:hover,
+.kc-reset-password-toggle:focus-visible {
+  color: var(--kc-login-accent);
+  background: var(--kc-login-surface-hover);
+}
+
+.kc-reset-password-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.kc-reset-password-requirements {
+  margin: -0.75rem 0 1.5rem;
+}
+
+.kc-reset-password-requirements .kc-auth-hint {
+  margin: 0 0 6px;
+  color: var(--kc-login-text-secondary);
+}
+
+.kc-reset-password-requirements .password-rule,
+.kc-reset-password-requirements .password-match {
+  color: var(--kc-login-text-muted);
+}
+
+.kc-reset-password-requirements .password-rule.valid,
+.kc-reset-password-requirements .password-match.valid {
+  color: var(--kc-login-success);
+}
+
+.kc-reset-password-requirements .password-match.invalid {
+  color: var(--kc-login-error);
 }
 
 .kc-login-form-options {
@@ -2646,6 +2725,54 @@ select.form-input:focus {
   margin-top: 20px;
 }
 
+.profile-technical-details {
+  margin: 0 28px 28px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-card) 82%, var(--bg-primary));
+}
+
+.profile-technical-details summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.profile-technical-details[open] summary {
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.profile-technical-value {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.profile-technical-value code {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.withdraw-amount-summary {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 20px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--color-primary) 30%, var(--border-color));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--bg-card));
+}
+
+.withdraw-amount-value {
+  color: var(--text-primary);
+  font-size: 24px;
+  line-height: 1.2;
+}
+
 .settings-page {
   max-width: 980px;
 }
@@ -2657,6 +2784,63 @@ select.form-input:focus {
 
 .settings-form {
   max-width: 560px;
+}
+
+.password-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.password-input-wrap .form-input {
+  min-width: 0;
+  flex: 1;
+}
+
+.password-toggle {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+}
+
+.password-toggle:hover,
+.password-toggle:focus-visible {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.password-requirements {
+  margin-top: 10px;
+}
+
+.password-requirements ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 16px;
+  margin-top: 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.password-rule,
+.password-match {
+  color: var(--text-tertiary);
+  font-size: var(--font-size-xs);
+}
+
+.password-rule.valid,
+.password-match.valid {
+  color: var(--color-success);
+}
+
+.password-match.invalid {
+  color: var(--color-error);
 }
 
 .settings-console-page {
@@ -4831,6 +5015,14 @@ select.form-input:focus {
     width: 100%;
   }
 
+  .profile-technical-details {
+    margin-inline: 20px;
+  }
+
+  .password-requirements ul {
+    grid-template-columns: 1fr;
+  }
+
   .card-body,
   .section > .section-title,
   .card > .section-title,
@@ -5811,6 +6003,37 @@ select.form-input:focus {
   transition: color 0.2s;
 }
 .kc-auth-toggle-password:hover { color: var(--kc-home-accent); }
+.kc-auth-password-requirements {
+  margin: -6px 0 16px;
+}
+.kc-auth-password-requirements .kc-auth-hint {
+  margin: 0 0 6px;
+}
+.kc-auth-password-requirements ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.kc-auth-password-requirements .password-rule,
+.kc-auth-password-requirements .password-match {
+  color: var(--kc-home-text-muted);
+  font-size: 0.75rem;
+}
+.kc-auth-password-requirements .password-rule.valid,
+.kc-auth-password-requirements .password-match.valid {
+  color: var(--kc-home-success);
+}
+.kc-auth-password-requirements .password-match.invalid {
+  color: var(--kc-home-error);
+}
+@media (max-width: 520px) {
+  .kc-auth-password-requirements ul {
+    grid-template-columns: 1fr;
+  }
+}
 .kc-auth-form-options {
   display: flex;
   align-items: flex-start;

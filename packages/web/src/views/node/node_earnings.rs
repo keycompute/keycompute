@@ -1,10 +1,11 @@
 use dioxus::prelude::*;
 use ui::{
-    Alert, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, PageHeader,
+    Alert, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Modal, PageHeader,
     Pagination, Table, TableHead,
 };
 
 use crate::hooks::use_i18n::use_i18n;
+use crate::router::{NodeEarningsQuery, Route};
 use crate::services::node_tips_service;
 use crate::stores::{auth_store::AuthStore, ui_store::UiStore};
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
@@ -59,13 +60,6 @@ impl WithdrawMethod {
     }
 }
 
-/// 提现弹窗状态
-#[derive(Clone, PartialEq)]
-enum WithdrawModalState {
-    Closed,
-    Open,
-}
-
 /// 提现记录状态枚举
 #[derive(Clone, PartialEq)]
 enum WithdrawalStatus {
@@ -96,18 +90,18 @@ impl WithdrawalStatus {
 }
 
 #[component]
-pub fn NodeEarnings() -> Element {
-    rsx! { TenantRequiredPage { NodeEarningsContent {} } }
+pub fn NodeEarnings(query: NodeEarningsQuery) -> Element {
+    rsx! { TenantRequiredPage { NodeEarningsContent { query } } }
 }
 
 #[component]
-fn NodeEarningsContent() -> Element {
+fn NodeEarningsContent(query: NodeEarningsQuery) -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let _ui_store = use_context::<UiStore>();
 
     // 汇总数据 resource
-    let summary_resource = use_resource(move || {
+    let mut summary_resource = use_resource(move || {
         let auth = auth_store.clone();
         async move {
             let token = auth.token().unwrap_or_default();
@@ -148,7 +142,7 @@ fn NodeEarningsContent() -> Element {
         .max(1) as u32;
 
     // 提现记录
-    let withdrawals_resource = use_resource(move || {
+    let mut withdrawals_resource = use_resource(move || {
         let auth = auth_store.clone();
         async move {
             let token = auth.token().unwrap_or_default();
@@ -158,7 +152,7 @@ fn NodeEarningsContent() -> Element {
 
     // 提现弹窗状态
     #[allow(unused_mut)]
-    let mut withdraw_modal = use_signal(|| WithdrawModalState::Closed);
+    let mut withdraw_modal = use_signal(|| false);
     #[allow(unused_mut)]
     let mut withdraw_method = use_signal(|| WithdrawMethod::Balance);
     #[allow(unused_mut)]
@@ -169,9 +163,8 @@ fn NodeEarningsContent() -> Element {
     let mut withdraw_loading = use_signal(|| false);
     #[allow(unused_mut)]
     let mut withdraw_error = use_signal(|| None::<String>);
-    let mut show_tip_history = use_signal(|| true);
-
-    let show_modal = matches!(*withdraw_modal.read(), WithdrawModalState::Open);
+    let show_tip_history = query.tab.as_deref() != Some("withdrawals");
+    let nav = use_navigator();
 
     // 小费历史分页页脚仅在数据加载成功后渲染（与面板内表格的数据来源保持一致）
     let show_history_pagination = history_result
@@ -190,7 +183,7 @@ fn NodeEarningsContent() -> Element {
                         size: ButtonSize::Medium,
                         onclick: move |_| {
                             withdraw_error.set(None);
-                            withdraw_modal.set(WithdrawModalState::Open);
+                            withdraw_modal.set(true);
                         },
                         {i18n.t("node_earnings.withdraw_btn")}
                     }
@@ -236,16 +229,16 @@ fn NodeEarningsContent() -> Element {
             div { class: "tabs", role: "tablist", aria_label: i18n.t("node_earnings.records_tabs"),
                 button {
                     id: "node-earnings-history-tab",
-                    class: if show_tip_history() { "tab active" } else { "tab" },
+                    class: if show_tip_history { "tab active" } else { "tab" },
                     role: "tab",
-                    aria_selected: show_tip_history(),
+                    aria_selected: show_tip_history,
                     aria_controls: "node-earnings-history-panel",
-                    tabindex: if show_tip_history() { "0" } else { "-1" },
-                    onclick: move |_| show_tip_history.set(true),
+                    tabindex: if show_tip_history { "0" } else { "-1" },
+                    onclick: move |_| { nav.replace(Route::NodeEarnings { query: NodeEarningsQuery::for_tab("history") }); },
                     onkeydown: move |event| match event.key() {
                         Key::ArrowRight | Key::ArrowLeft | Key::End => {
                             event.prevent_default();
-                            show_tip_history.set(false);
+                            nav.replace(Route::NodeEarnings { query: NodeEarningsQuery::for_tab("withdrawals") });
                             focus_element("node-earnings-withdrawals-tab");
                         }
                         Key::Home => event.prevent_default(),
@@ -255,16 +248,16 @@ fn NodeEarningsContent() -> Element {
                 }
                 button {
                     id: "node-earnings-withdrawals-tab",
-                    class: if !show_tip_history() { "tab active" } else { "tab" },
+                    class: if !show_tip_history { "tab active" } else { "tab" },
                     role: "tab",
-                    aria_selected: !show_tip_history(),
+                    aria_selected: !show_tip_history,
                     aria_controls: "node-earnings-withdrawals-panel",
-                    tabindex: if !show_tip_history() { "0" } else { "-1" },
-                    onclick: move |_| show_tip_history.set(false),
+                    tabindex: if !show_tip_history { "0" } else { "-1" },
+                    onclick: move |_| { nav.replace(Route::NodeEarnings { query: NodeEarningsQuery::for_tab("withdrawals") }); },
                     onkeydown: move |event| match event.key() {
                         Key::ArrowLeft | Key::ArrowRight | Key::Home => {
                             event.prevent_default();
-                            show_tip_history.set(true);
+                            nav.replace(Route::NodeEarnings { query: NodeEarningsQuery::for_tab("history") });
                             focus_element("node-earnings-history-tab");
                         }
                         Key::End => event.prevent_default(),
@@ -275,7 +268,7 @@ fn NodeEarningsContent() -> Element {
             }
 
             // 小费历史
-            if show_tip_history() {
+            if show_tip_history {
             section {
                 id: "node-earnings-history-panel",
                 role: "tabpanel",
@@ -356,7 +349,7 @@ fn NodeEarningsContent() -> Element {
             }
 
             // 提现记录
-            if !show_tip_history() {
+            if !show_tip_history {
             section {
                 id: "node-earnings-withdrawals-panel",
                 role: "tabpanel",
@@ -424,15 +417,22 @@ fn NodeEarningsContent() -> Element {
             }
 
             // 提现弹窗
-            if show_modal {
-                WithdrawModal {
-                    withdraw_modal,
-                    withdraw_method,
-                    alipay_account,
-                    real_name,
-                    withdraw_loading,
-                    withdraw_error,
-                }
+            WithdrawModal {
+                withdraw_modal,
+                withdraw_method,
+                alipay_account,
+                real_name,
+                withdraw_loading,
+                withdraw_error,
+                withdrawable_amount: summary_resource()
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(|summary| format_precise_cny_str(&summary.pending_amount))
+                    .unwrap_or_else(|| "—".to_string()),
+                on_success: move |_| {
+                    summary_resource.restart();
+                    withdrawals_resource.restart();
+                },
             }
         }
     }
@@ -470,12 +470,14 @@ fn WithdrawalStatusBadge(status: String) -> Element {
 /// 提交逻辑直接内联在弹窗的提交按钮中，避免复杂闭包无法转换为 EventHandler<()> 的问题。
 #[component]
 fn WithdrawModal(
-    mut withdraw_modal: Signal<WithdrawModalState>,
+    mut withdraw_modal: Signal<bool>,
     mut withdraw_method: Signal<WithdrawMethod>,
     mut alipay_account: Signal<String>,
     mut real_name: Signal<String>,
     withdraw_loading: Signal<bool>,
     withdraw_error: Signal<Option<String>>,
+    withdrawable_amount: String,
+    on_success: EventHandler<()>,
 ) -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
@@ -488,58 +490,155 @@ fn WithdrawModal(
     let mut submitted = use_signal(|| None::<client_api::api::node_tips::CreateWithdrawalRequest>);
 
     rsx! {
-        div {
-            class: "modal-overlay",
-            onclick: move |_| {
-                if !withdraw_loading() {
-                    withdraw_modal.set(WithdrawModalState::Closed);
-                }
-            },
-            div {
-                class: "modal",
-                role: "dialog",
-                aria_modal: "true",
-                aria_label: i18n.t("node_earnings.withdraw_title"),
-                // 阻止冒泡
-                onclick: move |evt| {
-                    evt.stop_propagation();
-                },
-                div { class: "modal-header",
-                    h3 { class: "modal-title", {i18n.t("node_earnings.withdraw_title")} }
-                    button {
-                        class: "modal-close",
-                        r#type: "button",
-                        aria_label: i18n.t("common.close"),
-                        disabled: withdraw_loading(),
-                        onclick: move |_| withdraw_modal.set(WithdrawModalState::Closed),
-                        "✕"
+    Modal {
+        open: withdraw_modal,
+        title: i18n.t("node_earnings.withdraw_title").to_string(),
+        close_label: i18n.t("common.close").to_string(),
+        onclose: move |_| {
+            if !withdraw_loading() {
+                withdraw_modal.set(false);
+            }
+        },
+        footer: rsx! {
+            Button {
+                variant: ButtonVariant::Ghost,
+                size: ButtonSize::Medium,
+                disabled: withdraw_loading(),
+                onclick: move |_| withdraw_modal.set(false),
+                {i18n.t("form.cancel")}
+            }
+            Button {
+                variant: ButtonVariant::Primary,
+                size: ButtonSize::Medium,
+                disabled: withdraw_loading(),
+                onclick: move |_| {
+                    let current=auth_store.state.peek().clone();
+                    if current.session_id!=opened_identity.0 || current.selected_tenant_id!=opened_identity.1 {
+                        withdraw_modal.set(false);
+                        return;
                     }
-                }
-                div { class: "modal-body",
-                    if let Some(ref err) = withdraw_error() {
-                        Alert { variant: AlertVariant::Error, "{err}" }
+                    let needs_alipay = withdraw_method() == WithdrawMethod::Alipay;
+                    if needs_alipay
+                        && (alipay_account().trim().is_empty() || real_name().trim().is_empty())
+                    {
+                        withdraw_error.set(Some(i18n.t("node_earnings.fill_alipay").to_string()));
+                        return;
                     }
+                    withdraw_loading.set(true);
+                    withdraw_error.set(None);
 
-                    // 选择提现方式
-                    div { class: "form-group",
-                        label { class: "form-label", {i18n.t("node_earnings.withdraw_method")} }
-                        div { class: "withdraw-method-grid",
-                            for method in [WithdrawMethod::Balance, WithdrawMethod::Alipay] {
-                                {
-                                    let m = method.clone();
-                                    let is_active = *withdraw_method.read() == method;
-                                    rsx! {
-                                        button {
-                                            class: if is_active { "withdraw-method-card active" } else { "withdraw-method-card" },
-                                            r#type: "button",
-                                            onclick: move |_| withdraw_method.set(m.clone()),
-                                            strong { "{m.label()}" }
-                                            p { class: "text-secondary",
-                                                if m == WithdrawMethod::Balance {
-                                                    {i18n.t("node_earnings.method_balance_desc")}
-                                                } else {
-                                                    {i18n.t("node_earnings.method_alipay_desc")}
-                                                }
+                    let auth = auth_store.clone();
+                    let mut ui = ui_store.clone();
+                    let i18n_clone = i18n.clone();
+                    let method_val = withdraw_method().value().to_string();
+                    let alipay_opt = if needs_alipay {
+                        Some(alipay_account().to_string())
+                    } else {
+                        None
+                    };
+                    let name_opt = if needs_alipay { Some(real_name().to_string()) } else { None };
+                    let observed = auth.state.peek().clone();
+                    let mut intent = client_api::api::node_tips::CreateWithdrawalRequest {
+                        request_id: uuid::Uuid::new_v4(), currency: "CNY".into(),
+                        withdrawal_type: method_val.clone(),alipay_account:alipay_opt.clone(),real_name:name_opt.clone(),
+                    };
+                    if let Some(previous) = submitted.peek().as_ref()
+                        && previous.withdrawal_type==intent.withdrawal_type
+                        && previous.alipay_account==intent.alipay_account
+                        && previous.real_name==intent.real_name {
+                        intent.request_id=previous.request_id;
+                    }
+                    let request_id = intent.request_id;
+                    submitted.set(Some(intent));
+                    let mut wm = withdraw_modal.clone();
+                    let mut aa = alipay_account.clone();
+                    let mut rn = real_name.clone();
+                    let mut wl = withdraw_loading.clone();
+                    spawn(async move {
+                        let token = observed.access_token.clone().unwrap_or_default();
+                        let alipay_str = alipay_opt.as_deref();
+                        let name_str = name_opt.as_deref();
+                        match node_tips_service::create_withdrawal(
+                                &token,
+                                request_id,
+                                &method_val,
+                                alipay_str,
+                                name_str,
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                if !withdrawal_completion_matches(&auth.state.peek(), &observed) { return; }
+                                wl.set(false);
+                                wm.set(false);
+                                aa.set(String::new());
+                                rn.set(String::new());
+                                on_success.call(());
+                                let msg = if needs_alipay {
+                                    i18n_clone.t("node_earnings.withdraw_alipay_success")
+                                } else {
+                                    i18n_clone.t("node_earnings.withdraw_balance_success")
+                                };
+                                ui.show_success(msg);
+                            }
+                            Err(e) => {
+                                if !withdrawal_completion_matches(&auth.state.peek(), &observed) { return; }
+                                wl.set(false);
+                                withdraw_error
+                                    .set(
+                                        Some(
+                                            format!(
+                                                "{}: {}",
+                                                i18n_clone.t("node_earnings.withdraw_failed"),
+                                                e,
+                                            ),
+                                        ),
+                                    );
+                            }
+                        }
+                    });
+                },
+                if withdraw_loading() {
+                    span { class: "spinner spinner-sm" }
+                    " {i18n.t(\"form.submit\")}"
+                } else {
+                    {i18n.t("form.submit")}
+                }
+            }
+        },
+        div { class: "withdraw-amount-summary",
+            span { class: "form-label", {i18n.t("node_earnings.withdraw_amount")} }
+            strong { class: "withdraw-amount-value", "{withdrawable_amount}" }
+            p { class: "form-hint", {i18n.t("node_earnings.withdraw_amount_hint")} }
+        }
+        div {
+                if let Some(ref err) = withdraw_error() {
+                    Alert { variant: AlertVariant::Error, "{err}" }
+                }
+
+                // 选择提现方式
+                div { class: "form-group",
+                    label { class: "form-label", {i18n.t("node_earnings.withdraw_method")} }
+                    div { class: "withdraw-method-grid",
+                        for method in [WithdrawMethod::Balance, WithdrawMethod::Alipay] {
+                            {
+                                let m = method.clone();
+                                let is_active = *withdraw_method.read() == method;
+                                rsx! {
+                                    button {
+                                        class: if is_active { "withdraw-method-card active" } else { "withdraw-method-card" },
+                                        r#type: "button",
+                                        aria_pressed: is_active,
+                                        onclick: move |_| {
+                                            withdraw_method.set(m.clone());
+                                            withdraw_error.set(None);
+                                        },
+                                        strong { "{m.label()}" }
+                                        p { class: "text-secondary",
+                                            if m == WithdrawMethod::Balance {
+                                                {i18n.t("node_earnings.method_balance_desc")}
+                                            } else {
+                                                {i18n.t("node_earnings.method_alipay_desc")}
                                             }
                                         }
                                     }
@@ -547,146 +646,42 @@ fn WithdrawModal(
                             }
                         }
                     }
+                }
 
-                    // 支付宝方式需填写账号和姓名
-                    if matches!(*withdraw_method.read(), WithdrawMethod::Alipay) {
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("node_earnings.alipay_account")} }
-                            input {
-                                class: "form-input",
-                                r#type: "text",
-                                placeholder: i18n.t("node_earnings.alipay_placeholder"),
-                                value: "{alipay_account}",
-                                oninput: move |e| alipay_account.set(e.value()),
-                            }
-                        }
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("node_earnings.real_name")} }
-                            input {
-                                class: "form-input",
-                                r#type: "text",
-                                placeholder: i18n.t("node_earnings.real_name_placeholder"),
-                                value: "{real_name}",
-                                oninput: move |e| real_name.set(e.value()),
-                            }
+                // 支付宝方式需填写账号和姓名
+                if matches!(*withdraw_method.read(), WithdrawMethod::Alipay) {
+                    div { class: "form-group",
+                        label { class: "form-label", r#for: "withdraw-alipay-account", {i18n.t("node_earnings.alipay_account")} }
+                        input {
+                            id: "withdraw-alipay-account",
+                            class: "form-input",
+                            r#type: "text",
+                            placeholder: i18n.t("node_earnings.alipay_placeholder"),
+                            value: "{alipay_account}",
+                            oninput: move |e| alipay_account.set(e.value()),
                         }
                     }
-
-                    ul { class: "withdraw-policy-list",
-                        li { {i18n.t("node_earnings.withdraw_minimum")} }
-                        li { {i18n.t("node_earnings.withdraw_fee")} }
-                        li {
-                            if matches!(*withdraw_method.read(), WithdrawMethod::Balance) {
-                                {i18n.t("node_earnings.withdraw_time_balance")}
-                            } else {
-                                {i18n.t("node_earnings.withdraw_time_alipay")}
-                            }
+                    div { class: "form-group",
+                        label { class: "form-label", r#for: "withdraw-real-name", {i18n.t("node_earnings.real_name")} }
+                        input {
+                            id: "withdraw-real-name",
+                            class: "form-input",
+                            r#type: "text",
+                            placeholder: i18n.t("node_earnings.real_name_placeholder"),
+                            value: "{real_name}",
+                            oninput: move |e| real_name.set(e.value()),
                         }
                     }
                 }
-                div { class: "modal-footer",
-                    Button {
-                        variant: ButtonVariant::Ghost,
-                        size: ButtonSize::Medium,
-                        disabled: withdraw_loading(),
-                        onclick: move |_| withdraw_modal.set(WithdrawModalState::Closed),
-                        {i18n.t("form.cancel")}
-                    }
-                    Button {
-                        variant: ButtonVariant::Primary,
-                        size: ButtonSize::Medium,
-                        disabled: withdraw_loading(),
-                        onclick: move |_| {
-                            let current=auth_store.state.peek().clone();
-                            if current.session_id!=opened_identity.0 || current.selected_tenant_id!=opened_identity.1 {
-                                withdraw_modal.set(WithdrawModalState::Closed);
-                                return;
-                            }
-                            let needs_alipay = withdraw_method() == WithdrawMethod::Alipay;
-                            if needs_alipay
-                                && (alipay_account().trim().is_empty() || real_name().trim().is_empty())
-                            {
-                                withdraw_error.set(Some(i18n.t("node_earnings.fill_alipay").to_string()));
-                                return;
-                            }
-                            withdraw_loading.set(true);
-                            withdraw_error.set(None);
 
-                            let auth = auth_store.clone();
-                            let mut ui = ui_store.clone();
-                            let i18n_clone = i18n.clone();
-                            let method_val = withdraw_method().value().to_string();
-                            let alipay_opt = if needs_alipay {
-                                Some(alipay_account().to_string())
-                            } else {
-                                None
-                            };
-                            let name_opt = if needs_alipay { Some(real_name().to_string()) } else { None };
-                            let observed = auth.state.peek().clone();
-                            let mut intent = client_api::api::node_tips::CreateWithdrawalRequest {
-                                request_id: uuid::Uuid::new_v4(), currency: "CNY".into(),
-                                withdrawal_type: method_val.clone(),alipay_account:alipay_opt.clone(),real_name:name_opt.clone(),
-                            };
-                            if let Some(previous) = submitted.peek().as_ref()
-                                && previous.withdrawal_type==intent.withdrawal_type
-                                && previous.alipay_account==intent.alipay_account
-                                && previous.real_name==intent.real_name {
-                                intent.request_id=previous.request_id;
-                            }
-                            let request_id = intent.request_id;
-                            submitted.set(Some(intent));
-                            let mut wm = withdraw_modal.clone();
-                            let mut aa = alipay_account.clone();
-                            let mut rn = real_name.clone();
-                            let mut wl = withdraw_loading.clone();
-                            spawn(async move {
-                                let token = observed.access_token.clone().unwrap_or_default();
-                                let alipay_str = alipay_opt.as_deref();
-                                let name_str = name_opt.as_deref();
-                                match node_tips_service::create_withdrawal(
-                                        &token,
-                                        request_id,
-                                        &method_val,
-                                        alipay_str,
-                                        name_str,
-                                    )
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        if !withdrawal_completion_matches(&auth.state.peek(), &observed) { return; }
-                                        wl.set(false);
-                                        wm.set(WithdrawModalState::Closed);
-                                        aa.set(String::new());
-                                        rn.set(String::new());
-                                        let msg = if needs_alipay {
-                                            i18n_clone.t("node_earnings.withdraw_alipay_success")
-                                        } else {
-                                            i18n_clone.t("node_earnings.withdraw_balance_success")
-                                        };
-                                        ui.show_success(msg);
-                                    }
-                                    Err(e) => {
-                                        if !withdrawal_completion_matches(&auth.state.peek(), &observed) { return; }
-                                        wl.set(false);
-                                        withdraw_error
-                                            .set(
-                                                Some(
-                                                    format!(
-                                                        "{}: {}",
-                                                        i18n_clone.t("node_earnings.withdraw_failed"),
-                                                        e,
-                                                    ),
-                                                ),
-                                            );
-                                    }
-                                }
-                            });
-                        },
-                        if withdraw_loading() {
-                            span { class: "spinner spinner-sm" }
-                            " {i18n.t(\"form.submit\")}"
+                ul { class: "withdraw-policy-list",
+                    li { {i18n.t("node_earnings.withdraw_minimum")} }
+                    li { {i18n.t("node_earnings.withdraw_fee")} }
+                    li {
+                        if matches!(*withdraw_method.read(), WithdrawMethod::Balance) {
+                            {i18n.t("node_earnings.withdraw_time_balance")}
                         } else {
-                            {i18n.t("form.submit")}
+                            {i18n.t("node_earnings.withdraw_time_alipay")}
                         }
                     }
                 }

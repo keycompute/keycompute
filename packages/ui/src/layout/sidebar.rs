@@ -301,6 +301,13 @@ fn active_nav_path<'a>(sections: &'a [NavSection], current_path: &str) -> Option
 }
 
 fn nav_item_is_active(current_path: &str, item_path: &str) -> bool {
+    // Navigation entries represent a page, while the current route may also
+    // contain a query string (for example, a selected tab). Compare only the
+    // path so query-driven sub-state does not make the parent entry appear
+    // inactive.
+    let current_path = current_path.split('?').next().unwrap_or(current_path);
+    let item_path = item_path.split('?').next().unwrap_or(item_path);
+
     current_path == item_path
         || (item_path != "/"
             && current_path
@@ -329,6 +336,14 @@ mod tests {
             "/admin/monitoring"
         ));
         assert!(!nav_item_is_active("/dashboard", "/"));
+        assert!(nav_item_is_active(
+            "/node/earnings?tab=withdrawals",
+            "/node/earnings?"
+        ));
+        assert!(nav_item_is_active(
+            "/platform/operations?tab=capacity",
+            "/platform/operations?"
+        ));
     }
 
     #[test]

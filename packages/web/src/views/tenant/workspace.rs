@@ -127,7 +127,7 @@ fn TenantWorkspacePage() -> Element {
                                 if user.as_ref().is_some_and(UserInfo::can_manage_platform) {
                                     Link { class: "btn btn-primary", to: Route::Tenants {}, {i18n.t("tenant.open_platform_tenants")} }
                                 } else if user.as_ref().is_some_and(UserInfo::can_view_operations) {
-                                    Link { class: "btn btn-primary", to: Route::PlatformOperations {}, {i18n.t("tenant.open_operations")} }
+                                    Link { class: "btn btn-primary", to: Route::PlatformOperations { query: Default::default() }, {i18n.t("tenant.open_operations")} }
                                 }
                                 Link { class: "btn btn-secondary", to: Route::UserProfile {}, {i18n.t("tenant.check_account")} }
                             }

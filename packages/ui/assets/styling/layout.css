@@ -45,6 +45,27 @@ html, body {
   display: none;
 }
 
+/* Keyboard users should be able to bypass the repeated shell navigation. */
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: calc(var(--z-toast) + 1);
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--color-primary);
+  color: var(--text-inverse);
+  text-decoration: none;
+  transform: translateY(-180%);
+  transition: transform var(--transition-fast);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+  outline: 3px solid color-mix(in srgb, var(--color-primary) 45%, white);
+  outline-offset: 2px;
+}
+
 /* ── Sidebar ────────────────────────────────── */
 .sidebar {
   position: fixed;

@@ -88,6 +88,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     // ── 导航 ────────────────────────────────────
     m.insert("nav.home", "首页");
+    m.insert("common.skip_to_content", "跳转到主要内容");
     m.insert("nav.usage", "用量统计");
     m.insert("nav.billing", "账单管理");
     m.insert("nav.api_keys", "API 密钥");
@@ -142,6 +143,14 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "auth.reset_subtitle",
         "输入用户名和邮箱，校验通过后我们将发送重置链接",
+    );
+    m.insert(
+        "auth.reset_new_password_subtitle",
+        "请设置新密码，完成后需重新登录。",
+    );
+    m.insert(
+        "auth.reset_check_email_hint",
+        "请检查收件箱和垃圾邮件文件夹；重置链接通常只在短时间内有效。",
     );
     m.insert(
         "auth.reset_sent",
@@ -388,7 +397,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.cost", "费用");
     m.insert("dashboard.greeting", "你好");
     m.insert("dashboard.subtitle", "这是您的控制台概览");
-    m.insert("dashboard.api_calls", "API 调用次数");
+    m.insert("dashboard.api_calls", "累计调用次数");
     m.insert("dashboard.weekly_total", "本周累计");
     m.insert("dashboard.balance", "账户余额");
     m.insert("dashboard.available", "可用");
@@ -398,7 +407,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("dashboard.used", "已用");
     m.insert("dashboard.quick_links", "快速入口");
     m.insert("dashboard.manage_api_keys", "管理 API 密钥");
-    m.insert("dashboard.recharge", "充値余额");
+    m.insert("dashboard.recharge", "充值余额");
     m.insert("dashboard.account_settings", "账户设置");
     m.insert(
         "api_keys.subtitle",
@@ -480,6 +489,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.close_saved", "我已记录，关闭");
     m.insert("api_keys.create_title", "创建 API 密钥");
     m.insert("api_keys.name", "名称");
+    m.insert("api_keys.name_required", "请输入名称");
     m.insert("api_keys.name_placeholder", "为此 Key 取个名字");
     m.insert("api_keys.creating", "创建中...");
     m.insert("api_keys.create_failed", "创建失败");
@@ -531,7 +541,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "home.features.routing.desc",
         "多模型智能调度，自动选择最优路径",
     );
-    m.insert("home.features.billing.title", "实时计费");
+    m.insert("home.features.billing.title", "按量计费");
     m.insert("home.features.billing.desc", "精准计量，秒级结算，透明消费");
     m.insert("home.features.cluster.title", "分布式集群");
     m.insert(
@@ -624,7 +634,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("req.submitting", "提交中…");
     m.insert(
         "req.privacy",
-        "提交即表示同意隐私政策，我们会严格保护您的信息安全",
+        "我们仅使用这些信息与您联系，并会妥善保护您的信息。",
     );
     m.insert("req.success", "已收到，我们会尽快与您联系");
     m.insert("req.err.contact_required", "请填写联系方式");
@@ -638,10 +648,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("login.tagline_3", "");
     m.insert(
         "login.description",
-        "统一大模型接入、智能路由调度、实时计费结算与全链路可观测性。开箱即用的企业级 AI Token 算力服务平台。",
+        "一个入口统一调用多种大模型，自动完成路由、按量计费、节点调度和运行监控。",
     );
     m.insert("login.feature_routing", "智能路由");
-    m.insert("login.feature_billing", "实时计费");
+    m.insert("login.feature_billing", "按量计费");
     m.insert("login.feature_ha", "节点租赁");
     m.insert("login.feature_api", "分布式集群");
     m.insert("login.feature_metering", "精准计量计费");
@@ -705,6 +715,17 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "建议使用长度更高、包含大小写和符号的强密码。",
     );
     m.insert(
+        "account_settings.password_requirements",
+        "密码需满足以下条件：",
+    );
+    m.insert("account_settings.password_rule_length", "至少 8 个字符");
+    m.insert("account_settings.password_rule_uppercase", "包含大写字母");
+    m.insert("account_settings.password_rule_lowercase", "包含小写字母");
+    m.insert("account_settings.password_rule_digit", "包含数字");
+    m.insert("account_settings.password_rule_special", "包含特殊字符");
+    m.insert("account_settings.password_match_valid", "两次密码一致");
+    m.insert("account_settings.password_match_invalid", "两次密码不一致");
+    m.insert(
         "account_settings.new_password_placeholder",
         "请输入新密码（至少8位）",
     );
@@ -736,6 +757,11 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "返回的会话与当前身份及租户选择不匹配",
     );
     m.insert("profile.user_id", "用户 ID");
+    m.insert("profile.technical_details", "技术信息");
+    m.insert(
+        "profile.technical_details_hint",
+        "仅在排查问题或联系客服时需要使用。",
+    );
     m.insert("profile.edit", "编辑资料");
 
     // ── Usage ───────────────────────────────────
@@ -770,7 +796,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     // ── Payments ────────────────────────────────
     m.insert("payments.title", "支付与账单");
-    m.insert("payments.subtitle", "查看账户余额、充值记录与账单明细");
+    m.insert("payments.subtitle", "查看账户余额、充值记录和用量汇总");
     m.insert("payments.recharge_now", "立即充值");
     m.insert("payments.account_balance", "账户余额");
     m.insert("payments.frozen_amount", "冻结金额");
@@ -1093,20 +1119,20 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     // ── Dashboard ───────────────────────────────
     m.insert(
         "dashboard.subtitle_long",
-        "这是您的控制台概览，下面是当前账户的实时指标、最近活动与关键操作入口。",
+        "这里汇总当前账户的最新指标、最近活动和常用操作。",
     );
     m.insert("dashboard.balance_available", "可用余额");
     m.insert("dashboard.total_cost", "累计费用");
-    m.insert("dashboard.meta_usage", "来自真实用量聚合");
-    m.insert("dashboard.meta_balance", "账户余额实时返回");
+    m.insert("dashboard.meta_usage", "基于模型调用记录");
+    m.insert("dashboard.meta_balance", "当前可用余额");
     m.insert("dashboard.meta_keys", "当前启用中的密钥");
-    m.insert("dashboard.meta_cost", "真实 usage_logs 聚合");
+    m.insert("dashboard.meta_cost", "基于记录用量");
     m.insert("dashboard.recent_active_days", "最近 7 个活跃日");
     m.insert(
         "dashboard.recent_active_days_desc",
         "按真实请求记录聚合，快速判断近期活跃度变化。",
     );
-    m.insert("dashboard.live_data", "实时数据");
+    m.insert("dashboard.live_data", "最新数据");
     m.insert(
         "dashboard.quick_links_desc",
         "围绕充值、密钥和账户操作组织控制台主路径。",
@@ -1121,10 +1147,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("dashboard.account_settings_desc", "更新个人资料与安全信息");
     m.insert("dashboard.recent_calls", "最近调用");
-    m.insert(
-        "dashboard.recent_calls_desc",
-        "使用真实 usage 记录作为控制台活动流。",
-    );
+    m.insert("dashboard.recent_calls_desc", "展示最近的模型调用记录。");
     m.insert("dashboard.no_recent_calls", "暂无最近调用记录。");
     m.insert("dashboard.active_keys_panel", "活跃密钥");
     m.insert(
@@ -2179,6 +2202,11 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("node_earnings.status_rejected", "已拒绝");
     m.insert("node_earnings.withdraw_btn", "发起提现");
     m.insert("node_earnings.withdraw_title", "发起提现");
+    m.insert("node_earnings.withdraw_amount", "本次提现金额");
+    m.insert(
+        "node_earnings.withdraw_amount_hint",
+        "系统会一次性提取全部可提现收益，提交前请确认到账方式。",
+    );
     m.insert("node_earnings.withdraw_method", "提现方式");
     m.insert("node_earnings.method_balance", "转入余额");
     m.insert(

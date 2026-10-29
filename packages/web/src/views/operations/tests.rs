@@ -233,11 +233,16 @@ fn operations_route_is_independent_from_root_business_guard_and_translations_exi
     use std::str::FromStr;
     assert_eq!(
         Route::from_str("/platform/operations").unwrap(),
-        Route::PlatformOperations {}
+        Route::PlatformOperations {
+            query: Default::default()
+        }
     );
     assert_eq!(
-        Route::PlatformOperations {}.to_string(),
-        "/platform/operations"
+        Route::PlatformOperations {
+            query: Default::default()
+        }
+        .to_string(),
+        "/platform/operations?"
     );
     for &(key, _, _) in crate::i18n::operations::TEXT {
         assert!(crate::i18n::ZH.contains_key(key));

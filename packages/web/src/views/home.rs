@@ -12,6 +12,7 @@ use crate::stores::auth_store::AuthStore;
 use crate::stores::public_settings_store::PublicSettingsStore;
 use crate::stores::referral_store::ReferralStore;
 use crate::stores::user_store::{UserInfo, UserStore};
+use crate::utils::password::password_rules;
 use crate::views::tenant::common::WorkspaceScope;
 use ui::components::modal::Modal;
 use ui::{GITHUB_REPOSITORY_URL, ThemeCtx};
@@ -91,6 +92,11 @@ pub fn Home() -> Element {
             .site_name()
             .unwrap_or_else(|| "KeyCompute".to_string())
     });
+    let site_logo_src = use_memo(move || {
+        public_settings_store
+            .site_logo_url()
+            .unwrap_or_else(|| crate::BRAND_LOGO.to_string())
+    });
 
     // 提前提取所有 i18n 文本
     let t_toggle_theme = i18n.t("home.toggle_theme");
@@ -121,14 +127,15 @@ pub fn Home() -> Element {
         document::Title { "{site_name}" }
 
         div { class: "kc-home-page",
+            a { class: "skip-link", href: "#home-main", {i18n.t("common.skip_to_content")} }
             // 导航栏
             header { class: "kc-home-header",
                 div { class: "kc-home-nav container",
                     // Logo + 标题区域
                     div { class: "kc-home-logo",
                         img {
-                            src: crate::BRAND_LOGO,
-                            alt: "KeyCompute",
+                            src: "{site_logo_src}",
+                            alt: "{site_name}",
                         }
                         span { class: "kc-home-logo-text", "{site_name}" }
                     }
@@ -138,6 +145,9 @@ pub fn Home() -> Element {
                         class: "kc-home-mobile-menu-btn",
                         r#type: "button",
                         title: "{t_menu}",
+                        aria_label: "{t_menu}",
+                        aria_expanded: nav_menu_open(),
+                        aria_controls: "home-navigation",
                         onclick: move |_| nav_menu_open.toggle(),
                         if nav_menu_open() {
                             svg {
@@ -193,7 +203,7 @@ pub fn Home() -> Element {
                     }
 
                     // 导航功能区（移动端可折叠）
-                    div { class: if nav_menu_open() { "kc-home-nav-actions kc-home-nav-actions-open" } else { "kc-home-nav-actions" },
+                    div { id: "home-navigation", class: if nav_menu_open() { "kc-home-nav-actions kc-home-nav-actions-open" } else { "kc-home-nav-actions" },
                         // GitHub 仓库链接
                         a {
                             class: "kc-home-github-link",
@@ -214,6 +224,7 @@ pub fn Home() -> Element {
                         button {
                             class: "kc-home-theme-toggle",
                             r#type: "button",
+                            aria_label: "{t_toggle_theme}",
                             onclick: move |_| {
                                 let new_theme = if theme().as_str() == "dark" {
                                     "light".to_string()
@@ -357,7 +368,7 @@ pub fn Home() -> Element {
             }
 
             // 主要内容区域
-            main { class: "kc-home-main",
+            main { id: "home-main", class: "kc-home-main", tabindex: "-1",
                 // Hero 区域
                 section { class: "kc-home-hero",
                     div { class: "container",
@@ -575,6 +586,27 @@ pub fn Home() -> Element {
                     }
                     span { "{t_req_bubble}" }
                 }
+            }
+        }
+    }
+}
+
+#[component]
+fn PasswordVisibilityIcon(visible: bool) -> Element {
+    rsx! {
+        svg {
+            width: "18",
+            height: "18",
+            view_box: "0 0 24 24",
+            fill: "none",
+            stroke: "currentColor",
+            stroke_width: "2",
+            if visible {
+                path { d: "M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" }
+                line { x1: "1", y1: "1", x2: "23", y2: "23" }
+            } else {
+                path { d: "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" }
+                circle { cx: "12", cy: "12", r: "3" }
             }
         }
     }
@@ -812,6 +844,8 @@ fn RegisterModal(
     let mut success_msg = use_signal(|| Option::<String>::None);
     let mut saved_email = use_signal(String::new);
     let mut saved_password = use_signal(String::new);
+    let mut show_password = use_signal(|| false);
+    let mut show_confirm_password = use_signal(|| false);
     let mut auth_store = use_context::<AuthStore>();
     let mut user_store = use_context::<UserStore>();
 
@@ -850,17 +884,52 @@ fn RegisterModal(
             return;
         }
 
+        if !code_requested() && (name().is_empty() || email().is_empty()) {
+            error_msg.set(Some(t_fill_required.to_string()));
+            return;
+        }
+
+        if password().is_empty() || confirm_password().is_empty() {
+            error_msg.set(Some(t_fill_required.to_string()));
+            return;
+        }
+
+        if password() != confirm_password() {
+            error_msg.set(Some(t_pwd_mismatch.to_string()));
+            return;
+        }
+
+        let rules = password_rules(&password());
+        if !rules.length {
+            error_msg.set(Some(i18n.t("form.password_too_short").to_string()));
+            return;
+        }
+        if !rules.uppercase {
+            error_msg.set(Some(
+                i18n.t("account_settings.password_no_uppercase").to_string(),
+            ));
+            return;
+        }
+        if !rules.lowercase {
+            error_msg.set(Some(
+                i18n.t("account_settings.password_no_lowercase").to_string(),
+            ));
+            return;
+        }
+        if !rules.digit {
+            error_msg.set(Some(
+                i18n.t("account_settings.password_no_digit").to_string(),
+            ));
+            return;
+        }
+        if !rules.special {
+            error_msg.set(Some(
+                i18n.t("account_settings.password_no_special").to_string(),
+            ));
+            return;
+        }
+
         if !code_requested() {
-            if name().is_empty() || email().is_empty() || password().is_empty() {
-                error_msg.set(Some(t_fill_required.to_string()));
-                return;
-            }
-
-            if password() != confirm_password() {
-                error_msg.set(Some(t_pwd_mismatch.to_string()));
-                return;
-            }
-
             loading.set(true);
             error_msg.set(None);
             success_msg.set(None);
@@ -929,6 +998,12 @@ fn RegisterModal(
             }
         });
     };
+
+    let register_password = password();
+    let register_confirm_password = confirm_password();
+    let register_rules = password_rules(&register_password);
+    let register_passwords_match =
+        !register_confirm_password.is_empty() && register_password == register_confirm_password;
 
     rsx! {
         Modal {
@@ -1027,27 +1102,61 @@ fn RegisterModal(
 
                         div { class: "kc-auth-form-group",
                             label { class: "kc-auth-form-label", r#for: "register-password", "{t_password}" }
-                            input {
-                                id: "register-password",
-                                class: "kc-auth-form-input",
-                                r#type: "password",
-                                autocomplete: "new-password",
-                                placeholder: "{t_password_min8}",
-                                value: "{password}",
-                                oninput: move |e| password.set(e.value()),
+                            div { class: "kc-auth-password-wrapper",
+                                input {
+                                    id: "register-password",
+                                    class: "kc-auth-form-input",
+                                    r#type: if show_password() { "text" } else { "password" },
+                                    autocomplete: "new-password",
+                                    placeholder: "{t_password_min8}",
+                                    value: "{password}",
+                                    oninput: move |e| password.set(e.value()),
+                                }
+                                button {
+                                    class: "kc-auth-toggle-password",
+                                    r#type: "button",
+                                    aria_label: i18n.t(if show_password() { "login.hide_password" } else { "login.show_password" }),
+                                    onclick: move |_| show_password.toggle(),
+                                    PasswordVisibilityIcon { visible: show_password() }
+                                }
+                            }
+                        }
+
+                        div { class: "kc-auth-password-requirements", aria_live: "polite",
+                            p { class: "kc-auth-hint", {i18n.t("account_settings.password_requirements")} }
+                            ul {
+                                li { class: if register_rules.length { "password-rule valid" } else { "password-rule" }, if register_rules.length { "✓" } else { "•" }, " ", {i18n.t("account_settings.password_rule_length")} }
+                                li { class: if register_rules.uppercase { "password-rule valid" } else { "password-rule" }, if register_rules.uppercase { "✓" } else { "•" }, " ", {i18n.t("account_settings.password_rule_uppercase")} }
+                                li { class: if register_rules.lowercase { "password-rule valid" } else { "password-rule" }, if register_rules.lowercase { "✓" } else { "•" }, " ", {i18n.t("account_settings.password_rule_lowercase")} }
+                                li { class: if register_rules.digit { "password-rule valid" } else { "password-rule" }, if register_rules.digit { "✓" } else { "•" }, " ", {i18n.t("account_settings.password_rule_digit")} }
+                                li { class: if register_rules.special { "password-rule valid" } else { "password-rule" }, if register_rules.special { "✓" } else { "•" }, " ", {i18n.t("account_settings.password_rule_special")} }
                             }
                         }
 
                         div { class: "kc-auth-form-group",
                             label { class: "kc-auth-form-label", r#for: "register-confirm-password", "{t_confirm_password}" }
-                            input {
-                                id: "register-confirm-password",
-                                class: "kc-auth-form-input",
-                                r#type: "password",
-                                autocomplete: "new-password",
-                                placeholder: "{t_confirm_password_placeholder}",
-                                value: "{confirm_password}",
-                                oninput: move |e| confirm_password.set(e.value()),
+                            div { class: "kc-auth-password-wrapper",
+                                input {
+                                    id: "register-confirm-password",
+                                    class: "kc-auth-form-input",
+                                    r#type: if show_confirm_password() { "text" } else { "password" },
+                                    autocomplete: "new-password",
+                                    placeholder: "{t_confirm_password_placeholder}",
+                                    value: "{confirm_password}",
+                                    oninput: move |e| confirm_password.set(e.value()),
+                                }
+                                button {
+                                    class: "kc-auth-toggle-password",
+                                    r#type: "button",
+                                    aria_label: i18n.t(if show_confirm_password() { "login.hide_password" } else { "login.show_password" }),
+                                    onclick: move |_| show_confirm_password.toggle(),
+                                    PasswordVisibilityIcon { visible: show_confirm_password() }
+                                }
+                            }
+                            if !register_confirm_password.is_empty() {
+                                p { class: if register_passwords_match { "password-match valid" } else { "password-match invalid" },
+                                    if register_passwords_match { {i18n.t("account_settings.password_match_valid")} } else { {i18n.t("account_settings.password_match_invalid")} }
+                                }
                             }
                         }
 

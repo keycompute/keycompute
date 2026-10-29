@@ -226,6 +226,26 @@
   width: 100%;
   overflow-x: auto;
   border-radius: var(--radius-lg);
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+.table-container:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+@media (max-width: 639px) {
+  .table-container {
+    /* A subtle inset shadow makes the available horizontal scroll discoverable. */
+    box-shadow: inset -18px 0 18px -18px color-mix(in srgb, var(--text-primary) 42%, transparent);
+  }
+
+  .table th,
+  .table td {
+    padding-inline: 12px;
+  }
 }
 
 .table {

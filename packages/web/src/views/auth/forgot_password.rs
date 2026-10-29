@@ -158,7 +158,7 @@ pub fn ForgotPassword() -> Element {
                                 div { class: "kc-login-status kc-login-status-success",
                                     {i18n.t("auth.reset_sent")}
                                 }
-                                p { class: "kc-auth-support-text", {i18n.t("auth.reset_subtitle")} }
+                                p { class: "kc-auth-support-text", {i18n.t("auth.reset_check_email_hint")} }
                             }
                         } else {
                             if let Some(err) = error_msg() {

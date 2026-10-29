@@ -128,7 +128,7 @@ pub(super) fn UsagePanel(scope: OperationsScope) -> Element {
     };
 
     rsx! {
-        section { class: "operations-usage",
+        section { id: "operations-usage-panel", class: "operations-usage", role: "tabpanel", aria_labelledby: "operations-tab-usage", tabindex: "0",
             div { class: "card filter-panel operations-filters",
                 div { class: "filter-grid filter-grid-usage",
                     div { class: "form-field",

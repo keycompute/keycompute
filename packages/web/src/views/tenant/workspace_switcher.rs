@@ -79,7 +79,9 @@ pub fn landing_route(user: &UserInfo) -> Route {
     } else if user.can_manage_platform() {
         Route::Tenants {}
     } else if user.can_view_operations() {
-        Route::PlatformOperations {}
+        Route::PlatformOperations {
+            query: Default::default(),
+        }
     } else {
         Route::TenantWorkspace {}
     }
@@ -321,7 +323,12 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_eq!(landing_route(&operator), Route::PlatformOperations {});
+        assert_eq!(
+            landing_route(&operator),
+            Route::PlatformOperations {
+                query: Default::default()
+            }
+        );
 
         let root = UserInfo {
             platform_role: Some(PlatformRole::Root),

@@ -391,14 +391,20 @@ pub fn AppLayout() -> Element {
     let r_profile = Route::UserProfile {}.to_string();
     let r_settings = Route::UserSettings {}.to_string();
     let r_node_token = Route::NodeToken {}.to_string();
-    let r_node_earnings = Route::NodeEarnings {}.to_string();
+    let r_node_earnings = Route::NodeEarnings {
+        query: Default::default(),
+    }
+    .to_string();
     let r_admin_users = Route::Users {}.to_string();
     let r_admin_upstreams = Route::UpstreamAccounts {}.to_string();
     let r_admin_pricing = Route::Pricing {}.to_string();
     let r_admin_payment_orders = Route::PaymentOrders {}.to_string();
     let r_admin_distribution = Route::DistributionRecords {}.to_string();
     let r_admin_tenants = Route::Tenants {}.to_string();
-    let r_platform_operations = Route::PlatformOperations {}.to_string();
+    let r_platform_operations = Route::PlatformOperations {
+        query: Default::default(),
+    }
+    .to_string();
     let r_admin_monitoring = Route::Monitoring {}.to_string();
     let r_platform_audit = Route::PlatformAudit {}.to_string();
     let r_admin_system_settings = Route::Settings {}.to_string();
@@ -690,6 +696,7 @@ pub fn AppLayout() -> Element {
             collapse_sidebar_title: i18n.t("layout.collapse_sidebar"),
             expand_label: i18n.t("common.expand"),
             collapse_label: i18n.t("common.collapse"),
+            skip_to_content_label: i18n.t("common.skip_to_content"),
             on_user_menu: move |action: UserMenuAction| {
                 match action {
                     UserMenuAction::Profile => {
@@ -781,7 +788,7 @@ pub fn AdminLayout() -> Element {
 
 fn route_page_title(route: &Route, i18n: &I18n) -> String {
     let key = match route {
-        Route::PlatformOperations {} => "operations.title",
+        Route::PlatformOperations { .. } => "operations.title",
         Route::PlatformAudit {} => "platform_audit.title",
         Route::TenantNodes {} => "tenant_nodes.title",
         Route::TenantResponses {} => "tenant_responses.title",
@@ -808,7 +815,7 @@ fn route_page_title(route: &Route, i18n: &I18n) -> String {
         Route::UserProfile {} => "page.profile",
         Route::UserSettings {} => "page.account_settings",
         Route::NodeToken {} => "page.node_token",
-        Route::NodeEarnings {} => "page.node_earnings",
+        Route::NodeEarnings { .. } => "page.node_earnings",
         Route::Users {} => "page.users",
         Route::Accounts {} => "page.accounts",
         Route::ModelBindings {} => "upstreams.title",
@@ -865,7 +872,9 @@ mod tests {
             Route::UserProfile {},
             Route::UserSettings {},
             Route::NodeToken {},
-            Route::NodeEarnings {},
+            Route::NodeEarnings {
+                query: Default::default(),
+            },
             Route::Users {},
             Route::Accounts {},
             Route::ModelBindings {},

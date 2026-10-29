@@ -101,7 +101,7 @@ pub(super) fn HealthPanel(scope: OperationsScope) -> Element {
     };
 
     rsx! {
-        section { class: "operations-health",
+        section { id: "operations-health-panel", class: "operations-health", role: "tabpanel", aria_labelledby: "operations-tab-health", tabindex: "0",
             form { class: "card filter-panel operations-filters", onsubmit: apply_filter,
                 div { class: "filter-grid filter-grid-health",
                     div { class: "form-field filter-field-grow",

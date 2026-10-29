@@ -238,7 +238,7 @@ pub fn TenantRequiredPage(children: Element) -> Element {
             nav { class: "toolbar", aria_label: i18n.t("tenant.workspace"),
                 Link { class: "btn btn-primary", to: Route::TenantWorkspace {}, {i18n.t("tenant.workspace")} }
                 if can_view_operations {
-                    Link { class: "btn btn-secondary", to: Route::PlatformOperations {}, {i18n.t("operations.title")} }
+                Link { class: "btn btn-secondary", to: Route::PlatformOperations { query: Default::default() }, {i18n.t("operations.title")} }
                 }
             }
         }

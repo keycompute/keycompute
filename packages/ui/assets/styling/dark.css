@@ -15,8 +15,8 @@
   /* ── 文字 ───────────────────────────────────── */
   --text-primary: #f7f8f8;
   --text-secondary: #d0d6e0;
-  --text-tertiary: #8a8f98;
-  --text-disabled: #62666d;
+  --text-tertiary: #a3a8b2;
+  --text-disabled: #7d838d;
 
   /* ── 侧边栏（暗色主题下更深） ─────────────────── */
   --sidebar-bg: #08090b;

@@ -11,7 +11,7 @@ use crate::utils::time::format_time;
 use crate::views::tenant::common::{self, WorkspaceScope};
 use dioxus::prelude::*;
 use ui::{
-    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ConfirmModal, Pagination, Table,
+    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ConfirmModal, Modal, Pagination, Table,
     TableHead,
     icons::{IconCopy, IconPlus},
 };
@@ -65,8 +65,9 @@ fn ApiKeyWorkspace(scope: WorkspaceScope) -> Element {
         if creating() || !scope.is_current(auth_store, user_store) {
             return;
         }
-        let name = new_key_name();
+        let name = new_key_name().trim().to_string();
         if name.is_empty() {
+            create_error.set(Some(i18n.t("api_keys.name_required").to_string()));
             return;
         }
         creating.set(true);
@@ -157,6 +158,8 @@ fn ApiKeyWorkspace(scope: WorkspaceScope) -> Element {
                         variant: ButtonVariant::Primary,
                         onclick: move |_| {
                             show_create.set(true);
+                            create_error.set(None);
+                            new_key_name.set(String::new());
                             new_key_id.set(None);
                             new_key_value.set(None);
                             new_key_revealed.set(false);
@@ -212,46 +215,50 @@ fn ApiKeyWorkspace(scope: WorkspaceScope) -> Element {
             ModelUsageGuide {key:"{new_key_value().is_some()}:{new_key_revealed()}",api_key:if new_key_revealed(){new_key_value()}else{None}}
 
             // 创建弹窗
-            if show_create() {
-                div { class: "modal-overlay",
-                    div {
-                        class: "modal",
-                        role: "dialog",
-                        aria_modal: "true",
-                        aria_label: i18n.t("api_keys.create_title"),
-                        h2 { class: "modal-title", {i18n.t("api_keys.create_title")} }
-                        if let Some(err) = create_error() {
-                            div { class: "alert alert-error", "{err}" }
+            Modal {
+                open: show_create,
+                title: i18n.t("api_keys.create_title").to_string(),
+                close_label: i18n.t("common.close").to_string(),
+                onclose: move |_| if !creating() { show_create.set(false) },
+                footer: rsx! {
+                    Button {
+                        variant: ButtonVariant::Ghost,
+                        r#type: "button".to_string(),
+                        disabled: creating(),
+                        onclick: move |_| {
+                            if !creating() {
+                                show_create.set(false);
+                            }
+                        },
+                        {i18n.t("form.cancel")}
+                    }
+                    Button {
+                        variant: ButtonVariant::Primary,
+                        r#type: "submit".to_string(),
+                        form: "api-key-create-form".to_string(),
+                        loading: creating(),
+                        if creating() {
+                            {i18n.t("api_keys.creating")}
+                        } else {
+                            {i18n.t("form.create")}
                         }
-                        form { onsubmit: on_create,
-                            div { class: "form-group",
-                                label { class: "form-label", {i18n.t("api_keys.name")} }
-                                input {
-                                    class: "form-input",
-                                    r#type: "text",
-                                    placeholder: "{i18n.t(\"api_keys.name_placeholder\")}",
-                                    value: "{new_key_name}",
-                                    oninput: move |e| new_key_name.set(e.value()),
-                                }
-                            }
-                            div { class: "modal-actions",
-                                Button {
-                                    variant: ButtonVariant::Ghost,
-                                    r#type: "button".to_string(),
-                                    onclick: move |_| show_create.set(false),
-                                    {i18n.t("form.cancel")}
-                                }
-                                Button {
-                                    variant: ButtonVariant::Primary,
-                                    r#type: "submit".to_string(),
-                                    loading: creating(),
-                                    if creating() {
-                                        {i18n.t("api_keys.creating")}
-                                    } else {
-                                        {i18n.t("form.create")}
-                                    }
-                                }
-                            }
+                    }
+                },
+                if let Some(err) = create_error() {
+                    div { class: "alert alert-error", role: "alert", "{err}" }
+                }
+                form { id: "api-key-create-form", onsubmit: on_create,
+                    div { class: "form-group",
+                        label { class: "form-label", r#for: "api-key-name", {i18n.t("api_keys.name")} }
+                        input {
+                            id: "api-key-name",
+                            class: "form-input",
+                            r#type: "text",
+                            autofocus: true,
+                            required: true,
+                            placeholder: "{i18n.t(\"api_keys.name_placeholder\")}",
+                            value: "{new_key_name}",
+                            oninput: move |e| new_key_name.set(e.value()),
                         }
                     }
                 }

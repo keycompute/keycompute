@@ -61,7 +61,7 @@ pub(super) fn CapacityPanel(scope: OperationsScope) -> Element {
         KeyedResourceValue::new(scope, result)
     });
     let loaded = current_keyed_value(&scope, data.state().cloned(), data());
-    rsx! {section {class:"operations-capacity",
+    rsx! {section {id:"operations-capacity-panel",class:"operations-capacity",role:"tabpanel",aria_labelledby:"operations-tab-capacity",tabindex:"0",
         div {class:"card capacity-intro-card",
             div {class:"card-body capacity-intro-body",
                 p {class:"text-secondary",{i18n.t("operations.process_hint")}}

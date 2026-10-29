@@ -70,6 +70,7 @@ pub fn AppShell(
     #[props(default)] collapse_sidebar_title: String,
     #[props(default)] expand_label: String,
     #[props(default)] collapse_label: String,
+    #[props(default = "Skip to main content".to_string())] skip_to_content_label: String,
     #[props(default = "KeyCompute".to_string())] site_name: String,
     #[props(default)] site_logo_src: String,
     /// Optional product-specific context control rendered in the header.
@@ -189,6 +190,7 @@ pub fn AppShell(
             }
 
             div { class: "{main_class}",
+                a { class: "skip-link", href: "#app-main-content", {skip_to_content_label} }
                 Header {
                     user_name: user_name.clone(),
                     sidebar_collapsed,
@@ -210,7 +212,7 @@ pub fn AppShell(
                     on_user_menu,
                 }
 
-                main { class: "content-area",
+                main { id: "app-main-content", class: "content-area", tabindex: "-1",
                     div { class: "content-inner", {children} }
                 }
 

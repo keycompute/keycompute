@@ -8,6 +8,7 @@ use crate::services::api_client::with_auto_refresh;
 use crate::services::user_service;
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::{UserInfo, UserStore};
+use crate::utils::display::platform_role_label;
 
 #[component]
 pub fn UserProfile() -> Element {
@@ -63,10 +64,8 @@ pub fn UserProfile() -> Element {
         .as_ref()
         .map(|u| u.email.clone())
         .unwrap_or_default();
-    let platform_role = user_info
-        .as_ref()
-        .and_then(|u| u.platform_role.map(|role| role.to_string()))
-        .unwrap_or_default();
+    let platform_role =
+        platform_role_label(user_info.as_ref().and_then(|u| u.platform_role), &i18n);
     let user_id = user_info.as_ref().map(|u| u.id.clone()).unwrap_or_default();
     let tenant_badge = user_info
         .as_ref()
@@ -201,11 +200,6 @@ pub fn UserProfile() -> Element {
                                     label { class: "form-label", {i18n.t("table.role")} }
                             p { class: "form-value", "{platform_role}" }
                                 }
-                                div {
-                                    class: "profile-field",
-                                    label { class: "form-label", {i18n.t("profile.user_id")} }
-                                    p { class: "form-value profile-mono", "{user_id}" }
-                                }
                             }
                             if let Some(err) = save_error() {
                                 div { class: "alert alert-error", "{err}" }
@@ -247,11 +241,6 @@ pub fn UserProfile() -> Element {
                                     label { class: "form-label", {i18n.t("table.role")} }
                             p { class: "form-value", "{platform_role}" }
                                 }
-                                div {
-                                    class: "profile-field",
-                                    label { class: "form-label", {i18n.t("profile.user_id")} }
-                                    p { class: "form-value profile-mono", "{user_id}" }
-                                }
                             }
                             div {
                                 class: "profile-actions",
@@ -261,6 +250,14 @@ pub fn UserProfile() -> Element {
                                     {i18n.t("profile.edit")}
                                 }
                             }
+                        }
+                    }
+                    details { class: "profile-technical-details",
+                        summary { {i18n.t("profile.technical_details")} }
+                        p { class: "setting-description", {i18n.t("profile.technical_details_hint")} }
+                        div { class: "profile-technical-value",
+                            span { class: "form-label", {i18n.t("profile.user_id")} }
+                            code { class: "profile-mono", "{user_id}" }
                         }
                     }
                 } else {

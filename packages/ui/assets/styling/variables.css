@@ -36,8 +36,9 @@
 
   --text-primary: #151720;
   --text-secondary: #5f6572;
-  --text-tertiary: #8a8f98;
-  --text-disabled: #b5bdcc;
+  /* Keep secondary labels readable on the light surface (WCAG AA for 12px text). */
+  --text-tertiary: #6b7280;
+  --text-disabled: #9aa1ad;
   --text-inverse: #ffffff;
 
   /* ── 侧边栏 ───────────────────────────────── */

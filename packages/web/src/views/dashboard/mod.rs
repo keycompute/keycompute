@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::hooks::use_i18n::use_i18n;
+use crate::router::Route;
 use crate::services::{
     api_client::{user_error_message, with_auto_refresh},
     console_service, payment_service,
@@ -163,6 +164,38 @@ fn DashboardContent() -> Element {
                     title: i18n.t("dashboard.total_cost").to_string(),
                     value: total_cost_value,
                     meta: i18n.t("dashboard.meta_cost").to_string()
+                }
+            }
+
+            div { class: "dashboard-panel dashboard-quick-links-panel",
+                div { class: "dashboard-panel-head",
+                    div {
+                        h2 { class: "dashboard-panel-title", {i18n.t("dashboard.quick_links")} }
+                        p { class: "dashboard-panel-copy", {i18n.t("dashboard.quick_links_desc")} }
+                    }
+                }
+                div { class: "dashboard-panel-body dashboard-quick-links",
+                    Link { class: "dashboard-quick-link dashboard-quick-link-blue", to: Route::ApiKeyList {},
+                        div { class: "dashboard-quick-link-main",
+                            div { class: "dashboard-quick-link-title", {i18n.t("dashboard.manage_api_keys")} }
+                            div { class: "dashboard-quick-link-desc", {i18n.t("dashboard.manage_api_keys_desc")} }
+                        }
+                        span { class: "dashboard-quick-link-arrow", aria_hidden: "true", "→" }
+                    }
+                    Link { class: "dashboard-quick-link dashboard-quick-link-green", to: Route::PaymentsOverview {},
+                        div { class: "dashboard-quick-link-main",
+                            div { class: "dashboard-quick-link-title", {i18n.t("dashboard.payments")} }
+                            div { class: "dashboard-quick-link-desc", {i18n.t("dashboard.payments_desc")} }
+                        }
+                        span { class: "dashboard-quick-link-arrow", aria_hidden: "true", "→" }
+                    }
+                    Link { class: "dashboard-quick-link dashboard-quick-link-orange", to: Route::Usage {},
+                        div { class: "dashboard-quick-link-main",
+                            div { class: "dashboard-quick-link-title", {i18n.t("dashboard.usage_details")} }
+                            div { class: "dashboard-quick-link-desc", {i18n.t("dashboard.usage_details_desc")} }
+                        }
+                        span { class: "dashboard-quick-link-arrow", aria_hidden: "true", "→" }
+                    }
                 }
             }
 
