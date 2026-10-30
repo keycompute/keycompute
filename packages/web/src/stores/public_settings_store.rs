@@ -44,6 +44,15 @@ impl PublicSettingsStore {
             .map(str::to_string)
     }
 
+    pub fn privacy_policy_url(&self) -> Option<String> {
+        self.state
+            .read()
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.privacy_policy_url.as_deref())
+            .and_then(|url| normalize_privacy_policy_url(Some(url)))
+    }
+
     pub fn distribution_enabled(&self) -> Option<bool> {
         self.state
             .read()
@@ -77,14 +86,37 @@ impl PublicSettingsStore {
     }
 }
 
+fn normalize_privacy_policy_url(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.starts_with("https://") || value.starts_with("http://") {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::distribution_setting_is_enabled;
+    use super::{distribution_setting_is_enabled, normalize_privacy_policy_url};
 
     #[test]
     fn distribution_visibility_requires_an_explicit_enabled_setting() {
         assert!(distribution_setting_is_enabled(Some(true)));
         assert!(!distribution_setting_is_enabled(Some(false)));
         assert!(!distribution_setting_is_enabled(None));
+    }
+
+    #[test]
+    fn privacy_policy_url_requires_http_scheme_and_trims_whitespace() {
+        assert_eq!(
+            normalize_privacy_policy_url(Some("  https://example.com/privacy  ")),
+            Some("https://example.com/privacy".to_string())
+        );
+        assert_eq!(
+            normalize_privacy_policy_url(Some("javascript:alert(1)")),
+            None
+        );
+        assert_eq!(normalize_privacy_policy_url(Some("   ")), None);
+        assert_eq!(normalize_privacy_policy_url(None), None);
     }
 }

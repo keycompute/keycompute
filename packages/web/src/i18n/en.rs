@@ -696,6 +696,9 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "req.privacy",
         "We use this information only to contact you and handle it with care.",
     );
+    m.insert("req.privacy.link_prefix", "See our ");
+    m.insert("req.privacy.link", "Privacy Policy");
+    m.insert("req.privacy.link_suffix", " for details.");
     m.insert("req.success", "Received. We will contact you shortly");
     m.insert("req.err.contact_required", "Please provide a contact");
     m.insert("req.err.contact_invalid", "Invalid contact format");
@@ -853,11 +856,6 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "The returned session does not match this identity and tenant selection",
     );
     m.insert("profile.user_id", "User ID");
-    m.insert("profile.technical_details", "Technical details");
-    m.insert(
-        "profile.technical_details_hint",
-        "Usually only needed when troubleshooting or contacting support.",
-    );
     m.insert("profile.edit", "Edit Profile");
 
     // ── Usage ───────────────────────────────────
@@ -897,7 +895,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("payments.title", "Payments and Billing");
     m.insert(
         "payments.subtitle",
-        "Review account balance, recharge records, and usage summary",
+        "Review account balance, recharge records, and billing details",
     );
     m.insert("payments.recharge_now", "Recharge Now");
     m.insert("payments.account_balance", "Account Balance");

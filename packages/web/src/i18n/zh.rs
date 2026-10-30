@@ -636,6 +636,9 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "req.privacy",
         "我们仅使用这些信息与您联系，并会妥善保护您的信息。",
     );
+    m.insert("req.privacy.link_prefix", "详情请参阅");
+    m.insert("req.privacy.link", "隐私政策");
+    m.insert("req.privacy.link_suffix", "。");
     m.insert("req.success", "已收到，我们会尽快与您联系");
     m.insert("req.err.contact_required", "请填写联系方式");
     m.insert("req.err.contact_invalid", "联系方式格式不正确");
@@ -757,11 +760,6 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "返回的会话与当前身份及租户选择不匹配",
     );
     m.insert("profile.user_id", "用户 ID");
-    m.insert("profile.technical_details", "技术信息");
-    m.insert(
-        "profile.technical_details_hint",
-        "仅在排查问题或联系客服时需要使用。",
-    );
     m.insert("profile.edit", "编辑资料");
 
     // ── Usage ───────────────────────────────────
@@ -796,7 +794,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     // ── Payments ────────────────────────────────
     m.insert("payments.title", "支付与账单");
-    m.insert("payments.subtitle", "查看账户余额、充值记录和用量汇总");
+    m.insert("payments.subtitle", "查看账户余额、充值记录与账单明细");
     m.insert("payments.recharge_now", "立即充值");
     m.insert("payments.account_balance", "账户余额");
     m.insert("payments.frozen_amount", "冻结金额");

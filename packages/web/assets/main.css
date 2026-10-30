@@ -2725,38 +2725,6 @@ select.form-input:focus {
   margin-top: 20px;
 }
 
-.profile-technical-details {
-  margin: 0 28px 28px;
-  padding: 14px 16px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg-card) 82%, var(--bg-primary));
-}
-
-.profile-technical-details summary {
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-}
-
-.profile-technical-details[open] summary {
-  margin-bottom: 8px;
-  color: var(--text-primary);
-}
-
-.profile-technical-value {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.profile-technical-value code {
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-}
-
 .withdraw-amount-summary {
   display: grid;
   gap: 4px;
@@ -5015,10 +4983,6 @@ select.form-input:focus {
     width: 100%;
   }
 
-  .profile-technical-details {
-    margin-inline: 20px;
-  }
-
   .password-requirements ul {
     grid-template-columns: 1fr;
   }
@@ -5419,6 +5383,7 @@ select.form-input:focus {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
 }
 
 .kc-home-logo img {
@@ -5430,6 +5395,10 @@ select.form-input:focus {
 }
 
 .kc-home-logo-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: "Space Grotesk", sans-serif;
   font-size: 1.4rem;
   font-weight: 700;
@@ -6631,7 +6600,7 @@ select.form-input:focus {
     gap: 12px;
     padding: 10px 16px;
   }
-  .kc-home-nav-actions .kc-home-lang-btn-text {
+  .kc-home-nav-actions .kc-home-lang-toggle-text {
     font-size: 0.9rem;
     font-weight: 600;
     letter-spacing: 0.04em;
@@ -9176,20 +9145,6 @@ tbody tr:last-child .row-action-menu-popover {
   animation: none;
 }
 
-.kc-home-hero-actions {
-  display: flex;
-  justify-content: center;
-  gap: 12px;
-  margin-top: 8px;
-}
-
-.kc-home-hero-actions .kc-home-btn-login,
-.kc-home-hero-actions .kc-home-btn-register {
-  min-width: 132px;
-  min-height: 44px;
-  padding: 0 22px;
-}
-
 .kc-home-btn-register {
   background: var(--kc-home-accent);
   box-shadow: none;
@@ -9249,11 +9204,6 @@ tbody tr:last-child .row-action-menu-popover {
 
   .kc-home-features-grid {
     grid-template-columns: 1fr;
-  }
-
-  .kc-home-hero-actions {
-    flex-direction: column;
-    align-items: stretch;
   }
 
   .dashboard-bottom-row {

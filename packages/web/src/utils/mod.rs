@@ -27,6 +27,21 @@ pub fn focus_element(element_id: &str) {
     }
 }
 
+/// Move focus after a route-driven render has committed.  Tab navigation that
+/// updates the URL can replace the target button in the same event loop turn,
+/// so an immediate lookup would silently lose keyboard focus.
+pub fn focus_element_after_render(element_id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let element_id = element_id.to_string();
+        gloo_timers::callback::Timeout::new(0, move || focus_element(&element_id)).forget();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = element_id;
+    }
+}
+
 /// Restore keyboard focus to the control that opened a dialog after the
 /// dialog has been removed from the DOM.
 pub fn restore_focus_after_dialog(element_id: &str) {

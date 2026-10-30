@@ -198,7 +198,12 @@ pub fn UserProfile() -> Element {
                                 div {
                                     class: "profile-field",
                                     label { class: "form-label", {i18n.t("table.role")} }
-                            p { class: "form-value", "{platform_role}" }
+                                    p { class: "form-value", "{platform_role}" }
+                                }
+                                div {
+                                    class: "profile-field",
+                                    label { class: "form-label", {i18n.t("profile.user_id")} }
+                                    p { class: "form-value profile-mono", "{user_id}" }
                                 }
                             }
                             if let Some(err) = save_error() {
@@ -239,7 +244,12 @@ pub fn UserProfile() -> Element {
                                 div {
                                     class: "profile-field",
                                     label { class: "form-label", {i18n.t("table.role")} }
-                            p { class: "form-value", "{platform_role}" }
+                                    p { class: "form-value", "{platform_role}" }
+                                }
+                                div {
+                                    class: "profile-field",
+                                    label { class: "form-label", {i18n.t("profile.user_id")} }
+                                    p { class: "form-value profile-mono", "{user_id}" }
                                 }
                             }
                             div {
@@ -250,14 +260,6 @@ pub fn UserProfile() -> Element {
                                     {i18n.t("profile.edit")}
                                 }
                             }
-                        }
-                    }
-                    details { class: "profile-technical-details",
-                        summary { {i18n.t("profile.technical_details")} }
-                        p { class: "setting-description", {i18n.t("profile.technical_details_hint")} }
-                        div { class: "profile-technical-value",
-                            span { class: "form-label", {i18n.t("profile.user_id")} }
-                            code { class: "profile-mono", "{user_id}" }
                         }
                     }
                 } else {

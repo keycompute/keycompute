@@ -17,6 +17,35 @@ use crate::views::tenant::common::WorkspaceScope;
 use ui::components::modal::Modal;
 use ui::{GITHUB_REPOSITORY_URL, ThemeCtx};
 
+// ── 赞助者数据 ───────────────────────────────────
+const SPONSOR_DATA: &str = include_str!("sponsors.txt");
+
+/// 从单行解析赞助者名字，仅展示金额 >= 10 且名字有效的记录。
+fn extract_sponsor_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+
+    let content = line.split_once(". ")?.1;
+    let parts: Vec<&str> = content.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let amount: f64 = parts.last()?.parse().ok()?;
+    if amount < 10.0 {
+        return None;
+    }
+
+    let name = parts[..parts.len() - 1].join(" ");
+    if name.is_empty() || !name.chars().any(|character| character.is_alphanumeric()) {
+        return None;
+    }
+
+    Some(name)
+}
+
 /// 首页组件 - 现代化自适应设计
 #[component]
 pub fn Home() -> Element {
@@ -98,6 +127,14 @@ pub fn Home() -> Element {
             .unwrap_or_else(|| crate::BRAND_LOGO.to_string())
     });
 
+    // 赞助者列表（编译时从 sponsors.txt 解析）
+    let sponsors = use_memo(|| {
+        SPONSOR_DATA
+            .lines()
+            .filter_map(extract_sponsor_name)
+            .collect::<Vec<_>>()
+    });
+
     // 提前提取所有 i18n 文本
     let t_toggle_theme = i18n.t("home.toggle_theme");
     let t_toggle_lang = if is_zh {
@@ -112,14 +149,37 @@ pub fn Home() -> Element {
     let t_tagline_2 = i18n.t("login.tagline_2");
     let t_description = i18n.t("login.description");
     let t_features_title = i18n.t("home.features.title");
+    let t_feature_routing = i18n.t("login.feature_routing");
+    let t_feature_billing = i18n.t("login.feature_billing");
+    let t_feature_ha = i18n.t("login.feature_ha");
+    let t_feature_api = i18n.t("login.feature_api");
+    let t_feature_metering = i18n.t("login.feature_metering");
+    let t_feature_custom = i18n.t("login.feature_custom");
     let t_routing_title = i18n.t("home.features.routing.title");
     let t_routing_desc = i18n.t("home.features.routing.desc");
     let t_billing_title = i18n.t("home.features.billing.title");
     let t_billing_desc = i18n.t("home.features.billing.desc");
     let t_cluster_title = i18n.t("home.features.cluster.title");
     let t_cluster_desc = i18n.t("home.features.cluster.desc");
+    let t_node_rental_title = i18n.t("home.features.node_rental.title");
+    let t_node_rental_desc = i18n.t("home.features.node_rental.desc");
+    let t_distribution_title = i18n.t("home.features.distribution.title");
+    let t_distribution_desc = i18n.t("home.features.distribution.desc");
+    let t_custom_title = i18n.t("home.features.custom.title");
+    let t_custom_desc = i18n.t("home.features.custom.desc");
     let t_menu = i18n.t("home.menu");
     let t_lang_switch = i18n.t("home.lang_switch_label");
+    let t_tip_title = i18n.t("home.tip.title");
+    let t_tip_subtitle_prefix = i18n.t("home.tip.subtitle_prefix");
+    let t_tip_subtitle_suffix = i18n.t("home.tip.subtitle_suffix");
+    let t_tip_wechat_qr_alt = i18n.t("home.tip.wechat_qr_alt");
+    let t_tip_wechat_label = i18n.t("home.tip.wechat_label");
+    let t_tip_alipay_qr_alt = i18n.t("home.tip.alipay_qr_alt");
+    let t_tip_alipay_label = i18n.t("home.tip.alipay_label");
+    let t_contributors_title = i18n.t("home.contributors.title");
+    let t_contributors_subtitle = i18n.t("home.contributors.subtitle");
+    let t_sponsors_title = i18n.t("home.sponsors.title");
+    let t_sponsors_subtitle = i18n.t("home.sponsors.subtitle");
     let t_req_bubble = i18n.t("req.bubble");
     let current_year = chrono::Utc::now().year();
 
@@ -127,6 +187,56 @@ pub fn Home() -> Element {
         document::Title { "{site_name}" }
 
         div { class: "kc-home-page",
+            // 保留首页原有的主题背景层；内容层通过 z-index 保证可读性。
+            if is_dark {
+                div { class: "kc-home-stars-container",
+                    {
+                        (0..50).map(|i| {
+                            let style = format!(
+                                "--star-left: {}%; --star-top: {}%; --star-size: {}; --star-delay: {}s; --star-duration: {}s;",
+                                i * 37 % 100,
+                                i * 53 % 100,
+                                if i % 5 == 0 { "4px" } else if i % 5 == 1 { "5px" } else if i % 5 == 2 { "3px" } else { "2px" },
+                                (i % 10) as f64 * 0.5,
+                                (2 + i % 4) as f64,
+                            );
+                            rsx! { div { class: "kc-home-star", style: "{style}" } }
+                        })
+                    }
+                }
+                div { class: "kc-home-shooting-stars",
+                    {
+                        (0..5).map(|i| {
+                            let style = format!(
+                                "--shooting-delay: {}s; --shooting-duration: {}s; --shooting-top: {}%;",
+                                (i * 3) as f64 * 1.5,
+                                1.5 + (i % 3) as f64 * 0.5,
+                                10 + (i * 20) % 70,
+                            );
+                            rsx! { div { class: "kc-home-shooting-star", style: "{style}" } }
+                        })
+                    }
+                }
+            } else {
+                div { class: "kc-home-sky" }
+                div { class: "kc-home-clouds-container",
+                    {
+                        (0..8).map(|i| {
+                            let style = format!(
+                                "--cloud-left: {}%; --cloud-top: {}%; --cloud-scale: {}; --cloud-delay: {}s; --cloud-duration: {}s; --cloud-opacity: {};",
+                                i * 47 % 100,
+                                5 + i * 23 % 60,
+                                0.4 + (i % 5) as f64 * 0.2,
+                                (i % 8) as f64 * 2.0,
+                                30.0 + (i % 5) as f64 * 10.0,
+                                0.6 + (i % 4) as f64 * 0.1,
+                            );
+                            rsx! { div { class: "kc-home-cloud", style: "{style}" } }
+                        })
+                    }
+                }
+            }
+            div { class: "kc-home-grid-overlay" }
             a { class: "skip-link", href: "#home-main", {i18n.t("common.skip_to_content")} }
             // 导航栏
             header { class: "kc-home-header",
@@ -338,6 +448,7 @@ pub fn Home() -> Element {
                                 class: "kc-home-btn-register",
                                 r#type: "button",
                                 onclick: move |_| {
+                                    nav_menu_open.set(false);
                                     let route = if has_workspace() {
                                         Route::Dashboard {}
                                     } else {
@@ -352,13 +463,19 @@ pub fn Home() -> Element {
                                 button {
                                     class: "kc-home-btn-login",
                                     r#type: "button",
-                                    onclick: move |_| show_login_modal.set(true),
+                                    onclick: move |_| {
+                                        nav_menu_open.set(false);
+                                        show_login_modal.set(true);
+                                    },
                                     "{t_login}"
                                 }
                                 button {
                                     class: "kc-home-btn-register",
                                     r#type: "button",
-                                    onclick: move |_| show_register_modal.set(true),
+                                    onclick: move |_| {
+                                        nav_menu_open.set(false);
+                                        show_register_modal.set(true);
+                                    },
                                     "{t_register}"
                                 }
                             }
@@ -383,35 +500,15 @@ pub fn Home() -> Element {
                             }
                             p { class: "kc-home-hero-description", "{t_description}" }
 
-                            div { class: "kc-home-hero-actions",
-                                if is_authenticated() {
-                                    button {
-                                        class: "kc-home-btn-register",
-                                        r#type: "button",
-                                        onclick: move |_| {
-                                            nav.push(if has_workspace() {
-                                                Route::Dashboard {}
-                                            } else {
-                                                Route::TenantWorkspace {}
-                                            });
-                                        },
-                                        {i18n.t("home.console")}
-                                    }
-                                } else {
-                                    button {
-                                        class: "kc-home-btn-register",
-                                        r#type: "button",
-                                        onclick: move |_| show_register_modal.set(true),
-                                        "{t_register}"
-                                    }
-                                    button {
-                                        class: "kc-home-btn-login",
-                                        r#type: "button",
-                                        onclick: move |_| show_login_modal.set(true),
-                                        "{t_login}"
-                                    }
-                                }
+                            div { class: "kc-home-features-tags",
+                                span { class: "kc-home-feature-tag", "{t_feature_routing}" }
+                                span { class: "kc-home-feature-tag", "{t_feature_billing}" }
+                                span { class: "kc-home-feature-tag", "{t_feature_ha}" }
+                                span { class: "kc-home-feature-tag", "{t_feature_api}" }
+                                span { class: "kc-home-feature-tag", "{t_feature_metering}" }
+                                span { class: "kc-home-feature-tag", "{t_feature_custom}" }
                             }
+
                         }
                     }
                 }
@@ -521,6 +618,111 @@ pub fn Home() -> Element {
                                 p { "{t_cluster_desc}" }
                             }
 
+                            div { class: "kc-home-feature-card",
+                                div { class: "kc-home-feature-icon",
+                                    svg {
+                                        width: "32",
+                                        height: "32",
+                                        view_box: "0 0 24 24",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        rect { x: "2", y: "4", width: "20", height: "12", rx: "2", ry: "2" }
+                                        line { x1: "6", y1: "20", x2: "18", y2: "20" }
+                                        line { x1: "12", y1: "16", x2: "12", y2: "20" }
+                                        line { x1: "6", y1: "10", x2: "10", y2: "10" }
+                                    }
+                                }
+                                h3 { "{t_node_rental_title}" }
+                                p { "{t_node_rental_desc}" }
+                            }
+
+                            div { class: "kc-home-feature-card",
+                                div { class: "kc-home-feature-icon",
+                                    svg {
+                                        width: "32",
+                                        height: "32",
+                                        view_box: "0 0 24 24",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        circle { cx: "18", cy: "5", r: "3" }
+                                        circle { cx: "6", cy: "12", r: "3" }
+                                        circle { cx: "18", cy: "19", r: "3" }
+                                        line { x1: "8.59", y1: "13.51", x2: "15.42", y2: "17.49" }
+                                        line { x1: "15.41", y1: "6.51", x2: "8.59", y2: "10.49" }
+                                    }
+                                }
+                                h3 { "{t_distribution_title}" }
+                                p { "{t_distribution_desc}" }
+                            }
+
+                            div { class: "kc-home-feature-card",
+                                div { class: "kc-home-feature-icon",
+                                    svg {
+                                        width: "32",
+                                        height: "32",
+                                        view_box: "0 0 24 24",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        stroke_width: "2",
+                                        circle { cx: "12", cy: "12", r: "3" }
+                                        path { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a2 2 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" }
+                                    }
+                                }
+                                h3 { "{t_custom_title}" }
+                                p { "{t_custom_desc}" }
+                            }
+
+                        }
+                    }
+                }
+            }
+
+            section { class: "kc-home-tip-section",
+                div { class: "container",
+                    h2 { class: "kc-home-tip-title", span { "☕ " }, "{t_tip_title}" }
+                    p { class: "kc-home-tip-subtitle",
+                        "{t_tip_subtitle_prefix}" {site_name} "{t_tip_subtitle_suffix}"
+                    }
+                    div { class: "kc-home-tip-cards",
+                        div { class: "kc-home-tip-card",
+                            img { class: "kc-home-tip-qr", src: asset!("/assets/wechat_tip.jpg"), alt: "{t_tip_wechat_qr_alt}" }
+                            span { class: "kc-home-tip-label", "{t_tip_wechat_label}" }
+                        }
+                        div { class: "kc-home-tip-card",
+                            img { class: "kc-home-tip-qr", src: asset!("/assets/alipay_tip.png"), alt: "{t_tip_alipay_qr_alt}" }
+                            span { class: "kc-home-tip-label", "{t_tip_alipay_label}" }
+                        }
+                    }
+                }
+            }
+
+            section { class: "kc-home-tip-section",
+                a {
+                    href: "https://github.com/keycompute/keycompute/graphs/contributors?all=1",
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    class: "kc-home-contributors-wrap",
+                    div { class: "container",
+                        h2 { class: "kc-home-tip-title", span { "👥 " }, "{t_contributors_title}" }
+                        p { class: "kc-home-tip-subtitle", "{t_contributors_subtitle}" }
+                        img {
+                            src: "https://contrib.rocks/image?repo=keycompute/keycompute",
+                            alt: "KeyCompute Contributors",
+                            class: "kc-home-contributors-img",
+                        }
+                    }
+                }
+            }
+
+            section { class: "kc-home-tip-section",
+                div { class: "container",
+                    h2 { class: "kc-home-tip-title", span { "🌟 " }, "{t_sponsors_title}" }
+                    p { class: "kc-home-tip-subtitle", "{t_sponsors_subtitle}" }
+                    div { class: "kc-home-sponsors-grid",
+                        for name in sponsors() {
+                            div { class: "kc-home-sponsor-card", "{name}" }
                         }
                     }
                 }
@@ -537,6 +739,7 @@ pub fn Home() -> Element {
                         rel: "noopener noreferrer",
                         {site_name}
                     }
+                    ". All Rights Reserved."
                 }
             }
 
@@ -568,7 +771,7 @@ pub fn Home() -> Element {
             }
 
             // 右下角常驻"需求咨询"悬浮入口；弹窗打开后隐藏，避免与遮罩层抢焦点。
-            if !show_requirement_modal() {
+            if !show_requirement_modal() && !nav_menu_open() {
                 button {
                     class: "kc-req-bubble",
                     r#type: "button",
@@ -739,34 +942,7 @@ fn LoginModal(
                                 r#type: "button",
                                 aria_label: i18n.t(if show_password() { "login.hide_password" } else { "login.show_password" }),
                                 onclick: move |_| show_password.set(!show_password()),
-                                if show_password() {
-                                    svg {
-                                        width: "18",
-                                        height: "18",
-                                        view_box: "0 0 24 24",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        path { d: "M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" }
-                                        line {
-                                            x1: "1",
-                                            y1: "1",
-                                            x2: "23",
-                                            y2: "23",
-                                        }
-                                    }
-                                } else {
-                                    svg {
-                                        width: "18",
-                                        height: "18",
-                                        view_box: "0 0 24 24",
-                                        fill: "none",
-                                        stroke: "currentColor",
-                                        stroke_width: "2",
-                                        path { d: "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" }
-                                        circle { cx: "12", cy: "12", r: "3" }
-                                    }
-                                }
+                                    PasswordVisibilityIcon { visible: show_password() }
                             }
                         }
                     }
@@ -1264,6 +1440,8 @@ fn save_lang_to_storage(lang: &str) {
 #[component]
 fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Element {
     let i18n = use_i18n();
+    let public_settings_store = use_context::<PublicSettingsStore>();
+    let privacy_policy_url = public_settings_store.privacy_policy_url();
 
     // 表单状态
     let mut requirement_type = use_signal(|| i18n.t("req.type.api"));
@@ -1302,6 +1480,9 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
     let t_submit = i18n.t("req.submit");
     let t_submitting = i18n.t("req.submitting");
     let t_privacy = i18n.t("req.privacy");
+    let t_privacy_link_prefix = i18n.t("req.privacy.link_prefix");
+    let t_privacy_link = i18n.t("req.privacy.link");
+    let t_privacy_link_suffix = i18n.t("req.privacy.link_suffix");
     let t_success = i18n.t("req.success");
     let t_err_required = i18n.t("req.err.contact_required");
     let t_err_invalid = i18n.t("req.err.contact_invalid");
@@ -1664,7 +1845,21 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
                             }
                         }
 
-                        p { class: "kc-req-privacy", "{t_privacy}" }
+                        if let Some(url) = privacy_policy_url.as_deref() {
+                            p { class: "kc-req-privacy",
+                                "{t_privacy} "
+                                "{t_privacy_link_prefix}"
+                                a {
+                                    href: "{url}",
+                                    target: "_blank",
+                                    rel: "noopener noreferrer",
+                                    "{t_privacy_link}"
+                                }
+                                "{t_privacy_link_suffix}"
+                            }
+                        } else {
+                            p { class: "kc-req-privacy", "{t_privacy}" }
+                        }
                     }
                 }
             }

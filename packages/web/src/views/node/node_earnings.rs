@@ -9,7 +9,9 @@ use crate::router::{NodeEarningsQuery, Route};
 use crate::services::node_tips_service;
 use crate::stores::{auth_store::AuthStore, ui_store::UiStore};
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
-use crate::utils::{display::short_id, focus_element, format_precise_cny_str, time::format_time};
+use crate::utils::{
+    display::short_id, focus_element_after_render, format_precise_cny_str, time::format_time,
+};
 use crate::views::tenant::common::TenantRequiredPage;
 
 const HISTORY_PAGE_SIZE: u32 = 20;
@@ -163,6 +165,11 @@ fn NodeEarningsContent(query: NodeEarningsQuery) -> Element {
     let mut withdraw_loading = use_signal(|| false);
     #[allow(unused_mut)]
     let mut withdraw_error = use_signal(|| None::<String>);
+    // Capture the financial identity at the moment the dialog opens.  The
+    // dialog stays mounted while closed so the shared Modal can own focus
+    // return; capturing this inside the child would otherwise retain the
+    // identity from the first page render across workspace switches.
+    let mut withdraw_identity = use_signal(|| None::<(uuid::Uuid, Option<String>)>);
     let show_tip_history = query.tab.as_deref() != Some("withdrawals");
     let nav = use_navigator();
 
@@ -183,6 +190,9 @@ fn NodeEarningsContent(query: NodeEarningsQuery) -> Element {
                         size: ButtonSize::Medium,
                         onclick: move |_| {
                             withdraw_error.set(None);
+                            let state = auth_store.state.peek().clone();
+                            withdraw_identity
+                                .set(Some((state.session_id, state.selected_tenant_id.clone())));
                             withdraw_modal.set(true);
                         },
                         {i18n.t("node_earnings.withdraw_btn")}
@@ -239,7 +249,7 @@ fn NodeEarningsContent(query: NodeEarningsQuery) -> Element {
                         Key::ArrowRight | Key::ArrowLeft | Key::End => {
                             event.prevent_default();
                             nav.replace(Route::NodeEarnings { query: NodeEarningsQuery::for_tab("withdrawals") });
-                            focus_element("node-earnings-withdrawals-tab");
+                            focus_element_after_render("node-earnings-withdrawals-tab");
                         }
                         Key::Home => event.prevent_default(),
                         _ => {}
@@ -258,7 +268,7 @@ fn NodeEarningsContent(query: NodeEarningsQuery) -> Element {
                         Key::ArrowLeft | Key::ArrowRight | Key::Home => {
                             event.prevent_default();
                             nav.replace(Route::NodeEarnings { query: NodeEarningsQuery::for_tab("history") });
-                            focus_element("node-earnings-history-tab");
+                            focus_element_after_render("node-earnings-history-tab");
                         }
                         Key::End => event.prevent_default(),
                         _ => {}
@@ -424,6 +434,7 @@ fn NodeEarningsContent(query: NodeEarningsQuery) -> Element {
                 real_name,
                 withdraw_loading,
                 withdraw_error,
+                opened_identity: withdraw_identity,
                 withdrawable_amount: summary_resource()
                     .as_ref()
                     .and_then(|result| result.as_ref().ok())
@@ -476,16 +487,13 @@ fn WithdrawModal(
     mut real_name: Signal<String>,
     withdraw_loading: Signal<bool>,
     withdraw_error: Signal<Option<String>>,
+    opened_identity: Signal<Option<(uuid::Uuid, Option<String>)>>,
     withdrawable_amount: String,
     on_success: EventHandler<()>,
 ) -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let ui_store = use_context::<UiStore>();
-    let opened_identity = use_hook(|| {
-        let state = auth_store.state.peek();
-        (state.session_id, state.selected_tenant_id.clone())
-    });
 
     let mut submitted = use_signal(|| None::<client_api::api::node_tips::CreateWithdrawalRequest>);
 
@@ -497,6 +505,7 @@ fn WithdrawModal(
         onclose: move |_| {
             if !withdraw_loading() {
                 withdraw_modal.set(false);
+                opened_identity.set(None);
             }
         },
         footer: rsx! {
@@ -504,7 +513,12 @@ fn WithdrawModal(
                 variant: ButtonVariant::Ghost,
                 size: ButtonSize::Medium,
                 disabled: withdraw_loading(),
-                onclick: move |_| withdraw_modal.set(false),
+                onclick: move |_| {
+                    if !withdraw_loading() {
+                        withdraw_modal.set(false);
+                        opened_identity.set(None);
+                    }
+                },
                 {i18n.t("form.cancel")}
             }
             Button {
@@ -513,8 +527,13 @@ fn WithdrawModal(
                 disabled: withdraw_loading(),
                 onclick: move |_| {
                     let current=auth_store.state.peek().clone();
-                    if current.session_id!=opened_identity.0 || current.selected_tenant_id!=opened_identity.1 {
+                    let Some(opened_identity_value) = opened_identity() else {
                         withdraw_modal.set(false);
+                        return;
+                    };
+                    if current.session_id!=opened_identity_value.0 || current.selected_tenant_id!=opened_identity_value.1 {
+                        withdraw_modal.set(false);
+                        opened_identity.set(None);
                         return;
                     }
                     let needs_alipay = withdraw_method() == WithdrawMethod::Alipay;
@@ -568,9 +587,15 @@ fn WithdrawModal(
                             .await
                         {
                             Ok(_) => {
-                                if !withdrawal_completion_matches(&auth.state.peek(), &observed) { return; }
+                                if !withdrawal_completion_matches(&auth.state.peek(), &observed) {
+                                    wl.set(false);
+                                    wm.set(false);
+                                    opened_identity.set(None);
+                                    return;
+                                }
                                 wl.set(false);
                                 wm.set(false);
+                                opened_identity.set(None);
                                 aa.set(String::new());
                                 rn.set(String::new());
                                 on_success.call(());
@@ -582,7 +607,12 @@ fn WithdrawModal(
                                 ui.show_success(msg);
                             }
                             Err(e) => {
-                                if !withdrawal_completion_matches(&auth.state.peek(), &observed) { return; }
+                                if !withdrawal_completion_matches(&auth.state.peek(), &observed) {
+                                    wl.set(false);
+                                    wm.set(false);
+                                    opened_identity.set(None);
+                                    return;
+                                }
                                 wl.set(false);
                                 withdraw_error
                                     .set(
