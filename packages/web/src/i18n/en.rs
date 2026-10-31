@@ -372,6 +372,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.copied", "Copied to clipboard");
     m.insert("common.copy", "Copy");
     m.insert("common.copy_model_id", "Copy model ID");
+    m.insert("common.id_prefix", "ID:");
     m.insert(
         "common.copy_manual_hint",
         "Non-HTTPS context, please select text and right-click to copy",
@@ -1261,6 +1262,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.provider_type", "Provider Type");
     m.insert("pricing.provider_type_placeholder", "Select provider type");
     m.insert("pricing.label_provider_account", "Provider Account");
+    m.insert("pricing.created_at", "Created at");
     m.insert("pricing.label_node", "Node");
     m.insert("pricing.input_price_label", "Input Price (per 1K tokens)");
     m.insert("pricing.output_price_label", "Output Price (per 1K tokens)");
@@ -1864,6 +1866,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "users.select_wallet_tenant",
         "Select a wallet tenant to view its balance",
     );
+    m.insert(
+        "users.platform_balance_unavailable",
+        "Not applicable to platform users",
+    );
     m.insert("users.tenant_unknown", "Unknown tenant");
     m.insert("users.tenant_keep", "Keep current tenant");
     m.insert(
@@ -2061,7 +2067,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.empty", "No tenants yet");
     m.insert("tenants.tenant_id", "Tenant ID");
     m.insert("tenants.active", "Active");
-    m.insert("tenants.status_filter", "Filter workspaces by status");
+    m.insert("tenants.status_filter", "Filter tenants by status");
     m.insert("tenants.all_statuses", "All statuses");
     m.insert("tenants.create", "Create tenant");
     m.insert("tenants.create_title", "Create tenant");
@@ -2148,7 +2154,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.deleted", "Tenant deleted");
     m.insert(
         "distribution_records.admin_desc",
-        "Review distribution earnings and effective rules by workspace",
+        "Review distribution earnings and effective rules by tenant",
     );
     m.insert(
         "distribution_records.user_desc",
@@ -2167,6 +2173,14 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "distribution_records.no_rules",
         "No distribution rules found",
+    );
+    m.insert(
+        "distribution_records.no_rules_title",
+        "No distribution rules for this tenant",
+    );
+    m.insert(
+        "distribution_records.no_rules_hint",
+        "Distribution rules are configured by the platform and will appear here when active.",
     );
     m.insert("distribution_records.rule_name", "Rule Name");
     m.insert("distribution_records.commission_rate", "Commission Rate");
@@ -2187,33 +2201,34 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "distribution_records.target_hint",
-        "Distribution data is isolated by workspace. Select a workspace to continue.",
+        "Distribution data is isolated by tenant. Select a tenant to continue.",
     );
-    m.insert("distribution_records.target_label", "Target workspace");
+    m.insert("distribution_records.target_label", "Target tenant");
     m.insert(
         "distribution_records.target_placeholder",
-        "Select a workspace",
+        "Search tenant name or identifier",
     );
     m.insert(
         "distribution_records.target_safety_hint",
-        "Changing the workspace reloads rules and records without modifying data.",
+        "Changing the tenant reloads rules and records without modifying data.",
     );
-    m.insert("distribution_records.current_target", "Current workspace");
+    m.insert("distribution_records.current_target", "Current tenant");
+    m.insert("distribution_records.unknown_target", "Unknown tenant");
     m.insert(
         "distribution_records.select_target_title",
-        "Select a workspace",
+        "Select a tenant",
     );
     m.insert(
         "distribution_records.select_target_hint",
-        "The effective rules and distribution records will appear after selection.",
+        "The effective rules and distribution records will appear after selecting a tenant.",
     );
     m.insert(
         "distribution_records.no_tenants_title",
-        "No workspace available",
+        "No tenant available",
     );
     m.insert(
         "distribution_records.no_tenants_hint",
-        "Create and activate a workspace before reviewing distribution data.",
+        "Create and activate a tenant before reviewing distribution data.",
     );
     m.insert("distribution_records.beneficiary_id", "Beneficiary ID");
     m.insert("accounts.subtitle", "Maintain provider channels, model mapping, and availability in one reviewable asset pool for the routing layer.");
@@ -2813,7 +2828,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Enter a real tenant UUID. An invalid selector never means all tenants.",
     );
     m.insert("platform_pricing.apply", "Switch scope");
-    m.insert("platform_pricing.choose_tenant", "Choose a workspace");
+    m.insert("platform_pricing.choose_tenant", "Choose a tenant");
     m.insert(
         "platform_pricing.explicit_scope",
         "Platform and tenant prices are managed separately. Changing target clears unsaved forms.",

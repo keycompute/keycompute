@@ -251,7 +251,7 @@ pub fn Tenants() -> Element {
                                         td { {format_time(&t.created_at)} }
                                         td {
                                             details { class: "row-action-menu",
-                                                summary { aria_label: i18n.t("common.more"), "⋯" }
+                                                summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), title: i18n.t("common.more"), "⋯" }
                                                 div { class: "btn-group row-action-menu-popover",
                                                     if t.is_active {
                                                         Link {

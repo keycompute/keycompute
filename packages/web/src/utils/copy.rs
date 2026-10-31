@@ -39,6 +39,65 @@ pub fn on_copy(
     })
 }
 
+/// 创建带键控状态的复制按钮 handler。
+///
+/// 与 `on_copy` 不同，这个版本把当前复制内容的键和代次写入信号。延迟
+/// 复位时只有信号仍对应同一个键和同一代复制操作才会清空状态，避免快速
+/// 打开另一条详情或连续复制同一条详情后被旧定时器误清除。
+pub fn on_copy_keyed(
+    text: String,
+    hint: String,
+    mut ui_store: UiStore,
+    mut copied_key: Signal<Option<String>>,
+    mut copy_generation: Signal<u64>,
+    key: String,
+) -> EventHandler<MouseEvent> {
+    EventHandler::new(move |_: MouseEvent| {
+        if copy_to_clipboard(&text) {
+            let generation = copy_generation().wrapping_add(1);
+            copy_generation.set(generation);
+            copied_key.set(Some(key.clone()));
+            let mut state = copied_key.clone();
+            let current_generation = copy_generation.clone();
+            let expected = key.clone();
+            spawn(async move {
+                TimeoutFuture::new(2000).await;
+                if copy_state_is_current(
+                    state().as_deref(),
+                    current_generation(),
+                    expected.as_str(),
+                    generation,
+                ) {
+                    state.set(None);
+                }
+            });
+        } else {
+            ui_store.show_info(hint.as_str());
+        }
+    })
+}
+
+fn copy_state_is_current(
+    current_key: Option<&str>,
+    current_generation: u64,
+    expected_key: &str,
+    expected_generation: u64,
+) -> bool {
+    current_key == Some(expected_key) && current_generation == expected_generation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_state_is_current;
+
+    #[test]
+    fn stale_copy_timer_cannot_clear_a_newer_same_key_copy() {
+        assert!(!copy_state_is_current(Some("user-1"), 2, "user-1", 1));
+        assert!(copy_state_is_current(Some("user-1"), 2, "user-1", 2));
+        assert!(!copy_state_is_current(Some("user-2"), 2, "user-1", 2));
+    }
+}
+
 /// 创建复制按钮的 `onclick` handler（Toast 提示模式）。
 ///
 /// 适用于按钮本身展示复制内容的场景（如邀请链接），复制成功时通过

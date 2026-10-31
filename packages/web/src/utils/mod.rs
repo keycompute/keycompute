@@ -4,7 +4,7 @@ pub mod password;
 pub(crate) mod resource;
 pub mod time;
 
-pub use copy::on_copy;
+pub use copy::{on_copy, on_copy_keyed};
 
 /// Move keyboard focus to an element rendered by the current page.
 pub fn focus_element(element_id: &str) {

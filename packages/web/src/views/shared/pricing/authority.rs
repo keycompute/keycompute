@@ -1,4 +1,5 @@
 //! Presentation identity only; every platform request is independently authorized by the server.
+use crate::utils::display::short_id;
 use crate::{
     i18n::I18n,
     stores::{
@@ -87,10 +88,20 @@ pub(super) fn parse_target(mode: &str, tenant: &str) -> Result<PricingTarget> {
         )),
     }
 }
-pub(super) fn target_label(target: PricingTarget, i18n: &I18n) -> String {
+pub(super) fn target_label(
+    target: PricingTarget,
+    i18n: &I18n,
+    tenant_label: Option<&str>,
+) -> String {
     match target {
         PricingTarget::Platform => i18n.t("platform_pricing.global").into(),
-        PricingTarget::Tenant { tenant_id } => tenant_id.to_string(),
+        PricingTarget::Tenant { tenant_id } => {
+            let label = tenant_label
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| i18n.t("platform_pricing.tenant").to_string());
+            format!("{} ({})", label, short_id(&tenant_id.to_string()))
+        }
     }
 }
 /// PostgreSQL may render tiny decimals in scientific notation. Never round through f64.
@@ -183,6 +194,26 @@ mod tests {
         assert_eq!(
             display_decimal("9999999999.9999999999"),
             "9999999999.9999999999"
+        );
+    }
+
+    #[test]
+    fn target_label_prefers_tenant_name_and_keeps_a_safe_fallback() {
+        let i18n = I18n::new(crate::i18n::Lang::En);
+        let tenant_id = Uuid::new_v4();
+        let target = PricingTarget::Tenant { tenant_id };
+
+        assert_eq!(
+            target_label(target, &i18n, Some("demo · demo")),
+            format!("demo · demo ({})", short_id(&tenant_id.to_string()))
+        );
+        assert_eq!(
+            target_label(target, &i18n, None),
+            format!("Explicit tenant ({})", short_id(&tenant_id.to_string()))
+        );
+        assert_eq!(
+            target_label(PricingTarget::Platform, &i18n, Some("ignored")),
+            "Platform shared pricing"
         );
     }
 }

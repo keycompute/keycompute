@@ -40,6 +40,7 @@ pub fn DistributionRecords() -> Element {
     let mut rule_page = use_signal(|| 1u32);
     let mut rule_page_size = use_signal(|| PAGE_SIZE as u32);
     let mut selected_tenant = use_signal(String::new);
+    let mut tenant_query = use_signal(String::new);
     let mut show_rules = use_signal(|| true);
 
     let earnings = use_resource(move || async move {
@@ -143,6 +144,7 @@ pub fn DistributionRecords() -> Element {
             .find(|tenant| selected_id.is_some_and(|id| tenant.id == id.to_string()))
             .map(|tenant| tenant.name)
     });
+    let selected_display = selected_name.clone().unwrap_or_else(&*tenant_query);
     let page_desc = if can_manage_platform {
         i18n.t("distribution_records.admin_desc")
     } else {
@@ -182,27 +184,56 @@ pub fn DistributionRecords() -> Element {
                                     Link { class: "btn btn-primary", to: Route::Tenants {}, {i18n.t("page.tenants")} }
                                 }
                             },
-                            Some(Ok(ref items)) => rsx! {
-                                div { class: "form-field platform-target-field",
-                                    label { class: "form-label", r#for: "distribution-tenant", {i18n.t("distribution_records.target_label")} }
-                                    input {
-                                        id: "distribution-tenant",
-                                        class: "input-field",
-                                        list: "distribution-tenant-options",
-                                        value: "{selected_tenant}",
-                                        placeholder: i18n.t("distribution_records.target_placeholder"),
-                                        oninput: move |event| {
-                                            selected_tenant.set(event.value());
-                                            page.set(1);
-                                            rule_page.set(1);
-                                        },
-                                    }
-                                    datalist { id: "distribution-tenant-options",
-                                        for tenant in items.iter() {
-                                            option { value: "{tenant.id}", label: "{tenant.name} · {tenant.slug}" }
+                            Some(Ok(ref items)) => {
+                                let tenant_options: Vec<(String, String)> = items
+                                    .iter()
+                                    .map(|tenant| {
+                                        (
+                                            tenant.id.clone(),
+                                            format!("{} · {}", tenant.name, tenant.slug),
+                                        )
+                                    })
+                                    .collect();
+                                let option_lookup = tenant_options.clone();
+                                rsx! {
+                                    div { class: "form-field platform-target-field",
+                                        label { class: "form-label", r#for: "distribution-tenant", {i18n.t("distribution_records.target_label")} }
+                                        input {
+                                            id: "distribution-tenant",
+                                            class: "input-field",
+                                            r#type: "search",
+                                            list: "distribution-tenant-options",
+                                            autocomplete: "off",
+                                            value: "{selected_display}",
+                                            placeholder: i18n.t("distribution_records.target_placeholder"),
+                                            oninput: move |event| {
+                                                let query = event.value();
+                                                tenant_query.set(query.clone());
+                                                let next_id = option_lookup
+                                                    .iter()
+                                                    .find(|(id, label)| id == &query || label == &query)
+                                                    .map(|(id, _)| id.clone())
+                                                    .unwrap_or_default();
+                                                if next_id != selected_tenant() {
+                                                    selected_tenant.set(next_id);
+                                                    page.set(1);
+                                                    rule_page.set(1);
+                                                }
+                                            },
                                         }
+                                        datalist { id: "distribution-tenant-options",
+                                            for (tenant_id, label) in tenant_options.iter() {
+                                                option { value: "{label}", label: "{short_id(tenant_id)}" }
+                                            }
+                                        }
+                                        if let Some(tenant_id) = selected_id {
+                                            p { class: "form-hint scope-id-hint",
+                                                {i18n.t("common.id_prefix")} " "
+                                                code { title: "{tenant_id}", {short_id(&tenant_id.to_string())} }
+                                            }
+                                        }
+                                        p { class: "form-hint", {i18n.t("distribution_records.target_safety_hint")} }
                                     }
-                                    p { class: "form-hint", {i18n.t("distribution_records.target_safety_hint")} }
                                 }
                             },
                         }
@@ -212,7 +243,10 @@ pub fn DistributionRecords() -> Element {
                 if let Some(tenant_id) = selected_id {
                     div { class: "scope-banner", role: "status",
                         span { class: "scope-banner-label", {i18n.t("distribution_records.current_target")} }
-                        strong { {selected_name.clone().unwrap_or_else(|| tenant_id.to_string())} }
+                        strong {
+                            {selected_name.clone().unwrap_or_else(|| i18n.t("distribution_records.unknown_target").to_string())}
+                        }
+                        code { title: "{tenant_id}", {short_id(&tenant_id.to_string())} }
                     }
 
                     nav { class: "tabs", role: "tablist", aria_label: i18n.t("distribution_records.view_tabs"),
@@ -308,42 +342,48 @@ pub fn DistributionRecords() -> Element {
                                             },
                                             Some(Ok(None)) => rsx! {},
                                             Some(Ok(Some(result))) => rsx! {
-                                                div { class: "table-container",
-                                                    Table {
-                                                        empty: result.rules.is_empty(),
-                                                        empty_text: i18n.t("distribution_records.no_rules"),
-                                                        col_count: 4,
-                                                        thead { tr {
-                                                            TableHead { {i18n.t("distribution_records.rule_name")} }
-                                                            TableHead { {i18n.t("distribution_records.commission_rate")} }
-                                                            TableHead { {i18n.t("table.status")} }
-                                                            TableHead { {i18n.t("table.created_at")} }
-                                                        } }
-                                                        tbody {
-                                                            for rule in result.rules.iter() {
-                                                                tr { key: "{rule.id}",
-                                                                    td {
-                                                                        span { class: "table-primary", "{rule.name}" }
-                                                                        span { class: "table-secondary",
-                                                                            {beneficiary_scope_label(&rule.beneficiary_scope, &i18n)}
-                                                                        }
-                                                                        if let Some(beneficiary_id) = rule.beneficiary_id {
-                                                                            code {
-                                                                                class: "table-secondary",
-                                                                                title: "{beneficiary_id}",
-                                                                                {short_id(&beneficiary_id.to_string())}
+                                                if result.rules.is_empty() {
+                                                    div { class: "empty-state compact-empty-state distribution-empty-state",
+                                                        span { class: "empty-icon", aria_hidden: "true", "∅" }
+                                                        h3 { class: "empty-title", {i18n.t("distribution_records.no_rules_title")} }
+                                                        p { class: "empty-description", {i18n.t("distribution_records.no_rules_hint")} }
+                                                    }
+                                                } else {
+                                                    div { class: "table-container",
+                                                        Table {
+                                                            col_count: 4,
+                                                            thead { tr {
+                                                                TableHead { {i18n.t("distribution_records.rule_name")} }
+                                                                TableHead { {i18n.t("distribution_records.commission_rate")} }
+                                                                TableHead { {i18n.t("table.status")} }
+                                                                TableHead { {i18n.t("table.created_at")} }
+                                                            } }
+                                                            tbody {
+                                                                for rule in result.rules.iter() {
+                                                                    tr { key: "{rule.id}",
+                                                                        td {
+                                                                            span { class: "table-primary", "{rule.name}" }
+                                                                            span { class: "table-secondary",
+                                                                                {beneficiary_scope_label(&rule.beneficiary_scope, &i18n)}
+                                                                            }
+                                                                            if let Some(beneficiary_id) = rule.beneficiary_id {
+                                                                                code {
+                                                                                    class: "table-secondary",
+                                                                                    title: "{beneficiary_id}",
+                                                                                    {short_id(&beneficiary_id.to_string())}
+                                                                                }
                                                                             }
                                                                         }
-                                                                    }
-                                                                    td { {format_rate(&rule.commission_rate)} }
-                                                                    td {
-                                                                        if rule.is_active {
-                                                                            Badge { variant: BadgeVariant::Success, {i18n.t("common.enabled")} }
-                                                                        } else {
-                                                                            Badge { variant: BadgeVariant::Neutral, {i18n.t("common.disabled")} }
+                                                                        td { {format_rate(&rule.commission_rate)} }
+                                                                        td {
+                                                                            if rule.is_active {
+                                                                                Badge { variant: BadgeVariant::Success, {i18n.t("common.enabled")} }
+                                                                            } else {
+                                                                                Badge { variant: BadgeVariant::Neutral, {i18n.t("common.disabled")} }
+                                                                            }
                                                                         }
+                                                                        td { {format_time(&rule.created_at)} }
                                                                     }
-                                                                    td { {format_time(&rule.created_at)} }
                                                                 }
                                                             }
                                                         }

@@ -342,6 +342,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.copied", "已复制到剪贴板");
     m.insert("common.copy", "复制");
     m.insert("common.copy_model_id", "复制模型 ID");
+    m.insert("common.id_prefix", "ID：");
     m.insert(
         "common.copy_manual_hint",
         "当前页面为非安全上下文（HTTP），请选中文本后右键复制",
@@ -1063,10 +1064,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.table_title", "模型定价表");
     m.insert(
         "pricing.table_subtitle",
-        "统一查看各模型的 Provider 归属、输入输出费率和默认策略，保证计费配置可审阅且易于对比。",
+        "统一查看各模型的服务商归属、输入输出费率和默认策略，保证计费配置可审阅且易于对比。",
     );
     m.insert("pricing.items_suffix", "条");
-    m.insert("pricing.model_provider", "模型 / Provider");
+    m.insert("pricing.model_provider", "模型 / 服务商");
     m.insert("pricing.tenant_id", "租户 ID");
     m.insert("pricing.global", "全局默认");
     m.insert("pricing.input_price", "输入价格");
@@ -1104,7 +1105,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.model_placeholder", "如 gpt-4o");
     m.insert("pricing.provider_type", "计费维度");
     m.insert("pricing.provider_type_placeholder", "选择计费维度");
-    m.insert("pricing.label_provider_account", "Provider 账号");
+    m.insert("pricing.label_provider_account", "服务商账号");
+    m.insert("pricing.created_at", "创建时间");
     m.insert("pricing.label_node", "节点");
     m.insert("pricing.input_price_label", "输入单价（每1K tokens）");
     m.insert("pricing.output_price_label", "输出单价（每1K tokens）");
@@ -1611,6 +1613,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "平台身份（无所属租户）",
     );
     m.insert("users.select_wallet_tenant", "请选择租户以查看对应余额");
+    m.insert(
+        "users.platform_balance_unavailable",
+        "平台级用户不适用租户余额",
+    );
     m.insert("users.tenant_unknown", "未知租户");
     m.insert("users.tenant_keep", "保持当前租户");
     m.insert(
@@ -1760,7 +1766,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.empty", "暂无租户数据");
     m.insert("tenants.tenant_id", "租户 ID");
     m.insert("tenants.active", "活跃");
-    m.insert("tenants.status_filter", "按状态筛选工作区");
+    m.insert("tenants.status_filter", "按状态筛选租户");
     m.insert("tenants.all_statuses", "全部状态");
     m.insert("tenants.create", "创建租户");
     m.insert("tenants.create_title", "创建租户");
@@ -1829,7 +1835,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.deleted", "租户已删除");
     m.insert(
         "distribution_records.admin_desc",
-        "按工作区查看分销收益记录与当前生效规则",
+        "按租户查看分销收益记录与当前生效规则",
     );
     m.insert(
         "distribution_records.user_desc",
@@ -1843,6 +1849,14 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "分销规则由平台运营方统一配置，如需调整请联系平台管理员。",
     );
     m.insert("distribution_records.no_rules", "当前无分销规则");
+    m.insert(
+        "distribution_records.no_rules_title",
+        "当前租户暂无分销规则",
+    );
+    m.insert(
+        "distribution_records.no_rules_hint",
+        "分销规则由平台统一配置，配置生效后会显示在这里。",
+    );
     m.insert("distribution_records.rule_name", "规则名称");
     m.insert("distribution_records.commission_rate", "分销比例");
     m.insert("distribution_records.empty_admin", "暂无分销记录");
@@ -1856,27 +1870,28 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("distribution_records.target_title", "选择查看范围");
     m.insert(
         "distribution_records.target_hint",
-        "分销数据按工作区隔离，请先选择一个工作区。",
+        "分销数据按租户隔离，请先选择一个租户。",
     );
-    m.insert("distribution_records.target_label", "目标工作区");
-    m.insert("distribution_records.target_placeholder", "请选择工作区");
+    m.insert("distribution_records.target_label", "目标租户");
+    m.insert(
+        "distribution_records.target_placeholder",
+        "搜索租户名称或标识",
+    );
     m.insert(
         "distribution_records.target_safety_hint",
-        "切换工作区会重新加载规则与收益记录，不会修改任何数据。",
+        "切换租户会重新加载规则与收益记录，不会修改任何数据。",
     );
-    m.insert("distribution_records.current_target", "当前工作区");
-    m.insert("distribution_records.select_target_title", "请选择工作区");
+    m.insert("distribution_records.current_target", "当前租户");
+    m.insert("distribution_records.unknown_target", "未知租户");
+    m.insert("distribution_records.select_target_title", "请选择租户");
     m.insert(
         "distribution_records.select_target_hint",
-        "选择后将显示该工作区的生效规则和分销记录。",
+        "选择后将显示该租户的生效规则和分销记录。",
     );
-    m.insert(
-        "distribution_records.no_tenants_title",
-        "暂无可查看的工作区",
-    );
+    m.insert("distribution_records.no_tenants_title", "暂无可查看的租户");
     m.insert(
         "distribution_records.no_tenants_hint",
-        "请先创建并启用工作区，再查看分销数据。",
+        "请先创建并启用租户，再查看分销数据。",
     );
     m.insert("distribution_records.beneficiary_id", "受益人 ID");
     m.insert(
@@ -2461,7 +2476,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "请输入真实租户 UUID；无效选择不会查询所有租户。",
     );
     m.insert("platform_pricing.apply", "切换范围");
-    m.insert("platform_pricing.choose_tenant", "选择工作区");
+    m.insert("platform_pricing.choose_tenant", "选择租户");
     m.insert(
         "platform_pricing.explicit_scope",
         "平台定价与租户定价分别管理；切换目标会清除未保存的表单。",

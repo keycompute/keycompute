@@ -24,6 +24,16 @@ fn PricingWorkspace(identity: PricingIdentity) -> Element {
         })
         .await
     });
+    let target_tenant_id = match target() {
+        PricingTarget::Tenant { tenant_id } => tenant_id.to_string(),
+        PricingTarget::Platform => String::new(),
+    };
+    let tenant_label = tenants().and_then(|result| result.ok()).and_then(|items| {
+        items
+            .into_iter()
+            .find(|item| item.id == target_tenant_id)
+            .map(|item| format!("{} · {}", item.name, item.slug))
+    });
     rsx! {div {class:"page-container platform-pricing-workspace",
         section {class:"platform-pricing-target",aria_label:i18n.t("platform_pricing.target"),
             label {class:"form-label",r#for:"platform-pricing-scope",{i18n.t("platform_pricing.target")}}
@@ -41,7 +51,7 @@ fn PricingWorkspace(identity: PricingIdentity) -> Element {
             if !error().is_empty(){p {class:"alert alert-error",role:"alert","{error}"}}
             p {class:"text-secondary",{i18n.t("platform_pricing.explicit_scope")}}
         }
-        for key in [format!("{:?}",target())]{PricingRecords{key:"{key}",identity,target:target()}}
+        for key in [format!("{:?}",target())]{PricingRecords{key:"{key}",identity,target:target(),tenant_label:tenant_label.clone()}}
     }}
 }
 
@@ -95,6 +105,7 @@ use crate::services::{
 };
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
+use crate::utils::display::short_id;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 
@@ -121,7 +132,11 @@ fn pricing_col_count(can_manage_platform: bool) -> u32 {
 
 /// Explicit root-managed pricing records for one chosen target.
 #[component]
-fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -> Element {
+fn PricingRecords(
+    target: PricingTarget,
+    identity: authority::PricingIdentity,
+    tenant_label: Option<String>,
+) -> Element {
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
@@ -190,7 +205,7 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
 
     rsx! {
         div { class: "platform-pricing-records",
-            p {class:"platform-pricing-current",{i18n.t("platform_pricing.current")} " " {authority::target_label(target,&i18n)}}
+            p {class:"platform-pricing-current",{i18n.t("platform_pricing.current")} " " {authority::target_label(target,&i18n,tenant_label.as_deref())}}
             p {class:"text-secondary",{i18n.t("platform_pricing.command_hint")}}
             PageHeader {
                 title: i18n.t("page.pricing").to_string(),
@@ -287,7 +302,7 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
                                     TableHead { {i18n.t("pricing.input_price")} }
                                     TableHead { {i18n.t("pricing.output_price")} }
                                     TableHead { {i18n.t("pricing.billing_status")} }
-                                    TableHead { {i18n.t("common.time")} }
+                                    TableHead { {i18n.t("pricing.created_at")} }
                                     if can_manage_platform {
                                         TableHead { {i18n.t("table.actions")} }
                                     }
@@ -317,7 +332,7 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
                                                 if is_platform_price(p) {
                                                     span {class:"pricing-tenant-global",{i18n.t("platform_pricing.global")}}
                                                 } else if let Some(tenant_id)=&p.tenant_id {
-                                                    span {class:"pricing-tenant-code",title:tenant_id.clone(),"{tenant_id}"}
+                                                    span {class:"pricing-tenant-code",title:tenant_id.clone(),"{short_id(tenant_id)}"}
                                                 }
 
                                             }
@@ -365,7 +380,14 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
                                             }
                                             if can_manage_platform {
                                                 td {
-                                                    div { class: "action-buttons pricing-actions",
+                                                    details { class: "row-action-menu",
+                                                        summary {
+                                                            class: "btn btn-ghost btn-sm",
+                                                            aria_label: i18n.t("common.more"),
+                                                            title: i18n.t("common.more"),
+                                                            "⋯"
+                                                        }
+                                                        div { class: "btn-group row-action-menu-popover",
                                                         if !p.is_default {
                                                             {
                                                                 let pid = p.id.clone();
@@ -435,6 +457,7 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
                                                                 }
                                                             }
                                                         }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -469,7 +492,7 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
             // 创建定价弹窗
             if show_create() {
                 CreatePricingModal {
-                    auth_store, target, identity,
+                    auth_store, target, identity, tenant_label: tenant_label.clone(),
                     on_close: move |_| show_create.set(false),
                     on_created: move |_| {
                         show_create.set(false);
@@ -566,6 +589,7 @@ fn CreatePricingModal(
     auth_store: AuthStore,
     target: PricingTarget,
     identity: authority::PricingIdentity,
+    tenant_label: Option<String>,
     on_close: EventHandler,
     on_created: EventHandler,
 ) -> Element {
@@ -678,7 +702,7 @@ fn CreatePricingModal(
                     }
                     div { class: "form-group",
                         label { class: "form-label", {i18n.t("pricing.tenant_id")} }
-                        p {class:"platform-pricing-target",{authority::target_label(target,&i18n)}}
+                        p {class:"platform-pricing-target",{authority::target_label(target,&i18n,tenant_label.as_deref())}}
                     }
                     div { class: "form-group",
                         label { class: "form-label", {i18n.t("pricing.input_price_label")} }

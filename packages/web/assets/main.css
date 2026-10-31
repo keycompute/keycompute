@@ -8165,6 +8165,146 @@ tbody tr:last-child .row-action-menu-popover {
 }
 .tenant-pricing-admin td .btn { margin: 2px; }
 
+/* ── Admin list consistency ───────────────────────────────
+ * Keep scope selectors, tabs, detail drawers and row actions visually
+ * consistent across the platform administration pages. */
+.platform-target-field {
+  width: min(100%, 620px);
+}
+
+.scope-id-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.scope-id-hint code,
+.scope-banner code {
+  color: var(--text-secondary);
+  font-family: var(--font-mono, "SFMono-Regular", Consolas, monospace);
+  font-size: 11px;
+}
+
+.distribution-records-page .tabs {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 4px;
+  max-width: 100%;
+  padding: 4px;
+  background: color-mix(in srgb, var(--bg-card) 92%, var(--bg-primary));
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.distribution-records-page .tab {
+  min-height: 36px;
+  padding: 7px 14px;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.distribution-records-page .tab:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--bg-tertiary) 60%, transparent);
+}
+
+.distribution-records-page .tab.active {
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border-color: var(--border-color);
+  box-shadow: var(--shadow-sm);
+}
+
+.distribution-records-page .tab:focus-visible,
+.row-action-menu > summary:focus-visible,
+.id-copy-button:focus-visible {
+  outline: 3px solid var(--color-accent-glow, rgba(59, 130, 246, 0.24));
+  outline-offset: 2px;
+}
+
+.row-action-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 6px 10px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.row-action-menu > summary:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.users-page .detail-drawer-backdrop {
+  align-items: center;
+  padding: 24px;
+}
+
+.users-page .detail-drawer {
+  height: auto;
+  max-height: min(720px, calc(100dvh - 48px));
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+}
+
+.detail-id-value {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.detail-id-value code {
+  color: var(--text-primary);
+  font-family: var(--font-mono, "SFMono-Regular", Consolas, monospace);
+  font-size: 12px;
+}
+
+.id-copy-button {
+  min-height: 30px;
+  padding: 4px 8px;
+  color: var(--color-primary);
+}
+
+.distribution-empty-state {
+  min-height: 180px;
+  padding: 28px 20px;
+}
+
+@media (max-width: 720px) {
+  .distribution-records-page .tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .distribution-records-page .tab {
+    width: 100%;
+  }
+
+  .users-page .detail-drawer-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .users-page .detail-drawer {
+    width: 100%;
+    max-height: 92dvh;
+    border-radius: 16px 16px 0 0;
+  }
+}
+
 /* ── Console UX consolidation ──────────────────────────────
  * A final, intentionally small layer that gives every authenticated page the
  * same information rhythm. Page-specific rules above remain responsible for

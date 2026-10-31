@@ -25,6 +25,7 @@ use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
 use crate::stores::user_store::{UserInfo, UserStore};
 use crate::utils::display::{platform_role_label, short_id};
+use crate::utils::on_copy_keyed;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 
@@ -1201,6 +1202,8 @@ fn AdminUsersView() -> Element {
     let mut role_filter = use_signal(|| "all".to_string());
     let mut status_filter = use_signal(|| "all".to_string());
     let mut selected_user = use_signal(|| Option::<UserDetail>::None);
+    let mut copied_user_id = use_signal(|| Option::<String>::None);
+    let copy_generation = use_signal(|| 0u64);
     let debounced_search = use_debounced_search(search);
     let mut query = use_signal(UserListQuery::default);
     let current_user = user_store.info.read().clone();
@@ -1932,7 +1935,13 @@ fn AdminUsersView() -> Element {
                                                     id: "user-detail-trigger-{u.id}",
                                                     class: "btn btn-ghost user-name",
                                                     r#type: "button",
-                                                    onclick: { let user = u.clone(); move |_| selected_user.set(Some(user.clone())) },
+                                                    onclick: {
+                                                        let user = u.clone();
+                                                        move |_| {
+                                                            copied_user_id.set(None);
+                                                            selected_user.set(Some(user.clone()));
+                                                        }
+                                                    },
                                                     {u.name.clone().unwrap_or_else(|| u.email.clone())}
                                                 }
                                                 span { class: "user-email text-secondary", "{u.email}" }
@@ -1950,11 +1959,17 @@ fn AdminUsersView() -> Element {
                                                 span { "—" }
                                             }
                                         }
-                                        td { {i18n.t("users.select_wallet_tenant")} }
+                                        td {
+                                            if matches!(u.platform_role, Some(PlatformRole::Root | PlatformRole::Operator)) {
+                                                span { class: "text-secondary", {i18n.t("users.platform_balance_unavailable")} }
+                                            } else {
+                                                span { class: "text-secondary", {i18n.t("users.select_wallet_tenant")} }
+                                            }
+                                        }
                                         td { {format_time(&u.created_at)} }
                                         td {
                                             details { class: "row-action-menu",
-                                                summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), "⋯" }
+                                                summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), title: i18n.t("common.more"), "⋯" }
                                                 div { class: "btn-group row-action-menu-popover",
                                                 // root/operator identities are protected from operator edits.
                                                 if !matches!(u.platform_role, Some(PlatformRole::Root | PlatformRole::Operator))
@@ -2076,6 +2091,7 @@ fn AdminUsersView() -> Element {
                     onclick: {
                         let opener_id = opener_id.clone();
                         move |_| {
+                            copied_user_id.set(None);
                             selected_user.set(None);
                             crate::utils::restore_focus_after_dialog(&opener_id);
                         }
@@ -2085,6 +2101,7 @@ fn AdminUsersView() -> Element {
                         move |event| {
                             if event.key() == Key::Escape {
                                 event.stop_propagation();
+                                copied_user_id.set(None);
                                 selected_user.set(None);
                                 crate::utils::restore_focus_after_dialog(&opener_id);
                             } else {
@@ -2103,6 +2120,7 @@ fn AdminUsersView() -> Element {
                                 onclick: {
                                     let opener_id = opener_id.clone();
                                     move |_| {
+                                        copied_user_id.set(None);
                                         selected_user.set(None);
                                         crate::utils::restore_focus_after_dialog(&opener_id);
                                     }
@@ -2114,7 +2132,31 @@ fn AdminUsersView() -> Element {
                             dt { {i18n.t("users.user")} }
                             dd { strong { {user.name.as_deref().unwrap_or(&user.email)} } p { class: "text-secondary", "{user.email}" } }
                             dt { {i18n.t("users.user_id")} }
-                            dd { code { "{user.id}" } }
+                            dd {
+                                div { class: "detail-id-value",
+                                    code {
+                                        title: "{user.id}",
+                                        aria_label: "{user.id}",
+                                        tabindex: "0",
+                                        "{short_id(&user.id)}"
+                                    }
+                                    button {
+                                        class: "btn btn-ghost btn-sm id-copy-button",
+                                        r#type: "button",
+                                        aria_label: i18n.t(if copied_user_id().as_deref() == Some(user.id.as_str()) { "common.copied" } else { "common.copy" }).to_string(),
+                                        title: i18n.t(if copied_user_id().as_deref() == Some(user.id.as_str()) { "common.copied" } else { "common.copy" }).to_string(),
+                                        onclick: on_copy_keyed(
+                                            user.id.clone(),
+                                            i18n.t("common.copy_manual_hint").to_string(),
+                                            ui_store,
+                                            copied_user_id,
+                                            copy_generation,
+                                            user.id.clone(),
+                                        ),
+                                        {if copied_user_id().as_deref() == Some(user.id.as_str()) { i18n.t("common.copied") } else { i18n.t("common.copy") }}
+                                    }
+                                }
+                            }
                             dt { {i18n.t("table.role")} }
                             dd { {platform_role_label(user.platform_role, &i18n)} }
                             dt { {i18n.t("common.status")} }
@@ -2122,11 +2164,23 @@ fn AdminUsersView() -> Element {
                             dt { {i18n.t("users.tenant")} }
                             dd {
                                 if let Some(memberships) = &user.memberships {
-                                    if memberships.is_empty() { "—" }
+                                    if memberships.is_empty() {
+                                        if matches!(user.platform_role, Some(PlatformRole::Root | PlatformRole::Operator)) {
+                                            span { class: "text-secondary", {i18n.t("users.platform_identity_no_tenant")} }
+                                        } else {
+                                            span { class: "text-secondary", "—" }
+                                        }
+                                    }
                                     for membership in memberships {
                                         p { "{membership.tenant_name.as_deref().unwrap_or(&membership.tenant_id)} · {membership.tenant_role}" }
                                     }
-                                } else { "—" }
+                                } else {
+                                    if matches!(user.platform_role, Some(PlatformRole::Root | PlatformRole::Operator)) {
+                                        span { class: "text-secondary", {i18n.t("users.platform_identity_no_tenant")} }
+                                    } else {
+                                        span { class: "text-secondary", "—" }
+                                    }
+                                }
                             }
                             dt { {i18n.t("users.wallet_scope")} }
                             dd { {i18n.t("users.wallet_scope_hint")} }
