@@ -86,18 +86,6 @@ fn copy_state_is_current(
     current_key == Some(expected_key) && current_generation == expected_generation
 }
 
-#[cfg(test)]
-mod tests {
-    use super::copy_state_is_current;
-
-    #[test]
-    fn stale_copy_timer_cannot_clear_a_newer_same_key_copy() {
-        assert!(!copy_state_is_current(Some("user-1"), 2, "user-1", 1));
-        assert!(copy_state_is_current(Some("user-1"), 2, "user-1", 2));
-        assert!(!copy_state_is_current(Some("user-2"), 2, "user-1", 2));
-    }
-}
-
 /// 创建复制按钮的 `onclick` handler（Toast 提示模式）。
 ///
 /// 适用于按钮本身展示复制内容的场景（如邀请链接），复制成功时通过
@@ -129,4 +117,16 @@ pub fn on_copy_toast(
             ui_store.show_info(hint);
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_state_is_current;
+
+    #[test]
+    fn stale_copy_timer_cannot_clear_a_newer_same_key_copy() {
+        assert!(!copy_state_is_current(Some("user-1"), 2, "user-1", 1));
+        assert!(copy_state_is_current(Some("user-1"), 2, "user-1", 2));
+        assert!(!copy_state_is_current(Some("user-2"), 2, "user-1", 2));
+    }
 }
