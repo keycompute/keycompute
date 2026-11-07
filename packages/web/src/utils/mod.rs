@@ -86,12 +86,11 @@ pub fn close_row_action_menus() {
                     element.contains(Some(active_node))
                 });
                 let _ = element.remove_attribute("open");
-                if restore_focus {
-                    if let Ok(Some(summary)) = element.query_selector("summary") {
-                        if let Ok(summary) = summary.dyn_into::<web_sys::HtmlElement>() {
-                            let _ = summary.focus();
-                        }
-                    }
+                if restore_focus
+                    && let Ok(Some(summary)) = element.query_selector("summary")
+                    && let Ok(summary) = summary.dyn_into::<web_sys::HtmlElement>()
+                {
+                    let _ = summary.focus();
                 }
             }
         }
