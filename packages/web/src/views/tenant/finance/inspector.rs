@@ -16,6 +16,7 @@ pub(super) fn Inspector(
     detail: Detail,
     on_close: EventHandler<()>,
 ) -> Element {
+    ui::components::modal::use_dialog_focus_return(true);
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let i18n = use_i18n();
@@ -46,10 +47,12 @@ pub(super) fn Inspector(
         }
     });
     let loaded = current_keyed_value(&(scope, detail.key()), data.state().cloned(), data());
-    rsx! {div{class:"modal-overlay",div{class:"modal finance-inspector",style:"width:min(950px,95vw);max-height:85vh;overflow:auto;box-sizing:border-box;overflow-wrap:anywhere;background:var(--bg-primary,#fff);animation:none;opacity:1",role:"dialog",aria_modal:"true",aria_label:i18n.t("tenant_finance.details"),tabindex:"-1",onkeydown:move|e|{if e.key()==Key::Escape{e.stop_propagation();on_close.call(());}},
-        h2{{i18n.t("tenant_finance.details")}}p{code{"{detail.id()}"}}p{{i18n.t("tenant_finance.owner")} " {detail.owner()}"}
+    rsx! {div{class:"modal-backdrop",tabindex:"-1",onclick:move |_|on_close.call(()),div{class:"modal finance-inspector",role:"dialog",aria_modal:"true",aria_label:i18n.t("tenant_finance.details"),tabindex:"-1",onclick:move|e|e.stop_propagation(),onkeydown:move|e|{if e.key()==Key::Escape{e.stop_propagation();on_close.call(());}else{ui::components::modal::contain_modal_focus(&e)}},
+        div{class:"modal-header",h2{class:"modal-title",{i18n.t("tenant_finance.details")}}button{class:"modal-close btn btn-ghost btn-sm",r#type:"button",autofocus:true,aria_label:i18n.t("common.close"),onclick:move |_|on_close.call(()),"✕"}}
+        div{class:"modal-body",p{code{"{detail.id()}"}}p{{i18n.t("tenant_finance.owner")} " {detail.owner()}"}
         p{class:"text-secondary",{i18n.t("tenant_finance.safe_fields")}}
         match loaded{None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},Some(Err(e))=>rsx!{p{role:"alert",class:"alert alert-error",{user_error_message(i18n, &e)}}},Some(Ok(value))=>rsx!{pre{style:"white-space:pre-wrap;overflow-wrap:anywhere","{value}"}}}
-        div{class:"modal-actions",button{class:"btn btn-secondary",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}button{class:"btn btn-primary",onmounted:move|e|async move{let _=e.set_focus(true).await;},onclick:move |_|on_close.call(()),{i18n.t("common.close")}}}
+        div{class:"modal-footer",button{class:"btn btn-secondary",r#type:"button",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}button{class:"btn btn-primary",r#type:"button",onmounted:move|e|async move{let _=e.set_focus(true).await;},onclick:move |_|on_close.call(()),{i18n.t("common.close")}}}
+        }
     }}}
 }

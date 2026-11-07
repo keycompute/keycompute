@@ -215,7 +215,7 @@ struct DialogFocusState {
 /// updating a reactive signal during render would schedule a second render and
 /// can overwrite the opener after `autofocus` moves focus into the dialog.
 #[cfg(target_arch = "wasm32")]
-fn use_dialog_focus_return(open: bool) {
+pub fn use_dialog_focus_return(open: bool) {
     use std::{cell::RefCell, rc::Rc};
     use wasm_bindgen::JsCast;
 
@@ -257,7 +257,7 @@ fn use_dialog_focus_return(open: bool) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn use_dialog_focus_return(open: bool) {
+pub fn use_dialog_focus_return(open: bool) {
     let _ = open;
 }
 

@@ -128,8 +128,8 @@ pub fn PlatformAudit() -> Element {
                 PlatformAuditPage { key: "{key}", scope }
             }
         } else {
-            div { class: "page-container", role: "alert",
-                p { class: "alert alert-error", {i18n.t("platform_audit.denied")} }
+            div { class: "page-container",
+                p { class: "alert alert-error", role: "alert", {i18n.t("platform_audit.denied")} }
             }
         }
     }
@@ -212,7 +212,7 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
                 title: i18n.t("platform_audit.title").to_string(),
                 description: i18n.t("platform_audit.hint").to_string(),
             }
-            p { class: "alert alert-info", {i18n.t("platform_audit.boundary")} }
+            p { class: "alert alert-info", role: "status", {i18n.t("platform_audit.boundary")} }
             div { class: "card filter-panel",
                 div { class: "filter-grid platform-audit-filter-grid",
                     div { class: "form-field",

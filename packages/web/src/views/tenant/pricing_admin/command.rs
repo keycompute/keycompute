@@ -18,6 +18,7 @@ pub(super) fn Editor(
     on_changed: EventHandler<()>,
 ) -> Element {
     super::super::workspace_switcher::use_workspace_blocker();
+    ui::components::modal::use_dialog_focus_return(true);
     let i18n = use_i18n();
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
@@ -84,11 +85,11 @@ pub(super) fn Editor(
         BillingDimension::ProviderAccount => i18n.t("tenant_pricing.dimension_provider_account"),
         BillingDimension::Node => i18n.t("tenant_pricing.dimension_node"),
     };
-    rsx! {div {class:"modal-overlay",
-        div {class:"modal tenant-pricing-editor",role:"dialog",aria_modal:"true",aria_label:i18n.t(label),
+    rsx! {div {class:"modal-backdrop",tabindex:"-1",onclick:move |_|if !busy(){on_close.call(())},
+        div {class:"modal tenant-pricing-editor",role:"dialog",aria_modal:"true",aria_label:i18n.t(label),tabindex:"-1",onclick:move|e|e.stop_propagation(),onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();on_close.call(())}else{ui::components::modal::contain_modal_focus(&e)}},
             div{class:"modal-header",
                 div{h2{class:"modal-title",{i18n.t(label)}}p{class:"modal-context","{i18n.t(\"tenant.current\")} · {workspace}"}}
-                button{class:"modal-close",r#type:"button",aria_label:i18n.t("common.close"),disabled:busy(),onclick:move |_|on_close.call(()),"×"}
+                button{class:"modal-close btn btn-ghost btn-sm",r#type:"button",autofocus:true,aria_label:i18n.t("common.close"),disabled:busy(),onclick:move |_|on_close.call(()),"✕"}
             }
             div{class:"modal-body",
                 if !error().is_empty(){p {class:"alert alert-error",role:"alert","{error}"}}
@@ -110,8 +111,8 @@ pub(super) fn Editor(
                 p {class:"command-note",{i18n.t("tenant.command_hint")}}
             }
             div {class:"modal-footer",
-                button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}
-                button {class:"btn btn-primary",disabled:busy(),onclick:submit,{i18n.t("tenant.confirm")}}
+                button {class:"btn btn-secondary",r#type:"button",disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}
+                button {class:"btn btn-primary",r#type:"button",disabled:busy(),onclick:submit,{i18n.t("tenant.confirm")}}
             }
         }
     }}

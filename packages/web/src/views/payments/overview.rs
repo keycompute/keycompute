@@ -161,7 +161,7 @@ fn PaymentsOverviewContent() -> Element {
                 h2 { class: "section-title", {i18n.t("payments.recharge_records")} }
                 match orders_error.as_deref() {
                     Some(error) => rsx! {
-                        div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}：{error}" }
+                        div { class: "alert alert-error", role: "alert", "{i18n.t(\"common.load_failed\")}：{error}" }
                     },
                     None => rsx! {
                         Table {

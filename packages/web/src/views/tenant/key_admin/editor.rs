@@ -21,6 +21,7 @@ pub(super) fn Editor(
     on_changed: EventHandler<()>,
 ) -> Element {
     super::super::workspace_switcher::use_workspace_blocker();
+    ui::components::modal::use_dialog_focus_return(true);
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let mut ui = use_context::<UiStore>();
@@ -126,10 +127,10 @@ pub(super) fn Editor(
         });
     };
     let workspace = common::workspace_name(users, scope);
-    rsx! {div{class:"modal-overlay",div{class:"modal tenant-key-editor",tabindex:"-1",onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();on_close.call(());}},role:"dialog",aria_modal:"true",aria_label:i18n.t(label),
+    rsx! {div{class:"modal-backdrop",tabindex:"-1",onclick:move |_|if !busy(){on_close.call(())},div{class:"modal tenant-key-editor",tabindex:"-1",onclick:move|e|e.stop_propagation(),onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();on_close.call(());}else{ui::components::modal::contain_modal_focus(&e)}},role:"dialog",aria_modal:"true",aria_label:i18n.t(label),
         div{class:"modal-header",
             div{h2{class:"modal-title",{i18n.t(label)}}p{class:"modal-context","{i18n.t(\"tenant.current\")} · {workspace}"}}
-            button{class:"modal-close",r#type:"button",aria_label:i18n.t("common.close"),disabled:busy(),onclick:move |_|on_close.call(()),"×"}
+            button{class:"modal-close btn btn-ghost btn-sm",r#type:"button",aria_label:i18n.t("common.close"),disabled:busy(),onclick:move |_|on_close.call(()),"✕"}
         }
         div{class:"modal-body",
             if let Some(row)=op.key_row(){details{class:"technical-details",summary{{i18n.t("tenant_keys.key_identity")}}code{"{row.id}"}}}
@@ -171,8 +172,8 @@ pub(super) fn Editor(
             }
         }
         div{class:"modal-footer",
-            button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}
-            button{class:if dangerous{"btn btn-danger"}else{"btn btn-primary"},disabled:busy(),onclick:submit,{i18n.t(label)}}
+            button{class:"btn btn-secondary",r#type:"button",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}
+            button{class:if dangerous{"btn btn-danger"}else{"btn btn-primary"},r#type:"button",disabled:busy(),onclick:submit,{i18n.t(label)}}
         }
     }}}
 }
@@ -256,7 +257,7 @@ fn OwnerPicker(
                         }
                     }
                     if let Some(message)=owner_picker_notice_key(&members.items,&filter()){
-                        p{class:"alert alert-info",{i18n.t(message)}}
+                        p{class:"alert alert-info",role:"status",{i18n.t(message)}}
                     }
                     Pager{page:page(),total_pages:members.total_pages,total:members.total,on_page:move|value|if !disabled{page.set(value);}}
                 }

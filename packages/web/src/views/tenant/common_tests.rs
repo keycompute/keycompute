@@ -269,6 +269,134 @@ fn member_picker_does_not_submit_an_ime_composition_enter() {
 }
 
 #[test]
+fn tenant_pager_delegates_to_the_shared_pagination_contract() {
+    let source = include_str!("common.rs");
+    let pager = source
+        .split_once("pub fn Pager")
+        .expect("tenant pager")
+        .1
+        .split_once("#[component]")
+        .expect("pager boundary")
+        .0;
+    assert!(pager.contains("Pagination {"));
+    assert!(pager.contains("show_page_size: false"));
+    assert!(pager.contains("common.pagination_summary"));
+    assert!(!pager.contains("table-pagination-footer"));
+}
+
+#[test]
+fn tenant_dialog_sources_use_the_shared_backdrop_contract() {
+    for (name, source) in [
+        (
+            "distribution command",
+            include_str!("distribution_admin/command.rs"),
+        ),
+        ("finance inspector", include_str!("finance/inspector.rs")),
+        ("finance controls", include_str!("finance_control/mod.rs")),
+        ("key editor", include_str!("key_admin/editor.rs")),
+        ("key owner", include_str!("key_admin/owner.rs")),
+        ("pricing command", include_str!("pricing_admin/command.rs")),
+        ("response editor", include_str!("response_admin/editor.rs")),
+        (
+            "response inspector",
+            include_str!("response_admin/inspector.rs"),
+        ),
+        ("node command", include_str!("node_admin/command.rs")),
+        ("provider admin", include_str!("provider_admin/mod.rs")),
+    ] {
+        assert!(
+            source.contains("modal-backdrop"),
+            "{name} lost shared backdrop"
+        );
+        assert!(
+            !source.contains("modal-overlay"),
+            "{name} still uses legacy overlay"
+        );
+    }
+}
+
+#[test]
+fn custom_dialogs_capture_and_restore_focus() {
+    for (name, source) in [
+        (
+            "platform tenant create",
+            include_str!("../shared/tenants.rs"),
+        ),
+        ("platform pricing", include_str!("../shared/pricing.rs")),
+        ("platform accounts", include_str!("../shared/accounts.rs")),
+        (
+            "passthrough bindings",
+            include_str!("../shared/passthrough_bindings.rs"),
+        ),
+        ("platform users", include_str!("../shared/users.rs")),
+        ("tenant dialogs", include_str!("common.rs")),
+        (
+            "tenant provider dialogs",
+            include_str!("provider_admin/mod.rs"),
+        ),
+    ] {
+        assert!(
+            source.contains("use_dialog_focus_return"),
+            "{name} does not restore focus after closing a custom dialog"
+        );
+    }
+}
+
+#[test]
+fn shared_custom_dialogs_expose_escape_and_focus_trap() {
+    for (name, source, minimum_escape_handlers) in [
+        (
+            "platform accounts",
+            include_str!("../shared/accounts.rs"),
+            3,
+        ),
+        ("platform pricing", include_str!("../shared/pricing.rs"), 2),
+        (
+            "passthrough bindings",
+            include_str!("../shared/passthrough_bindings.rs"),
+            1,
+        ),
+        ("platform tenants", include_str!("../shared/tenants.rs"), 1),
+        ("platform users", include_str!("../shared/users.rs"), 4),
+    ] {
+        assert!(
+            source.matches("Key::Escape").count() >= minimum_escape_handlers,
+            "{name} does not expose Escape handling for every custom dialog"
+        );
+        assert!(
+            source.contains("contain_modal_focus"),
+            "{name} does not expose the shared focus trap"
+        );
+    }
+}
+
+#[test]
+fn row_action_menus_close_after_an_action_is_chosen() {
+    let utils = include_str!("../../utils/mod.rs");
+    assert!(utils.contains("document.active_element()"));
+    assert!(utils.contains("query_selector(\"summary\")"));
+    for (name, source) in [
+        ("platform tenants", include_str!("../shared/tenants.rs")),
+        ("platform accounts", include_str!("../shared/accounts.rs")),
+        ("platform users", include_str!("../shared/users.rs")),
+        ("platform pricing", include_str!("../shared/pricing.rs")),
+        ("tenant nodes", include_str!("node_admin/table.rs")),
+        ("tenant pricing", include_str!("pricing_admin/mod.rs")),
+        (
+            "tenant distribution",
+            include_str!("distribution_admin/mod.rs"),
+        ),
+        ("tenant providers", include_str!("provider_admin/mod.rs")),
+        ("tenant responses", include_str!("response_admin/mod.rs")),
+    ] {
+        assert!(
+            source.contains("close_row_action_menus"),
+            "{name} leaves native row action details open"
+        );
+    }
+}
+
+#[test]
 fn tenant_css_overrides_shared_grid_and_modal_rules_with_specific_selectors() {
     let css = include_str!("../../../assets/main.css");
     for selector in [
@@ -279,9 +407,9 @@ fn tenant_css_overrides_shared_grid_and_modal_rules_with_specific_selectors() {
         assert!(css.contains(selector), "missing {selector}");
     }
     for selector in [
-        ".modal-overlay .modal.tenant-key-editor",
-        ".modal-overlay .modal.tenant-pricing-editor",
-        ".modal-overlay .modal.tenant-distribution-editor",
+        ".modal-backdrop .modal.tenant-key-editor",
+        ".modal-backdrop .modal.tenant-pricing-editor",
+        ".modal-backdrop .modal.tenant-distribution-editor",
     ] {
         assert!(css.contains(selector), "missing {selector}");
     }

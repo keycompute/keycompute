@@ -45,7 +45,7 @@ fn PricingWorkspace(identity: PricingIdentity) -> Element {
                     option {value:"",{i18n.t("platform_pricing.choose_tenant")}}
                     if let Some(Ok(items))=tenants(){for item in items {option {value:"{item.id}","{item.name} · {item.slug}"}}}
                 }}
-            button {class:"btn btn-secondary",onclick:move |_|match authority::parse_target(&mode(),&tenant()) {
+            button {class:"btn btn-secondary",r#type:"button",onclick:move |_|match authority::parse_target(&mode(),&tenant()) {
                 Ok(next)=>{target.set(next);error.set(String::new());},Err(_)=>error.set(i18n.t("platform_pricing.invalid_target").into())
             },{i18n.t("platform_pricing.apply")}}
             if !error().is_empty(){p {class:"alert alert-error",role:"alert","{error}"}}
@@ -214,6 +214,7 @@ fn PricingRecords(
                     if can_manage_platform {
                         button {
                             class: "btn btn-primary",
+                            r#type: "button",
                             onclick: move |_| show_create.set(true),
                             {i18n.t("pricing.create")}
                         }
@@ -223,10 +224,10 @@ fn PricingRecords(
 
             // 操作结果提示
             if !op_ok().is_empty() {
-                div { class: "alert alert-success", "{op_ok}" }
+                div { class: "alert alert-success", role: "status", "{op_ok}" }
             }
             if !op_err().is_empty() {
-                div { class: "alert alert-error", "{op_err}" }
+                div { class: "alert alert-error", role: "alert", "{op_err}" }
             }
 
             div { class: "toolbar",
@@ -387,13 +388,14 @@ fn PricingRecords(
                                                             title: i18n.t("common.more"),
                                                             "⋯"
                                                         }
-                                                        div { class: "btn-group row-action-menu-popover",
+                                                        div { class: "btn-group row-action-menu-popover", onclick: move |_| crate::utils::close_row_action_menus(),
                                                         if !p.is_default {
                                                             {
                                                                 let pid = p.id.clone();
                                                                 rsx! {
                                                                     button {
                                                                         class: "btn btn-sm btn-secondary",
+                                                                        r#type: "button",
                                                                         onclick: move |_| {
                                                                             if mutating() || !identity.is_current(auth_store,user_store){return;}
                                                                             mutating.set(true);
@@ -435,6 +437,7 @@ fn PricingRecords(
                                                             rsx! {
                                                                 button {
                                                                     class: "btn btn-sm btn-secondary",
+                                                                    r#type: "button",
                                                                     onclick: move |_| editing_pricing.set(Some(pricing.clone())),
                                                                     {i18n.t("form.edit")}
                                                                 }
@@ -448,6 +451,7 @@ fn PricingRecords(
                                                                 rsx! {
                                                                     button {
                                                                         class: "btn btn-sm btn-danger",
+                                                                        r#type: "button",
                                                                         onclick: move |_| {
                                                                             delete_candidate.set(Some((pid.clone(), model_name.clone())));
                                                                             delete_modal_open.set(true);
@@ -594,6 +598,7 @@ fn CreatePricingModal(
     on_created: EventHandler,
 ) -> Element {
     let i18n = use_i18n();
+    ui::components::modal::use_dialog_focus_return(true);
     let mut model = use_signal(String::new);
     let mut provider = use_signal(|| "provideraccount".to_string());
     let user_store = use_context::<UserStore>();
@@ -661,21 +666,34 @@ fn CreatePricingModal(
     };
 
     rsx! {
-        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+        div {
+            class: "modal-backdrop",
+            tabindex: "-1",
+            onclick: move |_| if !saving() { on_close.call(()) },
+            onkeydown: move |event| {
+                if event.key() == Key::Escape && !saving() {
+                    event.stop_propagation();
+                    on_close.call(());
+                } else {
+                    ui::components::modal::contain_modal_focus(&event);
+                }
+            },
             div { class: "modal", role: "dialog", aria_modal: "true", aria_label: i18n.t("pricing.create_title"), onclick: move |e| e.stop_propagation(),
                 div { class: "modal-header",
                     h2 { class: "modal-title", {i18n.t("pricing.create_title")} }
                     button {
                         class: "btn btn-ghost btn-sm",
                         r#type: "button",
+                        autofocus: true,
                         aria_label: i18n.t("common.close"),
-                        onclick: move |_| on_close.call(()),
+                        disabled: saving(),
+                        onclick: move |_| if !saving() { on_close.call(()) },
                         "✕"
                     }
                 }
                 div { class: "modal-body",
                     if !form_err().is_empty() {
-                        div { class: "alert alert-error", "{form_err}" }
+                        div { class: "alert alert-error", role: "alert", "{form_err}" }
                     }
                     div { class: "form-group",
                         label { class: "form-label", {i18n.t("pricing.model_name")} }
@@ -745,7 +763,8 @@ fn CreatePricingModal(
                     button {
                         class: "btn btn-ghost",
                         r#type: "button",
-                        onclick: move |_| on_close.call(()),
+                        disabled: saving(),
+                        onclick: move |_| if !saving() { on_close.call(()) },
                         {i18n.t("form.cancel")}
                     }
                     button {
@@ -781,6 +800,7 @@ fn EditPricingModal(
     on_updated: EventHandler,
 ) -> Element {
     let i18n = use_i18n();
+    ui::components::modal::use_dialog_focus_return(true);
     let user_store = use_context::<UserStore>();
     let mut input_price = use_signal(|| authority::display_decimal(&initial_input_price));
     let mut output_price = use_signal(|| authority::display_decimal(&initial_output_price));
@@ -835,21 +855,34 @@ fn EditPricingModal(
     };
 
     rsx! {
-        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+        div {
+            class: "modal-backdrop",
+            tabindex: "-1",
+            onclick: move |_| if !saving() { on_close.call(()) },
+            onkeydown: move |event| {
+                if event.key() == Key::Escape && !saving() {
+                    event.stop_propagation();
+                    on_close.call(());
+                } else {
+                    ui::components::modal::contain_modal_focus(&event);
+                }
+            },
             div { class: "modal", role: "dialog", aria_modal: "true", aria_label: i18n.t("pricing.edit_title"), onclick: move |e| e.stop_propagation(),
                 div { class: "modal-header",
                     h2 { class: "modal-title", {i18n.t("pricing.edit_title")} }
                     button {
                         class: "btn btn-ghost btn-sm",
                         r#type: "button",
+                        autofocus: true,
                         aria_label: i18n.t("common.close"),
-                        onclick: move |_| on_close.call(()),
+                        disabled: saving(),
+                        onclick: move |_| if !saving() { on_close.call(()) },
                         "✕"
                     }
                 }
                 div { class: "modal-body",
                     if !form_err().is_empty() {
-                        div { class: "alert alert-error", "{form_err}" }
+                        div { class: "alert alert-error", role: "alert", "{form_err}" }
                     }
                     div { class: "form-group",
                         label { class: "form-label", {i18n.t("pricing.model_name")} }
@@ -907,7 +940,8 @@ fn EditPricingModal(
                     button {
                         class: "btn btn-ghost",
                         r#type: "button",
-                        onclick: move |_| on_close.call(()),
+                        disabled: saving(),
+                        onclick: move |_| if !saving() { on_close.call(()) },
                         {i18n.t("form.cancel")}
                     }
                     button {

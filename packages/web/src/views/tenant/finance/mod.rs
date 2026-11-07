@@ -174,10 +174,10 @@ fn FinanceWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
             h2 { class: "section-title", {i18n.t("tenant_finance.title")} }
             p { class: "text-secondary", {i18n.t("tenant_finance.shared_payment")} }
         }
-        nav{class:"segmented-control",aria_label:i18n.t("tenant_finance.title"),
-            button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Usage,onclick:move |_|select_tab(Tab::Usage),{i18n.t("tenant_finance.usage")}}
-            button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Orders,onclick:move |_|select_tab(Tab::Orders),{i18n.t("tenant_finance.orders")}}
-            button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Wallet,onclick:move |_|select_tab(Tab::Wallet),{i18n.t("tenant_finance.wallet")}}
+        nav{class:"segmented-control",role:"group",aria_label:i18n.t("tenant_finance.title"),
+            button{class:"btn btn-secondary",r#type:"button",aria_pressed:query().tab==Tab::Usage,onclick:move |_|select_tab(Tab::Usage),{i18n.t("tenant_finance.usage")}}
+            button{class:"btn btn-secondary",r#type:"button",aria_pressed:query().tab==Tab::Orders,onclick:move |_|select_tab(Tab::Orders),{i18n.t("tenant_finance.orders")}}
+            button{class:"btn btn-secondary",r#type:"button",aria_pressed:query().tab==Tab::Wallet,onclick:move |_|select_tab(Tab::Wallet),{i18n.t("tenant_finance.wallet")}}
         }
         form{class:"filter-panel",aria_label:i18n.t("tenant_finance.apply"),onsubmit:apply,
             div{class:"filter-grid tenant-finance-filter-grid",
@@ -209,10 +209,10 @@ fn FinanceWorkspace(scope: WorkspaceScope, embedded: bool) -> Element {
         }
         match loaded{
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},Some(Err(e))=>rsx!{p{role:"alert",class:"alert alert-error",{user_error_message(i18n, &e)}}},
-            Some(Ok(Rows::ChooseOwner))=>rsx!{p{class:"alert alert-info",{i18n.t("tenant_finance.choose_wallet")}}},
+            Some(Ok(Rows::ChooseOwner))=>rsx!{p{class:"alert alert-info",role:"status",{i18n.t("tenant_finance.choose_wallet")}}},
             Some(Ok(Rows::Wallet(wallet)))=>rsx!{section{class:"card tenant-member-wallet",h2{{i18n.t("tenant_finance.wallet")}}p{class:"text-secondary",{i18n.t("tenant_finance.wallet_scope")}}
                 dl{class:"detail-grid",div{dt{{i18n.t("tenant_finance.owner")}}dd{TechnicalId{value:wallet.user_id.to_string()}}}div{dt{{i18n.t("tenant_finance.available")}}dd{"{wallet.available_balance}"}}div{dt{{i18n.t("tenant_finance.frozen")}}dd{"{wallet.frozen_balance}"}}div{dt{{i18n.t("tenant_finance.recharged")}}dd{"{wallet.total_recharged}"}}div{dt{{i18n.t("tenant_finance.consumed")}}dd{"{wallet.total_consumed}"}}div{dt{{i18n.t("tenant_finance.as_of")}}dd{{format_time(&wallet.as_of)}}}}
-                if !wallet.initialized{p{class:"alert alert-info",{i18n.t("tenant_finance.uninitialized")}}}
+                if !wallet.initialized{p{class:"alert alert-info",role:"status",{i18n.t("tenant_finance.uninitialized")}}}
             }},
             Some(Ok(Rows::Usage(p)))=>rsx!{UsageTable{page:p,on_detail:move|row|detail.set(Some(Detail::Usage(row))),on_page:move|page|{query.write().page=page;detail.set(None);}}},
             Some(Ok(Rows::Orders(p)))=>rsx!{PaymentTable{page:p,on_detail:move|row|detail.set(Some(Detail::Order(row))),on_page:move|page|{query.write().page=page;detail.set(None);}}},
@@ -248,7 +248,7 @@ fn UsageTable(
                                 td {"{row.input_tokens} / {row.output_tokens} / {row.total_tokens}"}
                                 td {"{row.currency} {row.user_amount}"}
                                 td {{format_time(&row.created_at)}}
-                                td {button {class:"btn btn-secondary",onclick:move |_|on_detail.call(selected.clone()),{i18n.t("tenant_finance.details")}}}
+                                td {button {class:"btn btn-secondary",r#type:"button",onclick:move |_|on_detail.call(selected.clone()),{i18n.t("tenant_finance.details")}}}
                             }}}
                         }
                     }
@@ -286,7 +286,7 @@ fn PaymentTable(
                                 td {"{row.currency} {row.amount}"}
                                 td {{payment_status_label(row.status.as_str(), &i18n)}}
                                 td {{format_time(&row.created_at)}}
-                                td {button {class:"btn btn-secondary",onclick:move |_|on_detail.call(selected.clone()),{i18n.t("tenant_finance.details")}}}
+                                td {button {class:"btn btn-secondary",r#type:"button",onclick:move |_|on_detail.call(selected.clone()),{i18n.t("tenant_finance.details")}}}
                             }}}
                         }
                     }

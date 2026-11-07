@@ -149,7 +149,7 @@ pub fn UserProfile() -> Element {
             }
 
             if let Some(msg) = save_msg() {
-                div { class: "alert alert-success", "{msg}" }
+                div { class: "alert alert-success", role: "status", "{msg}" }
             }
 
             div {
@@ -207,7 +207,7 @@ pub fn UserProfile() -> Element {
                                 }
                             }
                             if let Some(err) = save_error() {
-                                div { class: "alert alert-error", "{err}" }
+                                div { class: "alert alert-error", role: "alert", "{err}" }
                             }
                             div {
                                 class: "form-actions profile-actions",
@@ -256,6 +256,7 @@ pub fn UserProfile() -> Element {
                                 class: "profile-actions",
                                 button {
                                     class: "btn btn-secondary",
+                                    r#type: "button",
                                     onclick: on_edit_start,
                                     {i18n.t("profile.edit")}
                                 }

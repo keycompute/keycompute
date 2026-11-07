@@ -103,7 +103,7 @@ pub fn TenantProviders() -> Element {
 fn Workspace(scope: WorkspaceScope) -> Element {
     let i = use_i18n();
     let mut k = use_signal(|| Kind::Accounts);
-    rsx! {div{class:"page-container tenant-provider-admin",ui::PageHeader{title:i.t("tenant_providers.title").to_string(),description:i.t("tenant_providers.hint").to_string()} WorkspaceLinks{} WorkspaceContext{} nav{class:"segmented-control",button{class:"btn btn-secondary",aria_pressed:k()==Kind::Accounts,onclick:move |_|k.set(Kind::Accounts),{i.t("tenant_providers.accounts")}} button{class:"btn btn-secondary",aria_pressed:k()==Kind::Bindings,onclick:move |_|k.set(Kind::Bindings),{i.t("tenant_providers.bindings")}}} if k()==Kind::Accounts{Accounts{scope}}else{Bindings{scope}}}}
+    rsx! {div{class:"page-container tenant-provider-admin",ui::PageHeader{title:i.t("tenant_providers.title").to_string(),description:i.t("tenant_providers.hint").to_string()} WorkspaceLinks{} WorkspaceContext{} nav{class:"segmented-control",role:"group",aria_label:i.t("tenant_providers.title"),button{class:"btn btn-secondary",r#type:"button",aria_pressed:k()==Kind::Accounts,onclick:move |_|k.set(Kind::Accounts),{i.t("tenant_providers.accounts")}} button{class:"btn btn-secondary",r#type:"button",aria_pressed:k()==Kind::Bindings,onclick:move |_|k.set(Kind::Bindings),{i.t("tenant_providers.bindings")}}} if k()==Kind::Accounts{Accounts{scope}}else{Bindings{scope}}}}
 }
 #[component]
 fn Accounts(scope: WorkspaceScope) -> Element {
@@ -310,12 +310,12 @@ fn AccountRow(
             td { if row.pool_enabled { {i.t("common.yes")} } else { {i.t("common.no")} } }
             td {
                 details { class:"row-action-menu",
-                    summary { class:"btn btn-ghost btn-sm", aria_label:i.t("common.more"), "⋯" }
-                    div { class:"btn-group row-action-menu-popover",
-                        button { class:"btn btn-ghost btn-sm", disabled:busy(), onclick:move |_|onedit.call(edit_row.clone()), {i.t("form.edit")} }
-                        button { class:"btn btn-ghost btn-sm", disabled:busy(), onclick:move |_|action(AccountAction::Test), {i.t("tenant_providers.test")} }
-                        button { class:"btn btn-ghost btn-sm", disabled:busy(), onclick:move |_|action(AccountAction::Refresh), {i.t("common.refresh")} }
-                        button { class:"btn btn-danger btn-sm", disabled:busy()||bound, onclick:move |_|ondelete.call(delete_row.clone()), {i.t("form.delete")} }
+                    summary { class:"btn btn-ghost btn-sm", aria_label:i.t("common.more"), title:i.t("common.more"), "⋯" }
+                    div { class:"btn-group row-action-menu-popover", onclick: move |_| crate::utils::close_row_action_menus(),
+                        button { class:"btn btn-ghost btn-sm", r#type:"button", disabled:busy(), onclick:move |_|onedit.call(edit_row.clone()), {i.t("form.edit")} }
+                        button { class:"btn btn-ghost btn-sm", r#type:"button", disabled:busy(), onclick:move |_|action(AccountAction::Test), {i.t("tenant_providers.test")} }
+                        button { class:"btn btn-ghost btn-sm", r#type:"button", disabled:busy(), onclick:move |_|action(AccountAction::Refresh), {i.t("common.refresh")} }
+                        button { class:"btn btn-danger btn-sm", r#type:"button", disabled:busy()||bound, onclick:move |_|ondelete.call(delete_row.clone()), {i.t("form.delete")} }
                     }
                 }
                 if !err().is_empty() { small { class:"text-danger", role:"alert", "{err}" } }
@@ -331,6 +331,7 @@ fn AccountEditor(
     saved: EventHandler<()>,
 ) -> Element {
     super::workspace_switcher::use_workspace_blocker();
+    ui::components::modal::use_dialog_focus_return(true);
     let a = use_context::<AuthStore>();
     let u = use_context::<UserStore>();
     let i = use_i18n();
@@ -452,7 +453,7 @@ fn AccountEditor(
             }
         });
     };
-    rsx! {div{class:"modal-backdrop",div{class:"modal modal-wide",role:"dialog",aria_modal:"true",aria_label:i.t("tenant_providers.account_editor"),div{class:"modal-header",h2{{i.t("tenant_providers.account_editor")}}} div{class:"modal-body",div{class:"modal-form-grid",label{{i.t("tenant_providers.name")} input{class:"input-field",value:"{name}",oninput:move|e|name.set(e.value())}} label{{i.t("tenant_providers.provider")} select{class:"input-field",disabled:existing.is_some(),value:"{provider}",onchange:move|e|provider.set(e.value()),option{value:"openai",{i.t("tenant_providers.openai_compatible")}} option{value:"anthropic",{i.t("tenant_providers.anthropic_compatible")}}}} label{class:"modal-field-wide",{i.t("tenant_providers.base_url")} input{class:"input-field",value:"{base}",oninput:move|e|base.set(e.value())}} label{class:"modal-field-wide",{i.t("tenant_providers.api_key")} input{class:"input-field",r#type:"password",value:"{secret}",oninput:move|e|secret.set(e.value())}} label{class:"modal-field-wide",{i.t("tenant_providers.models")} input{class:"input-field",value:"{ms}",oninput:move|e|ms.set(e.value())}} if provider()=="openai" { label{class:"modal-field-wide",{i.t("tenant_providers.capabilities")} select{class:"input-field",value:"{mode}",onchange:move|e|mode.set(e.value()),option{value:"chat_completions",{i.t("tenant_providers.capability_chat")}} option{value:"responses",{i.t("tenant_providers.capability_responses")}} option{value:"both",{i.t("tenant_providers.capability_both")}}}} } label{{i.t("tenant_providers.rpm_limit")} input{class:"input-field",r#type:"number",min:"1",value:"{rpm}",oninput:move|e|rpm.set(e.value())}} label{{i.t("tenant_providers.tpm_limit")} input{class:"input-field",r#type:"number",min:"1",value:"{tpm}",oninput:move|e|tpm.set(e.value())}} label{{i.t("tenant_providers.priority")} input{class:"input-field",r#type:"number",min:"0",max:"10",value:"{priority}",oninput:move|e|priority.set(e.value())}} if existing.is_some(){label{class:"checkbox-field",input{r#type:"checkbox",checked:active(),onchange:move|e|active.set(e.checked())}{i.t("tenant_providers.active")}}} label{class:"checkbox-field",input{r#type:"checkbox",checked:pool(),onchange:move|e|pool.set(e.checked())}{i.t("tenant_providers.pool")}}} if !err().is_empty(){p{class:"alert alert-error",role:"alert","{err}"}}} div{class:"modal-footer",button{class:"btn btn-secondary",disabled:busy(),onclick:move |_|onclose.call(()),{i.t("form.cancel")}} button{class:"btn btn-primary",disabled:busy(),onclick:submit,{i.t("form.save")}}}}}}
+    rsx! {div{class:"modal-backdrop",tabindex:"-1",onclick:move |_|if !busy(){onclose.call(())},onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();onclose.call(())}else{ui::components::modal::contain_modal_focus(&e)}},div{class:"modal modal-wide",role:"dialog",aria_modal:"true",aria_label:i.t("tenant_providers.account_editor"),tabindex:"-1",onclick:move|e|e.stop_propagation(),div{class:"modal-header",h2{class:"modal-title",{i.t("tenant_providers.account_editor")}}button{class:"modal-close btn btn-ghost btn-sm",r#type:"button",autofocus:true,aria_label:i.t("common.close"),disabled:busy(),onclick:move |_|onclose.call(()),"✕"}} div{class:"modal-body",div{class:"modal-form-grid",label{{i.t("tenant_providers.name")} input{class:"input-field",value:"{name}",oninput:move|e|name.set(e.value())}} label{{i.t("tenant_providers.provider")} select{class:"input-field",disabled:existing.is_some(),value:"{provider}",onchange:move|e|provider.set(e.value()),option{value:"openai",{i.t("tenant_providers.openai_compatible")}} option{value:"anthropic",{i.t("tenant_providers.anthropic_compatible")}}}} label{class:"modal-field-wide",{i.t("tenant_providers.base_url")} input{class:"input-field",value:"{base}",oninput:move|e|base.set(e.value())}} label{class:"modal-field-wide",{i.t("tenant_providers.api_key")} input{class:"input-field",r#type:"password",value:"{secret}",oninput:move|e|secret.set(e.value())}} label{class:"modal-field-wide",{i.t("tenant_providers.models")} input{class:"input-field",value:"{ms}",oninput:move|e|ms.set(e.value())}} if provider()=="openai" { label{class:"modal-field-wide",{i.t("tenant_providers.capabilities")} select{class:"input-field",value:"{mode}",onchange:move|e|mode.set(e.value()),option{value:"chat_completions",{i.t("tenant_providers.capability_chat")}} option{value:"responses",{i.t("tenant_providers.capability_responses")}} option{value:"both",{i.t("tenant_providers.capability_both")}}}} } label{{i.t("tenant_providers.rpm_limit")} input{class:"input-field",r#type:"number",min:"1",value:"{rpm}",oninput:move|e|rpm.set(e.value())}} label{{i.t("tenant_providers.tpm_limit")} input{class:"input-field",r#type:"number",min:"1",value:"{tpm}",oninput:move|e|tpm.set(e.value())}} label{{i.t("tenant_providers.priority")} input{class:"input-field",r#type:"number",min:"0",max:"10",value:"{priority}",oninput:move|e|priority.set(e.value())}} if existing.is_some(){label{class:"checkbox-field",input{r#type:"checkbox",checked:active(),onchange:move|e|active.set(e.checked())}{i.t("tenant_providers.active")}}} label{class:"checkbox-field",input{r#type:"checkbox",checked:pool(),onchange:move|e|pool.set(e.checked())}{i.t("tenant_providers.pool")}}} if !err().is_empty(){p{class:"alert alert-error",role:"alert","{err}"}}} div{class:"modal-footer",button{class:"btn btn-secondary",r#type:"button",disabled:busy(),onclick:move |_|onclose.call(()),{i.t("form.cancel")}} button{class:"btn btn-primary",r#type:"button",disabled:busy(),onclick:submit,{i.t("form.save")}}}}}}
 }
 #[component]
 fn Bindings(scope: WorkspaceScope) -> Element {
@@ -492,7 +493,7 @@ fn Bindings(scope: WorkspaceScope) -> Element {
     rsx! {
         div { class: "resource-panel",
             div { class: "toolbar",
-                button { class: "btn btn-primary", onclick: move |_| edit.set(Some(None)),
+                button { class: "btn btn-primary", r#type: "button", onclick: move |_| edit.set(Some(None)),
                     {i.t("tenant_providers.add_binding")}
                 }
             }
@@ -605,11 +606,11 @@ fn BindingRow(
             td { {health_label(i,&row.health_status)} }
             td {
                 details { class:"row-action-menu",
-                    summary { class:"btn btn-ghost btn-sm", aria_label:i.t("common.more"), "⋯" }
-                    div { class:"btn-group row-action-menu-popover",
-                        button { class:"btn btn-ghost btn-sm", disabled:busy(), onclick:move |_|onedit.call(edit_row.clone()), {i.t("form.edit")} }
-                        button { class:"btn btn-ghost btn-sm", disabled:busy(), onclick:probe, {i.t("tenant_providers.test")} }
-                        button { class:"btn btn-danger btn-sm", disabled:busy(), onclick:move |_|ondelete.call(delete_row.clone()), {i.t("form.delete")} }
+                    summary { class:"btn btn-ghost btn-sm", aria_label:i.t("common.more"), title:i.t("common.more"), "⋯" }
+                    div { class:"btn-group row-action-menu-popover", onclick: move |_| crate::utils::close_row_action_menus(),
+                        button { class:"btn btn-ghost btn-sm", r#type:"button", disabled:busy(), onclick:move |_|onedit.call(edit_row.clone()), {i.t("form.edit")} }
+                        button { class:"btn btn-ghost btn-sm", r#type:"button", disabled:busy(), onclick:probe, {i.t("tenant_providers.test")} }
+                        button { class:"btn btn-danger btn-sm", r#type:"button", disabled:busy(), onclick:move |_|ondelete.call(delete_row.clone()), {i.t("form.delete")} }
                     }
                 }
                 if !err().is_empty() { small { class:"text-danger", role:"alert", "{err}" } }
@@ -625,6 +626,7 @@ fn BindingEditor(
     saved: EventHandler<()>,
 ) -> Element {
     super::workspace_switcher::use_workspace_blocker();
+    ui::components::modal::use_dialog_focus_return(true);
     let a = use_context::<AuthStore>();
     let u = use_context::<UserStore>();
     let i = use_i18n();
@@ -735,9 +737,18 @@ fn BindingEditor(
         }
     };
     rsx! {
-        div { class: "modal-backdrop",
-            div { class: "modal modal-wide", role: "dialog", aria_modal: "true", aria_label: i.t("tenant_providers.binding_editor"),
-                div { class: "modal-header", h2 { {i.t("tenant_providers.binding_editor")} } }
+        div { class: "modal-backdrop", tabindex: "-1",
+            onclick: move |_| if !busy() { onclose.call(()) },
+            onkeydown: move |event| {
+                if event.key() == Key::Escape && !busy() {
+                    event.stop_propagation();
+                    onclose.call(());
+                } else {
+                    ui::components::modal::contain_modal_focus(&event);
+                }
+            },
+            div { class: "modal modal-wide", role: "dialog", aria_modal: "true", aria_label: i.t("tenant_providers.binding_editor"), tabindex: "-1", onclick: move |event| event.stop_propagation(),
+                div { class: "modal-header", h2 { {i.t("tenant_providers.binding_editor")} } button { class: "modal-close btn btn-ghost btn-sm", r#type: "button", autofocus: true, aria_label: i.t("common.close"), disabled: busy(), onclick: move |_| onclose.call(()), "✕" } }
                 div { class: "modal-body",
                     form { class: "toolbar", onsubmit: apply_option_search,
                         input { class: "input-field", r#type: "search", placeholder: i.t("tenant_providers.options_search"), aria_label: i.t("tenant_providers.options_search"), maxlength: "255", value: "{option_query}", oninput: move |event| option_query.set(event.value()) }

@@ -172,11 +172,11 @@ pub(super) fn ResourceTable(scope: NodeAdminScope, kind: Kind) -> Element {
                             if let Row::Task(r)=&row {if r.cancellation_requested_at.is_some(){p {{i18n.t("tenant_nodes.cancel_pending")}}} if r.archived_at.is_some(){p {{i18n.t("tenant_nodes.archived")}}}}
                         }
                         td {div {class:"toolbar",
-                            button {id:"tenant-node-detail-trigger-{row.id()}",class:"btn btn-secondary btn-sm",onclick:{let row=row.clone();move |_|details.set(Some(row.clone()))},{i18n.t("tenant_nodes.details")}}
+                            button {id:"tenant-node-detail-trigger-{row.id()}",class:"btn btn-secondary btn-sm",r#type:"button",onclick:{let row=row.clone();move |_|details.set(Some(row.clone()))},{i18n.t("tenant_nodes.details")}}
                             if !row.actions().is_empty() {details {class:"row-action-menu",
-                                summary {class:"btn btn-secondary btn-sm",{i18n.t("common.more")}}
-                                div {class:"row-action-menu-popover",
-                                    for action in row.actions(){button {class:"btn btn-ghost btn-sm",onclick:{let row=row.clone();move |_|{message.set(String::new());pending.set(Some(Pending{row:row.clone(),action}));}},{i18n.t(action.label())}}}
+                                summary {class:"btn btn-ghost btn-sm",aria_label:i18n.t("common.more"),title:i18n.t("common.more"),"⋯"}
+                                div {class:"btn-group row-action-menu-popover", onclick: move |_| crate::utils::close_row_action_menus(),
+                                    for action in row.actions(){button {class:"btn btn-ghost btn-sm",r#type:"button",onclick:{let row=row.clone();move |_|{message.set(String::new());pending.set(Some(Pending{row:row.clone(),action}));}},{i18n.t(action.label())}}}
                                 }
                             }}
                         }}

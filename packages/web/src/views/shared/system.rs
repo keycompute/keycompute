@@ -364,7 +364,7 @@ pub fn SystemDiagnostics() -> Element {
                         p { class: "text-secondary", {i18n.t("table.loading")} }
                     },
                     Some(Err(ref error)) => rsx! {
-                        div { class: "alert alert-error",
+                        div { class: "alert alert-error", role: "alert",
                             "{i18n.t(\"common.load_failed\")}: {user_error_message(i18n, error)}"
                         }
                     },
@@ -386,7 +386,7 @@ pub fn SystemDiagnostics() -> Element {
                         p { class: "text-secondary", {i18n.t("table.loading")} }
                     },
                     Some(Err(ref error)) => rsx! {
-                        div { class: "alert alert-error",
+                        div { class: "alert alert-error", role: "alert",
                             "{i18n.t(\"common.load_failed\")}: {user_error_message(i18n, error)}"
                         }
                     },
@@ -438,12 +438,12 @@ pub fn SystemDiagnostics() -> Element {
                             p { class: "text-secondary", {i18n.t("table.loading")} }
                         },
                         Some(Err(ref e)) => rsx! {
-                            div { class: "alert alert-error",
+                            div { class: "alert alert-error", role: "alert",
                                 p { {format!("{}：{}", i18n.t("common.load_failed"), crate::services::api_client::user_error_message(i18n, e))} }
                             }
                         },
                         Some(Ok(None)) => rsx! {
-                            div { class: "alert alert-warning",
+                            div { class: "alert alert-warning", role: "alert",
                                 p { "{i18n.t(\"system.no_routable_probe_model\")}" }
                             }
                         },
@@ -451,7 +451,7 @@ pub fn SystemDiagnostics() -> Element {
                             div {
                                 // 路由结果
                                 if info.routed {
-                                    div { class: "alert alert-success",
+                                    div { class: "alert alert-success", role: "status",
                                         p { "✓ {i18n.t(\"system.route_success\")}" }
                                         if let Some(ref primary) = info.primary {
                                             p { class: "text-sm",
@@ -468,7 +468,7 @@ pub fn SystemDiagnostics() -> Element {
                                         }
                                     }
                                 } else {
-                                    div { class: "alert alert-warning",
+                                    div { class: "alert alert-warning", role: "alert",
                                         p { "✗ {i18n.t(\"system.route_failed\")}" }
                                         if let Some(ref msg) = info.message {
                                             p { class: "text-sm", "{msg}" }
@@ -547,7 +547,7 @@ fn DiagnosticsSections(
 
     rsx! {
         div { class: "system-diagnostics",
-            div { class: "alert alert-info diagnostics-context",
+            div { class: "alert alert-info diagnostics-context", role: "status",
                 div {
                     strong { {i18n.t("system.diagnostics_purpose")} }
                     p { {i18n.t("system.diagnostics_purpose_hint")} }

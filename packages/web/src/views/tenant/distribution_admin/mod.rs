@@ -72,9 +72,9 @@ fn DistributionWorkspace(scope: WorkspaceScope) -> Element {
             WorkspaceLinks {}
             WorkspaceContext {}
             div {class:"toolbar",
-                button {class:"btn btn-secondary",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
-                button {class:"btn btn-secondary",onclick:move |_|open(Operation::Default),{i18n.t("tenant_distribution.default")}}
-                button {class:"btn btn-primary",onclick:move |_|open(Operation::Create),{i18n.t("tenant_distribution.create")}}
+                button {class:"btn btn-secondary",r#type:"button",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
+                button {class:"btn btn-secondary",r#type:"button",onclick:move |_|open(Operation::Default),{i18n.t("tenant_distribution.default")}}
+                button {class:"btn btn-primary",r#type:"button",onclick:move |_|open(Operation::Create),{i18n.t("tenant_distribution.create")}}
             }
             match loaded {
                 None => rsx! {
@@ -109,10 +109,13 @@ fn DistributionWorkspace(scope: WorkspaceScope) -> Element {
                                                     p {{row.effective_until.as_deref().map(format_time).unwrap_or_else(|| "—".into())}}
                                                     p {code {{format_time(&row.updated_at)}}}
                                                 }}
-                                                td {
-                                                    button {class:"btn btn-secondary btn-sm",onclick:move |_|open(Operation::Edit(edit.clone())),{i18n.t("form.edit")}}
-                                                    button {class:"btn btn-danger btn-sm",onclick:move |_|open(Operation::Delete(del.clone())),{i18n.t("form.delete")}}
-                                                }
+                                                td {details {class:"row-action-menu",
+                                                    summary {class:"btn btn-ghost btn-sm",aria_label:i18n.t("common.more"),title:i18n.t("common.more"),"⋯"}
+                                                    div {class:"btn-group row-action-menu-popover", onclick: move |_| crate::utils::close_row_action_menus(),
+                                                        button {class:"btn btn-ghost btn-sm",r#type:"button",onclick:move |_|open(Operation::Edit(edit.clone())),{i18n.t("form.edit")}}
+                                                        button {class:"btn btn-danger btn-sm",r#type:"button",onclick:move |_|open(Operation::Delete(del.clone())),{i18n.t("form.delete")}}
+                                                    }
+                                                }}
                                             }
                                         }}
                                     }

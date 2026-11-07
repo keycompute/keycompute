@@ -52,6 +52,9 @@ pub fn Button(
     /// 按钮类型属性（submit / button / reset）
     #[props(default = "button".to_string())]
     r#type: String,
+    /// 是否在按钮挂载后自动获取焦点
+    #[props(default = false)]
+    autofocus: bool,
     /// 可选的表单 ID；用于把提交按钮放在表单外部（例如弹窗 footer）。
     #[props(default)]
     form: String,
@@ -86,6 +89,7 @@ pub fn Button(
         button {
             class: "{full_class}",
             r#type: "{button_type}",
+            autofocus,
             form: if form.is_empty() { None::<String> } else { Some(form.clone()) },
             disabled: is_disabled,
             onclick: move |e| {

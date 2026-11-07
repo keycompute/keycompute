@@ -338,6 +338,7 @@ fn AdminAccountsView() -> Element {
     let mut delete_name = use_signal(String::new);
     let mut show_delete = use_signal(|| false);
     let mut deleting = use_signal(|| false);
+    ui::components::modal::use_dialog_focus_return(show_create() || show_edit() || show_delete());
 
     // 当前查看完整模型列表的渠道账号。
     let mut show_model_list = use_signal(|| false);
@@ -574,7 +575,7 @@ fn AdminAccountsView() -> Element {
                 title: i18n.t("page.accounts").to_string(),
                 description: i18n.t("accounts.subtitle").to_string(),
                 actions: rsx! {
-                    button { class: "btn btn-primary", onclick: move |_| *show_create.write() = true,
+                    button { class: "btn btn-primary", r#type: "button", onclick: move |_| *show_create.write() = true,
                         {i18n.t("accounts.add_channel")}
                     }
                 },
@@ -870,8 +871,8 @@ fn AdminAccountsView() -> Element {
                                         }
                                         td {
                                             details { class: "row-action-menu",
-                                                summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), "⋯" }
-                                                div { class: "btn-group row-action-menu-popover",
+                                                summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), title: i18n.t("common.more"), "⋯" }
+                                                div { class: "btn-group row-action-menu-popover", onclick: move |_| crate::utils::close_row_action_menus(),
                                                 Button {
                                                     variant: ButtonVariant::Ghost,
                                                     size: ButtonSize::Small,
@@ -1014,7 +1015,16 @@ fn AdminAccountsView() -> Element {
             if show_create() {
                 div {
                     class: "modal-backdrop",
-                    onclick: move |_| *show_create.write() = false,
+                    tabindex: "-1",
+                    onclick: move |_| if !saving() { *show_create.write() = false },
+                    onkeydown: move |event| {
+                        if event.key() == Key::Escape && !saving() {
+                            event.stop_propagation();
+                            *show_create.write() = false;
+                        } else {
+                            ui::components::modal::contain_modal_focus(&event);
+                        }
+                    },
                     div {
                         class: "modal",
                         role: "dialog",
@@ -1026,13 +1036,15 @@ fn AdminAccountsView() -> Element {
                             button {
                                 class: "btn btn-ghost btn-sm",
                                 r#type: "button",
+                                autofocus: true,
                                 aria_label: i18n.t("common.close"),
-                                onclick: move |_| *show_create.write() = false,
+                                disabled: saving(),
+                                onclick: move |_| if !saving() { *show_create.write() = false },
                                 "✕"
                             }
                         }
                         div { class: "modal-body",
-                            div { class: "alert alert-info",
+                            div { class: "alert alert-info", role: "status",
                                 {i18n.t("accounts.platform_scope_hint")}
                             }
                             div {class:"form-group",
@@ -1040,7 +1052,7 @@ fn AdminAccountsView() -> Element {
                                 p {class:"form-hint",{i18n.t("models.pool_switch_help")}}
                             }
                             if !error_msg().is_empty() {
-                                div { class: "alert alert-error",
+                                div { class: "alert alert-error", role: "alert",
                                     span { "{error_msg}" }
                                 }
                             }
@@ -1175,7 +1187,8 @@ fn AdminAccountsView() -> Element {
                         div { class: "modal-footer",
                             Button {
                                 variant: ButtonVariant::Ghost,
-                                onclick: move |_| *show_create.write() = false,
+                                disabled: saving(),
+                                onclick: move |_| if !saving() { *show_create.write() = false },
                                 {i18n.t("form.cancel")}
                             }
                             Button {
@@ -1192,7 +1205,16 @@ fn AdminAccountsView() -> Element {
             if show_edit() {
                 div {
                     class: "modal-backdrop",
-                    onclick: move |_| show_edit.set(false),
+                    tabindex: "-1",
+                    onclick: move |_| if !edit_saving() { show_edit.set(false) },
+                    onkeydown: move |event| {
+                        if event.key() == Key::Escape && !edit_saving() {
+                            event.stop_propagation();
+                            show_edit.set(false);
+                        } else {
+                            ui::components::modal::contain_modal_focus(&event);
+                        }
+                    },
                     div {
                         class: "modal",
                         role: "dialog",
@@ -1204,8 +1226,10 @@ fn AdminAccountsView() -> Element {
                             button {
                                 class: "btn btn-ghost btn-sm",
                                 r#type: "button",
+                                autofocus: true,
                                 aria_label: i18n.t("common.close"),
-                                onclick: move |_| show_edit.set(false),
+                                disabled: edit_saving(),
+                                onclick: move |_| if !edit_saving() { show_edit.set(false) },
                                 "✕"
                             }
                         }
@@ -1215,7 +1239,7 @@ fn AdminAccountsView() -> Element {
                                 p {class:"form-hint",{i18n.t("models.pool_switch_help")}}
                             }
                             if !edit_error().is_empty() {
-                                div { class: "alert alert-error",
+                                div { class: "alert alert-error", role: "alert",
                                     span { "{edit_error}" }
                                 }
                             }
@@ -1337,7 +1361,8 @@ fn AdminAccountsView() -> Element {
                         div { class: "modal-footer",
                             Button {
                                 variant: ButtonVariant::Ghost,
-                                onclick: move |_| show_edit.set(false),
+                                disabled: edit_saving(),
+                                onclick: move |_| if !edit_saving() { show_edit.set(false) },
                                 {i18n.t("form.cancel")}
                             }
                             Button {
@@ -1355,7 +1380,16 @@ fn AdminAccountsView() -> Element {
             if show_delete() {
                 div {
                     class: "modal-backdrop",
-                    onclick: move |_| show_delete.set(false),
+                    tabindex: "-1",
+                    onclick: move |_| if !deleting() { show_delete.set(false) },
+                    onkeydown: move |event| {
+                        if event.key() == Key::Escape && !deleting() {
+                            event.stop_propagation();
+                            show_delete.set(false);
+                        } else {
+                            ui::components::modal::contain_modal_focus(&event);
+                        }
+                    },
                     div {
                         class: "modal",
                         role: "alertdialog",
@@ -1367,8 +1401,10 @@ fn AdminAccountsView() -> Element {
                             button {
                                 class: "btn btn-ghost btn-sm",
                                 r#type: "button",
+                                autofocus: true,
                                 aria_label: i18n.t("common.close"),
-                                onclick: move |_| show_delete.set(false),
+                                disabled: deleting(),
+                                onclick: move |_| if !deleting() { show_delete.set(false) },
                                 "✕"
                             }
                         }
@@ -1382,7 +1418,8 @@ fn AdminAccountsView() -> Element {
                         div { class: "modal-footer",
                             Button {
                                 variant: ButtonVariant::Ghost,
-                                onclick: move |_| show_delete.set(false),
+                                disabled: deleting(),
+                                onclick: move |_| if !deleting() { show_delete.set(false) },
                                 {i18n.t("form.cancel")}
                             }
                             Button {

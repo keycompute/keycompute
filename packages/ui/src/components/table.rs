@@ -122,6 +122,9 @@ pub fn Pagination(
     /// 是否暂时禁用所有分页控件（例如请求正在进行时）
     #[props(default = false)]
     disabled: bool,
+    /// 是否显示每页条数选择器；固定页大小的游标/服务端列表可以关闭。
+    #[props(default = true)]
+    show_page_size: bool,
     /// 可选的每页条数；为空时使用 10/20/50/100
     #[props(default)]
     page_size_options: Vec<u32>,
@@ -213,22 +216,24 @@ pub fn Pagination(
                     },
                     "{next_label}"
                 }
-                label { class: "pagination-page-size",
-                    span { "{page_size_label}" }
-                    select {
-                        aria_label: "{page_size_label}",
-                        disabled,
-                        value: "{page_size}",
-                        onchange: move |event| {
-                            if !disabled && let Ok(value) = event.value().parse::<u32>() {
-                                on_page_size_change.call(value);
+                if show_page_size {
+                    label { class: "pagination-page-size",
+                        span { "{page_size_label}" }
+                        select {
+                            aria_label: "{page_size_label}",
+                            disabled,
+                            value: "{page_size}",
+                            onchange: move |event| {
+                                if !disabled && let Ok(value) = event.value().parse::<u32>() {
+                                    on_page_size_change.call(value);
+                                }
+                            },
+                            for option in options.iter() {
+                                option { value: "{option}", "{option}" }
                             }
-                        },
-                        for option in options.iter() {
-                            option { value: "{option}", "{option}" }
                         }
+                        span { "{page_size_suffix}" }
                     }
-                    span { "{page_size_suffix}" }
                 }
             }
         }

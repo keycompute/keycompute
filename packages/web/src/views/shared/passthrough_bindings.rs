@@ -104,9 +104,9 @@ pub fn PassthroughBindings() -> Element {
                         }
                     }
                     div { class: "table-pagination",
-                        button { class: "btn btn-ghost btn-sm", disabled: page <= 1, onclick: move |_| search_page.write().1 -= 1, {i.t("table.previous")} }
+                button { class: "btn btn-ghost btn-sm", r#type: "button", disabled: page <= 1, onclick: move |_| search_page.write().1 -= 1, {i.t("table.previous")} }
                         span { "{page} / {total_pages}" }
-                        button { class: "btn btn-ghost btn-sm", disabled: page >= total_pages, onclick: move |_| search_page.write().1 += 1, {i.t("table.next")} }
+                button { class: "btn btn-ghost btn-sm", r#type: "button", disabled: page >= total_pages, onclick: move |_| search_page.write().1 += 1, {i.t("table.next")} }
                     }
                 },
             }
@@ -171,12 +171,12 @@ fn PassthroughRow(
         td { if row.pool_enabled { {i.t("common.yes")} } else { {i.t("common.no")} } }
         td { {i.t(runtime_health_key(row.health_status.as_deref()))} }
         td { div { class: "table-actions",
-            button { class: "btn btn-ghost btn-sm", disabled: pending(), onclick: move |_| onedit.call(row.clone()), {i.t("form.edit")} }
-            button { class: "btn btn-ghost btn-sm", disabled: pending(), onclick: move |_| confirm_delete.set(true), {i.t("form.delete")} }
-            button {class:"btn btn-ghost btn-sm",disabled:pending(),onclick:move|_|confirm_probe.set(true),{i.t("passthrough.diagnostic")}}
+            button { class: "btn btn-ghost btn-sm", r#type: "button", disabled: pending(), onclick: move |_| onedit.call(row.clone()), {i.t("form.edit")} }
+            button { class: "btn btn-ghost btn-sm", r#type: "button", disabled: pending(), onclick: move |_| confirm_delete.set(true), {i.t("form.delete")} }
+            button {class:"btn btn-ghost btn-sm",r#type:"button",disabled:pending(),onclick:move|_|confirm_probe.set(true),{i.t("passthrough.diagnostic")}}
             if confirm_probe() {div{class:"kc-action-confirm",role:"alert",
               p{{i.t("passthrough.probe_warning")}}
-              button { class: "btn btn-secondary btn-sm", disabled: pending(), onclick: move |_| {
+              button { class: "btn btn-secondary btn-sm", r#type: "button", disabled: pending(), onclick: move |_| {
                 if pending(){return;} confirm_probe.set(false);
                 pending.set(true); error.set(String::new());
                 let id = diagnostic_id.clone();
@@ -195,13 +195,13 @@ fn PassthroughRow(
                     }
                 });
             }, {i.t("passthrough.confirm_probe")} }
-              button{class:"btn btn-ghost btn-sm",onclick:move|_|confirm_probe.set(false),{i.t("form.cancel")}}
+              button{class:"btn btn-ghost btn-sm",r#type:"button",onclick:move|_|confirm_probe.set(false),{i.t("form.cancel")}}
             }}
             if confirm_delete() {
                 div { class: "kc-action-confirm", role: "alert",
                     p { {i.t("passthrough.delete_warning")} }
-                    button { class: "btn btn-danger btn-sm", disabled: pending(), onclick: delete, {i.t("passthrough.confirm_delete")} }
-                    button { class: "btn btn-ghost btn-sm", disabled: pending(), onclick: move |_| confirm_delete.set(false), {i.t("form.cancel")} }
+                    button { class: "btn btn-danger btn-sm", r#type: "button", disabled: pending(), onclick: delete, {i.t("passthrough.confirm_delete")} }
+                    button { class: "btn btn-ghost btn-sm", r#type: "button", disabled: pending(), onclick: move |_| confirm_delete.set(false), {i.t("form.cancel")} }
                 }
             }
             if !diagnostic().is_empty() { small { role: "status", "{diagnostic}" } }
@@ -217,6 +217,7 @@ fn PassthroughBindingEditor(
     onsaved: EventHandler<()>,
 ) -> Element {
     let i = use_i18n();
+    ui::components::modal::use_dialog_focus_return(true);
     let auth = use_context::<AuthStore>();
     let original = existing.clone();
     let mut account_id = use_signal(move || {
@@ -385,11 +386,22 @@ fn PassthroughBindingEditor(
         });
     };
     rsx! {
-        div { class: "modal-backdrop", onclick: move |_| if !pending() {onclose.call(())},
+        div {
+            class: "modal-backdrop",
+            tabindex: "-1",
+            onclick: move |_| if !pending() { onclose.call(()) },
+            onkeydown: move |event| {
+                if event.key() == Key::Escape && !pending() {
+                    event.stop_propagation();
+                    onclose.call(());
+                } else {
+                    ui::components::modal::contain_modal_focus(&event);
+                }
+            },
             div { class: "modal", role: "dialog", aria_modal: "true", aria_label:i.t("passthrough.form_title"), onclick:move|e|e.stop_propagation(),
                 div {class:"modal-header",
                     h2 {class:"modal-title", {if existing.is_some(){i.t("passthrough.edit_title")}else{i.t("passthrough.form_title")}}}
-                    button {class:"btn btn-ghost btn-sm",r#type:"button",aria_label:i.t("common.close"),disabled:pending(),onclick:move|_|onclose.call(()),"✕"}
+                    button {class:"btn btn-ghost btn-sm",r#type:"button",autofocus:true,aria_label:i.t("common.close"),disabled:pending(),onclick:move|_|onclose.call(()),"✕"}
                 }
                 div {class:"modal-body",
                     if !error().is_empty(){div{class:"alert alert-error",role:"alert","{error}"}}
@@ -455,7 +467,7 @@ fn PassthroughBindingEditor(
                         label{class:"checkbox-label",input{r#type:"checkbox",checked:pool_enabled(),disabled:pending(),onchange:move|e|pool_enabled.set(e.checked())}{i.t("passthrough.pool_flag")}}
                         p{class:"form-hint",{i.t("passthrough.pool_help")}}
                     }
-                    if is_global()||pool_enabled(){div{class:"alert alert-warning",{i.t("passthrough.broadening_warning")}}}
+                    if is_global()||pool_enabled(){div{class:"alert alert-warning",role:"alert",{i.t("passthrough.broadening_warning")}}}
                 }
                 div{class:"modal-footer",
                     Button{variant:ButtonVariant::Ghost,disabled:pending(),onclick:move|_|onclose.call(()),{i.t("form.cancel")}}

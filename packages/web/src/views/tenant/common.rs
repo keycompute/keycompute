@@ -18,6 +18,7 @@ use client_api::{
 };
 use dioxus::prelude::*;
 use std::future::Future;
+use ui::Pagination;
 use uuid::Uuid;
 
 /// Identity of a rendered result, never an authorization grant.
@@ -232,9 +233,9 @@ pub fn TenantRequiredPage(children: Element) -> Element {
         .as_ref()
         .is_some_and(UserInfo::can_view_operations);
     rsx! {
-        div { class: "page-container", role: "alert",
+        div { class: "page-container",
             h1 { class: "page-title", {i18n.t("tenant.workspace")} }
-            p { class: "alert alert-info", {i18n.t("tenant.selection_required")} }
+            p { class: "alert alert-info", role: "status", {i18n.t("tenant.selection_required")} }
             nav { class: "toolbar", aria_label: i18n.t("tenant.workspace"),
                 Link { class: "btn btn-primary", to: Route::TenantWorkspace {}, {i18n.t("tenant.workspace")} }
                 if can_view_operations {
@@ -480,14 +481,34 @@ pub fn MemberIdField(
 #[component]
 pub fn Pager(page: u32, total_pages: i64, total: i64, on_page: EventHandler<u32>) -> Element {
     let i18n = use_i18n();
-    if total <= 0 && page <= 1 {
-        return rsx! {};
+    let total = total.max(0) as u64;
+    let total_pages = total_pages.max(1) as u32;
+    let current = page.max(1);
+    let total_text = total.to_string();
+    let current_text = current.to_string();
+    let total_pages_text = total_pages.to_string();
+    let summary = i18n.t_with_args(
+        "common.pagination_summary",
+        &[
+            ("total", &total_text),
+            ("current", &current_text),
+            ("total_pages", &total_pages_text),
+        ],
+    );
+    rsx! {
+        Pagination {
+            current,
+            total_pages,
+            total,
+            page_size: 20,
+            show_page_size: false,
+            aria_label: i18n.t("tenant.pagination").to_string(),
+            previous_label: i18n.t("table.previous").to_string(),
+            next_label: i18n.t("table.next").to_string(),
+            summary,
+            on_page_change: move |next| on_page.call(next),
+        }
     }
-    rsx! {div {class:"table-pagination-footer",
-        button {class:"btn btn-secondary",r#type:"button",disabled:page<=1,onclick:move |_|on_page.call(page-1),{i18n.t("tenant.previous")}}
-        span { "{page} / {total_pages.max(1)} · {total} " {i18n.t("tenant.records")} }
-        button {class:"btn btn-secondary",r#type:"button",disabled:i64::from(page)>=total_pages,onclick:move |_|on_page.call(page.saturating_add(1)),{i18n.t("tenant.next")}}
-    }}
 }
 #[component]
 pub fn CommandDialog(
@@ -498,14 +519,28 @@ pub fn CommandDialog(
     on_confirm: EventHandler<()>,
 ) -> Element {
     super::workspace_switcher::use_workspace_blocker();
+    ui::components::modal::use_dialog_focus_return(true);
     let i18n = use_i18n();
-    rsx! {div {class:"modal-backdrop",
-        div {class:"modal",role:"dialog",aria_modal:"true",aria_label:title.clone(),
-            div {class:"modal-header",h2 {"{title}"}}
+    rsx! {div {
+        class:"modal-backdrop",
+        tabindex:"-1",
+        onkeydown:move |event| {
+            if event.key() == Key::Escape && !busy {
+                event.stop_propagation();
+                on_cancel.call(());
+            } else {
+                ui::components::modal::contain_modal_focus(&event);
+            }
+        },
+        onclick:move |_| if !busy { on_cancel.call(()) },
+        div {class:"modal",role:"alertdialog",aria_modal:"true",aria_label:title.clone(),onclick:move |event| event.stop_propagation(),
+            div {class:"modal-header",h2 {class:"modal-title", "{title}"}
+                button {class:"modal-close btn btn-ghost btn-sm",r#type:"button",autofocus:true,aria_label:i18n.t("common.close"),disabled:busy,onclick:move |_| if !busy { on_cancel.call(()) },"✕"}
+            }
             div {class:"modal-body",p {"{target}"} p {class:"text-secondary",{i18n.t("tenant.command_hint")}}}
             div {class:"modal-footer",
-                button {class:"btn btn-secondary",disabled:busy,onclick:move |_|on_cancel.call(()),{i18n.t("form.cancel")}}
-                button {class:"btn btn-primary",disabled:busy,onclick:move |_|on_confirm.call(()),{i18n.t("tenant.confirm")}}
+                button {class:"btn btn-ghost",r#type:"button",disabled:busy,onclick:move |_|on_cancel.call(()),{i18n.t("form.cancel")}}
+                button {class:"btn btn-primary",r#type:"button",disabled:busy,onclick:move |_|on_confirm.call(()),{i18n.t("tenant.confirm")}}
             }
         }
     }}

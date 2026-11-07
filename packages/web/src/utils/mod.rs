@@ -59,6 +59,45 @@ pub fn restore_focus_after_dialog(element_id: &str) {
     }
 }
 
+/// Close any open row action popover after an action is chosen. Native
+/// `<details>` elements do not close themselves when a descendant button is
+/// activated, so keeping this in one helper prevents menus from lingering
+/// behind the next view or dialog. Focus is returned to the visible summary
+/// when the activated control belonged to that menu.
+pub fn close_row_action_menus() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Ok(details) = document.query_selector_all("details.row-action-menu[open]") else {
+            return;
+        };
+        let active = document.active_element();
+        for index in 0..details.length() {
+            let Some(node) = details.item(index) else {
+                continue;
+            };
+            if let Ok(element) = node.dyn_into::<web_sys::Element>() {
+                let restore_focus = active.as_ref().is_some_and(|active| {
+                    let active_node: &web_sys::Node = active.unchecked_ref();
+                    element.contains(Some(active_node))
+                });
+                let _ = element.remove_attribute("open");
+                if restore_focus {
+                    if let Ok(Some(summary)) = element.query_selector("summary") {
+                        if let Ok(summary) = summary.dyn_into::<web_sys::HtmlElement>() {
+                            let _ = summary.focus();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// 复制文本到剪贴板（WASM 环境）
 /// 返回 `true` 表示复制成功，`false` 表示不可用（非 HTTPS 上下文等）。
 pub fn copy_to_clipboard(text: &str) -> bool {

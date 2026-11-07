@@ -299,7 +299,7 @@ pub fn DistributionRecords() -> Element {
                         tabindex: "0",
                         h2 { class: "section-title", {i18n.t("distribution_records.rules_title")} }
                         div { class: "section-body",
-                            div { class: "alert alert-info",
+                            div { class: "alert alert-info", role: "status",
                                 span { class: "alert-icon", "ℹ" }
                                 div { class: "alert-content",
                                     p { class: "alert-body", {i18n.t("distribution_records.rules_hint")} }

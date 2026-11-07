@@ -107,17 +107,17 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
         WorkspaceLinks{}
         WorkspaceContext{note:i18n.t("tenant_responses.local_only").to_string()}
         div{class:"toolbar tenant-resource-filters",
-            div{class:"segmented-control",
-                button{class:"btn btn-secondary",aria_pressed:query().kind==Kind::Responses,onclick:move |_|{query.write().kind=Kind::Responses;query.write().page=1;inspection.set(None);mutation.set(None);},{i18n.t("tenant_responses.responses")}}
-                button{class:"btn btn-secondary",aria_pressed:query().kind==Kind::Conversations,onclick:move |_|{query.write().kind=Kind::Conversations;query.write().page=1;inspection.set(None);mutation.set(None);},{i18n.t("tenant_responses.conversations")}}
+            div{class:"segmented-control",role:"group",aria_label:i18n.t("tenant_responses.title"),
+                button{class:"btn btn-secondary",r#type:"button",aria_pressed:query().kind==Kind::Responses,onclick:move |_|{query.write().kind=Kind::Responses;query.write().page=1;inspection.set(None);mutation.set(None);},{i18n.t("tenant_responses.responses")}}
+                button{class:"btn btn-secondary",r#type:"button",aria_pressed:query().kind==Kind::Conversations,onclick:move |_|{query.write().kind=Kind::Conversations;query.write().page=1;inspection.set(None);mutation.set(None);},{i18n.t("tenant_responses.conversations")}}
             }
             div{class:"form-field",label{r#for:"managed-resource-mode",{i18n.t("tenant_responses.mode")}}
                 select{id:"managed-resource-mode",class:"input-field",value:query().mode.as_str(),onchange:move |e|{if let Some(value)=types::mode(&e.value()){query.write().mode=value;query.write().page=1;inspection.set(None);mutation.set(None);}},option{value:"passthrough",{i18n.t("tenant_responses.mode_passthrough")}}option{value:"node_dispatch",{i18n.t("tenant_responses.mode_node")}}if matches!(query().kind,Kind::Responses|Kind::Conversations){option{value:"account_pool",{i18n.t("tenant_responses.mode_pool")}}}}
             }
             if query().mode!=client_api::api::response_control::ResponseMode::AccountPool{
                 MemberIdField{scope,input_id:"managed-resource-owner".to_string(),label:i18n.t("tenant_responses.owner").to_string(),value:owner(),on_input:move|value|owner.set(value)}
-                div{class:"filter-actions",button{class:"btn btn-primary",onclick:move |_|match types::owner(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;error.set(String::new());inspection.set(None);mutation.set(None);},Err(e)=>error.set(user_error_message(i18n, &e))},{i18n.t("tenant_responses.filter")}}
-                    button{class:"btn btn-ghost",onclick:move |_|{inspection.set(None);mutation.set(None);data.restart();},{i18n.t("tenant.reload")}}
+                div{class:"filter-actions",button{class:"btn btn-primary",r#type:"button",onclick:move |_|match types::owner(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;error.set(String::new());inspection.set(None);mutation.set(None);},Err(e)=>error.set(user_error_message(i18n, &e))},{i18n.t("tenant_responses.filter")}}
+                    button{class:"btn btn-ghost",r#type:"button",onclick:move |_|{inspection.set(None);mutation.set(None);data.restart();},{i18n.t("tenant.reload")}}
                 }
             }
         }
@@ -135,13 +135,13 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
                         td{p{{format_time(row.created())}}details{summary{{i18n.t("tenant_responses.expires")}}{format_time(row.expires())}}}
                         td{
                             details { class: "row-action-menu",
-                                summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), "⋯" }
-                                div { class: "row-action-menu-popover",
-                                    button{class:"btn btn-ghost btn-sm",onclick:move |_|inspect(Inspection{row:detail.clone(),read:ReadKind::Detail}),{i18n.t("tenant_responses.inspect")}}
-                                    button{class:"btn btn-ghost btn-sm",onclick:move |_|inspect(Inspection{row:items.clone(),read:ReadKind::Items}),{i18n.t("tenant_responses.items")}}
-                                    if row.can_cancel(){button{class:"btn btn-ghost btn-sm",onclick:move |_|mutate(Mutation::Cancel(cancel.clone())),{i18n.t("tenant_responses.cancel")}}}
-                                    if row.is_conversation(){button{class:"btn btn-ghost btn-sm",onclick:move |_|mutate(Mutation::Metadata(meta.clone())),{i18n.t("tenant_responses.metadata")}}button{class:"btn btn-ghost btn-sm",onclick:move |_|mutate(Mutation::Append(append.clone())),{i18n.t("tenant_responses.append")}}}
-                                    button{class:"btn btn-danger btn-sm",onclick:move |_|mutate(Mutation::Delete(delete.clone())),{i18n.t("tenant_responses.delete")}}
+                                summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), title: i18n.t("common.more"), "⋯" }
+                                div { class: "btn-group row-action-menu-popover", onclick: move |_| crate::utils::close_row_action_menus(),
+                                    button{class:"btn btn-ghost btn-sm",r#type:"button",onclick:move |_|inspect(Inspection{row:detail.clone(),read:ReadKind::Detail}),{i18n.t("tenant_responses.inspect")}}
+                                    button{class:"btn btn-ghost btn-sm",r#type:"button",onclick:move |_|inspect(Inspection{row:items.clone(),read:ReadKind::Items}),{i18n.t("tenant_responses.items")}}
+                                    if row.can_cancel(){button{class:"btn btn-ghost btn-sm",r#type:"button",onclick:move |_|mutate(Mutation::Cancel(cancel.clone())),{i18n.t("tenant_responses.cancel")}}}
+                                    if row.is_conversation(){button{class:"btn btn-ghost btn-sm",r#type:"button",onclick:move |_|mutate(Mutation::Metadata(meta.clone())),{i18n.t("tenant_responses.metadata")}}button{class:"btn btn-ghost btn-sm",r#type:"button",onclick:move |_|mutate(Mutation::Append(append.clone())),{i18n.t("tenant_responses.append")}}}
+                                    button{class:"btn btn-danger btn-sm",r#type:"button",onclick:move |_|mutate(Mutation::Delete(delete.clone())),{i18n.t("tenant_responses.delete")}}
                                 }
                             }
                         }

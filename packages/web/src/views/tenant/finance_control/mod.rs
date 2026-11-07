@@ -85,7 +85,7 @@ fn EarningsPanel(scope: WorkspaceScope) -> Element {
     rsx! {
         section { class: "tenant-earnings-control",
             div { class: "toolbar",
-                button { class: "btn btn-secondary", onclick: move |_| generation += 1, {i18n.t("tenant.reload")} }
+                button { class: "btn btn-secondary", r#type: "button", onclick: move |_| generation += 1, {i18n.t("tenant.reload")} }
             }
             match loaded {
                 None => rsx! { p { role: "status", {i18n.t("common.loading")} } },
@@ -201,21 +201,24 @@ fn Workspace(scope: WorkspaceScope, embedded: bool) -> Element {
                 h2 { class: "section-title", {i18n.t("tenant_financial_controls.title")} }
                 p { class: "text-secondary", {i18n.t("tenant_financial_controls.boundary")} }
             }
-            nav { class: "segmented-control",
+            nav { class: "segmented-control", role: "group", aria_label: i18n.t("tenant_financial_controls.title"),
                 button {
                     class: "btn btn-secondary",
+                    r#type: "button",
                     aria_pressed: tab() == Tab::Earnings,
                     onclick: move |_| tab.set(Tab::Earnings),
                     {i18n.t("tenant_financial_controls.earnings")}
                 }
                 button {
                     class: "btn btn-secondary",
+                    r#type: "button",
                     aria_pressed: tab() == Tab::Reservations,
                     onclick: move |_| tab.set(Tab::Reservations),
                     {i18n.t("tenant_financial_controls.reservations")}
                 }
                 button {
                     class: "btn btn-secondary",
+                    r#type: "button",
                     aria_pressed: tab() == Tab::Withdrawals,
                     onclick: move |_| tab.set(Tab::Withdrawals),
                     {i18n.t("tenant_financial_controls.withdrawals")}
@@ -241,6 +244,7 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
     let mut history = use_signal(Vec::<Option<String>>::new);
     let mut generation = use_signal(|| 0u64);
     let mut action = use_signal(|| None::<(Uuid, BalanceReservationInfo)>);
+    ui::components::modal::use_dialog_focus_return(action().is_some());
     let mut reason = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut error = use_signal(String::new);
@@ -331,9 +335,10 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
             p { class: "text-secondary", {i18n.t("tenant_financial_controls.reservation_hint")} }
             div { class: "toolbar",
                 MemberIdField { scope, input_id: "financial-owner".to_string(), label: i18n.t("tenant_financial_controls.owner").to_string(), value: draft(), on_input: move |value| draft.set(value) }
-                button { class: "btn btn-secondary", onclick: apply, {i18n.t("tenant_financial_controls.load")} }
+                button { class: "btn btn-secondary", r#type: "button", onclick: apply, {i18n.t("tenant_financial_controls.load")} }
                 button {
                     class: "btn btn-secondary",
+                    r#type: "button",
                     disabled: selected().is_none(),
                     onclick: move |_| { notice.set(String::new()); generation += 1; },
                     {i18n.t("tenant.reload")}
@@ -349,10 +354,10 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
                 None => if selected().is_some() {
                     rsx! { p { role: "status", {i18n.t("common.loading")} } }
                 } else {
-                    rsx! { p { class: "alert alert-info", {i18n.t("tenant_financial_controls.choose_owner")} } }
+                    rsx! { p { class: "alert alert-info", role: "status", {i18n.t("tenant_financial_controls.choose_owner")} } }
                 },
                 Some(Err(value)) => rsx! { p { role: "alert", class: "alert alert-error", {user_error_message(i18n, &value)} } },
-                Some(Ok(None)) => rsx! { p { class: "alert alert-info", {i18n.t("tenant_financial_controls.choose_owner")} } },
+                Some(Ok(None)) => rsx! { p { class: "alert alert-info", role: "status", {i18n.t("tenant_financial_controls.choose_owner")} } },
                 Some(Ok(Some(value))) => rsx! {
                     ReservationPage {
                         page: value.clone(),
@@ -379,12 +384,14 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
                 },
             }
             if let Some((_, row)) = action() {
-                div { class: "modal-backdrop",
-                    div { class: "modal", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !busy() { event.stop_propagation(); action.set(None); }, role: "dialog", aria_modal: "true", aria_label: i18n.t("tenant_financial_controls.release"),
-                        div { class: "modal-header", h2 { {i18n.t("tenant_financial_controls.release")} } }
+                div { class: "modal-backdrop", onclick: move |_| if !busy() { action.set(None); },
+                    div { class: "modal", tabindex: "-1", onclick: move |event| event.stop_propagation(), onkeydown: move |event| { if event.key() == Key::Escape && !busy() { event.stop_propagation(); action.set(None); } else { ui::components::modal::contain_modal_focus(&event); } }, role: "dialog", aria_modal: "true", aria_label: i18n.t("tenant_financial_controls.release"),
+                        div { class: "modal-header", h2 { class: "modal-title", {i18n.t("tenant_financial_controls.release")} }
+                            button { class: "modal-close btn btn-ghost btn-sm", r#type: "button", aria_label: i18n.t("common.close"), disabled: busy(), onclick: move |_| action.set(None), "✕" }
+                        }
                         div { class: "modal-body",
                             p { TechnicalId { value: row.request_id.to_string() } }
-                            p { class: "alert alert-warning", {i18n.t("tenant_financial_controls.release_warning")} }
+                            p { class: "alert alert-warning", role: "alert", {i18n.t("tenant_financial_controls.release_warning")} }
                             label { r#for: "financial-recovery-reason", {i18n.t("tenant_financial_controls.reason")} }
                             textarea {
                                 id: "financial-recovery-reason",
@@ -396,8 +403,8 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
                             }
                         }
                         div { class: "modal-footer",
-                            button { class: "btn btn-secondary", onmounted: move |event| async move { let _ = event.set_focus(true).await; }, disabled: busy(), onclick: move |_| action.set(None), {i18n.t("form.cancel")} }
-                            button { class: "btn btn-danger", disabled: busy() || reason().trim().is_empty(), onclick: confirm, {i18n.t("tenant_financial_controls.release")} }
+                            button { class: "btn btn-secondary", r#type: "button", onmounted: move |event| async move { let _ = event.set_focus(true).await; }, disabled: busy(), onclick: move |_| action.set(None), {i18n.t("form.cancel")} }
+                            button { class: "btn btn-danger", r#type: "button", disabled: busy() || reason().trim().is_empty(), onclick: confirm, {i18n.t("tenant_financial_controls.release")} }
                         }
                     }
                 }
@@ -442,6 +449,7 @@ fn ReservationPage(
                                     td { {format_time(&row.expires_at)} }
                                     td { button {
                                         class: "btn btn-danger btn-sm",
+                                        r#type: "button",
                                         disabled: !expired(&row.expires_at),
                                         onclick: move |_| on_release.call(selected_row.clone()),
                                         {i18n.t("tenant_financial_controls.release")}
@@ -457,9 +465,9 @@ fn ReservationPage(
             }
             if can_back || next_cursor.is_some() {
                 div { class: "toolbar",
-                    button { class: "btn btn-secondary", disabled: !can_back, onclick: move |_| on_back.call(()), {i18n.t("tenant.previous")} }
+                    button { class: "btn btn-secondary", r#type: "button", disabled: !can_back, onclick: move |_| on_back.call(()), {i18n.t("tenant.previous")} }
                 if let Some(next) = next_cursor {
-                    button { class: "btn btn-secondary", onclick: move |_| on_next.call(next.clone()), {i18n.t("tenant.next")} }
+                    button { class: "btn btn-secondary", r#type: "button", onclick: move |_| on_next.call(next.clone()), {i18n.t("tenant.next")} }
                 }
                 }
             }
@@ -477,6 +485,7 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
     let mut page = use_signal(|| 1u32);
     let mut generation = use_signal(|| 0u64);
     let mut action = use_signal(|| None::<(WithdrawalDecision, TenantWithdrawal)>);
+    ui::components::modal::use_dialog_focus_return(action().is_some());
     let mut reason = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut error = use_signal(String::new);
@@ -573,8 +582,8 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
                     option { value: "completed", {i18n.t("tenant_financial_controls.completed")} }
                     option { value: "rejected", {i18n.t("tenant_financial_controls.rejected")} }
                 }
-                button { class: "btn btn-secondary", onclick: move |_| { applied.set(status()); page.set(1); action.set(None); reason.set(String::new()); error.set(String::new()); notice.set(String::new()); }, {i18n.t("tenant_financial_controls.apply")} }
-                button { class: "btn btn-secondary", onclick: move |_| { notice.set(String::new()); generation += 1; }, {i18n.t("tenant.reload")} }
+                button { class: "btn btn-secondary", r#type: "button", onclick: move |_| { applied.set(status()); page.set(1); action.set(None); reason.set(String::new()); error.set(String::new()); notice.set(String::new()); }, {i18n.t("tenant_financial_controls.apply")} }
+                button { class: "btn btn-secondary", r#type: "button", onclick: move |_| { notice.set(String::new()); generation += 1; }, {i18n.t("tenant.reload")} }
             }
             if !error().is_empty() {
                 p { role: "alert", class: "alert alert-error", "{error}" }
@@ -600,9 +609,11 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
                 },
             }
             if let Some((decision, row)) = action() {
-                div { class: "modal-backdrop",
-                    div { class: "modal", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !busy() { event.stop_propagation(); action.set(None); }, role: "dialog", aria_modal: "true", aria_label: i18n.t("tenant_financial_controls.review"),
-                        div { class: "modal-header", h2 { {i18n.t("tenant_financial_controls.review")} } }
+                div { class: "modal-backdrop", onclick: move |_| if !busy() { action.set(None); },
+                    div { class: "modal", tabindex: "-1", onclick: move |event| event.stop_propagation(), onkeydown: move |event| { if event.key() == Key::Escape && !busy() { event.stop_propagation(); action.set(None); } else { ui::components::modal::contain_modal_focus(&event); } }, role: "dialog", aria_modal: "true", aria_label: i18n.t("tenant_financial_controls.review"),
+                        div { class: "modal-header", h2 { class: "modal-title", {i18n.t("tenant_financial_controls.review")} }
+                            button { class: "modal-close btn btn-ghost btn-sm", r#type: "button", aria_label: i18n.t("common.close"), disabled: busy(), onclick: move |_| action.set(None), "✕" }
+                        }
                         div { class: "modal-body",
                             p { "{row.currency} {row.total_amount}" }
                             p { TechnicalId { value: row.id.to_string() } }
@@ -624,8 +635,8 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
                             }
                         }
                         div { class: "modal-footer",
-                            button { class: "btn btn-secondary", onmounted: move |event| async move { let _ = event.set_focus(true).await; }, disabled: busy(), onclick: move |_| action.set(None), {i18n.t("form.cancel")} }
-                            button { class: if decision == WithdrawalDecision::Reject { "btn btn-danger" } else { "btn btn-primary" }, disabled: busy() || reason().trim().is_empty(), onclick: confirm, {i18n.t(if decision == WithdrawalDecision::Approve { "tenant_financial_controls.approve" } else { "tenant_financial_controls.reject" })} }
+                            button { class: "btn btn-secondary", r#type: "button", onmounted: move |event| async move { let _ = event.set_focus(true).await; }, disabled: busy(), onclick: move |_| action.set(None), {i18n.t("form.cancel")} }
+                            button { class: if decision == WithdrawalDecision::Reject { "btn btn-danger" } else { "btn btn-primary" }, r#type: "button", disabled: busy() || reason().trim().is_empty(), onclick: confirm, {i18n.t(if decision == WithdrawalDecision::Approve { "tenant_financial_controls.approve" } else { "tenant_financial_controls.reject" })} }
                         }
                     }
                 }
@@ -669,8 +680,8 @@ fn WithdrawalTable(
                                     td {
                                         if row.status == "pending" && row.withdrawal_type == "alipay" {
                                             div { class: "table-actions",
-                                                button { class: "btn btn-primary btn-sm", onclick: move |_| on_review.call((WithdrawalDecision::Approve, approve.clone())), {i18n.t("tenant_financial_controls.approve")} }
-                                                button { class: "btn btn-danger btn-sm", onclick: move |_| on_review.call((WithdrawalDecision::Reject, reject.clone())), {i18n.t("tenant_financial_controls.reject")} }
+                                                button { class: "btn btn-primary btn-sm", r#type: "button", onclick: move |_| on_review.call((WithdrawalDecision::Approve, approve.clone())), {i18n.t("tenant_financial_controls.approve")} }
+                                                button { class: "btn btn-danger btn-sm", r#type: "button", onclick: move |_| on_review.call((WithdrawalDecision::Reject, reject.clone())), {i18n.t("tenant_financial_controls.reject")} }
                                             }
                                         }
                                     }

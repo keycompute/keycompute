@@ -45,7 +45,7 @@ pub fn Settings() -> Element {
                 description: page_description.to_string(),
             }
             if !can_manage_platform {
-                div { class: "alert alert-info", {i18n.t("settings.admin_only_hint")} }
+                div { class: "alert alert-info", role: "status", {i18n.t("settings.admin_only_hint")} }
             }
             match settings() {
                 None => rsx! {

@@ -224,16 +224,16 @@ fn TenantInvitationsPage() -> Element {
                         }
                     }
                 }
-                button {class:"btn btn-primary",disabled:busy()||email().trim().is_empty(),onclick:create,{i18n.t("tenant.invite")}}
+                button {class:"btn btn-primary",r#type:"button",disabled:busy()||email().trim().is_empty(),onclick:create,{i18n.t("tenant.invite")}}
             }
         }
         if let Some(result)=created(){section {class:"alert alert-info",role:"status",
             p {{i18n.t(notification_label(&result.notification))}}
             if result.outcome==InvitationOutcome::AlreadyPending {p {{i18n.t("tenant.already_pending")}}}
             if let Some(link)=result.acceptance_link {OneTimeRecoveryLink {link,input_id:"invite-recovery".to_string()}}
-            button {class:"btn btn-secondary",onclick:move |_|created.set(None),{i18n.t("tenant.hide")}}
+            button {class:"btn btn-secondary",r#type:"button",onclick:move |_|created.set(None),{i18n.t("tenant.hide")}}
         }}
-        button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
+        button {class:"btn btn-secondary",r#type:"button",disabled:busy(),onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
         match loaded {
             None=>rsx!{div {class:"content-loading",role:"status",span{class:"spinner",aria_hidden:"true"}span{{i18n.t("common.loading")}}}},
             Some(Err(e))=>rsx!{div {class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
@@ -242,7 +242,7 @@ fn TenantInvitationsPage() -> Element {
                     thead {tr {th {{i18n.t("tenant.email")}} th {{i18n.t("tenant.role")}} th {{i18n.t("tenant.result")}} th {{i18n.t("tenant.expires")}} th {{i18n.t("tenant.actions")}}}}
                     tbody {for invitation in value.items.iter(){
                         {let selected=invitation.clone();rsx!{tr {key:"{invitation.id}",td {"{invitation.email}"} td {{if invitation.tenant_role==TenantRole::Admin{i18n.t("tenant.role_admin")}else{i18n.t("tenant.role_member")}}} td {{invitation_status_label(i18n, &invitation.status)}} td {{format_time(&invitation.expires_at)}}
-                            td {if invitation.status=="pending" {button {class:"btn btn-danger btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(selected.clone())),{i18n.t("tenant.revoke")}}}}
+                            td {if invitation.status=="pending" {button {class:"btn btn-danger btn-sm",r#type:"button",disabled:busy(),onclick:move |_|pending.set(Some(selected.clone())),{i18n.t("tenant.revoke")}}}}
                         }}}
                     }}
                 }} if value.items.is_empty(){div {class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}}

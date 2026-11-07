@@ -136,10 +136,10 @@ pub fn UserSettings() -> Element {
             }
 
             if let Some(msg) = success_msg() {
-                div { class: "alert alert-success", "{msg}" }
+                div { class: "alert alert-success", role: "status", "{msg}" }
             }
             if let Some(err) = error_msg() {
-                div { class: "alert alert-error", "{err}" }
+                div { class: "alert alert-error", role: "alert", "{err}" }
             }
 
             div { class: "settings-section-card account-settings-card",

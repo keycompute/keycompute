@@ -100,9 +100,14 @@ fn PricingWorkspace(scope: WorkspaceScope) -> Element {
                             td {p {{i18n.t(if row.is_effective{"tenant_pricing.effective"}else{"tenant_pricing.ineffective"})}}
                                 if row.is_default {span {class:"badge",{i18n.t("tenant_pricing.default_badge")}}}
                                 details {summary {{i18n.t("tenant_pricing.window")}} p {{format_time(&row.effective_from)}} p {{row.effective_until.as_deref().map(format_time).unwrap_or_else(||"—".into())}} p {{i18n.t("tenant_pricing.version")} ": {row.version}"}}}
-                            td {button {class:"btn btn-secondary btn-sm",onclick:move |_|open(Operation::Edit(edit.clone())),{i18n.t("tenant_pricing.edit")}}
-                                button {class:"btn btn-secondary btn-sm",disabled:row.is_default,onclick:move |_|open(Operation::Default(default.clone())),{i18n.t("tenant_pricing.default")}}
-                                button {class:"btn btn-danger btn-sm",onclick:move |_|open(Operation::Delete(del.clone())),{i18n.t("tenant_pricing.delete")}}}
+                            td {details {class:"row-action-menu",
+                                summary {class:"btn btn-ghost btn-sm",aria_label:i18n.t("common.more"),title:i18n.t("common.more"),"⋯"}
+                                div {class:"btn-group row-action-menu-popover", onclick: move |_| crate::utils::close_row_action_menus(),
+                                    button {class:"btn btn-ghost btn-sm",r#type:"button",onclick:move |_|open(Operation::Edit(edit.clone())),{i18n.t("tenant_pricing.edit")}}
+                                    button {class:"btn btn-ghost btn-sm",r#type:"button",disabled:row.is_default,onclick:move |_|open(Operation::Default(default.clone())),{i18n.t("tenant_pricing.default")}}
+                                    button {class:"btn btn-danger btn-sm",r#type:"button",onclick:move |_|open(Operation::Delete(del.clone())),{i18n.t("tenant_pricing.delete")}}
+                                }
+                            }}
                         }}
                     }}}
                 }} if page.pricing.is_empty(){div{class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}}

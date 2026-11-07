@@ -166,7 +166,7 @@ pub fn PaymentOrders() -> Element {
                     }
                     div { class: "card-body",
                     if let Some(error) = provider_action_error() {
-                        div { class: "alert alert-error", "{error}" }
+                        div { class: "alert alert-error", role: "alert", "{error}" }
                     }
                     match verification_tenants() {
                     None => rsx! { div { class: "loading-state", {i18n.t("table.loading")} } },

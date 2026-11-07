@@ -21,6 +21,7 @@ pub(super) fn MutationEditor(
     on_changed: EventHandler<()>,
 ) -> Element {
     super::super::workspace_switcher::use_workspace_blocker();
+    ui::components::modal::use_dialog_focus_return(true);
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let mut ui = use_context::<UiStore>();
@@ -236,14 +237,16 @@ pub(super) fn MutationEditor(
             }
         });
     };
-    rsx! {div{class:"modal-overlay",div{class:"modal",style:"width:min(800px,95vw);max-height:85vh;overflow:auto;box-sizing:border-box;overflow-wrap:anywhere;background:var(--bg-primary,#fff);animation:none;opacity:1",role:"dialog",aria_modal:"true",aria_label:i18n.t(label),tabindex:"-1",onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();on_close.call(());}},
-        h2{{i18n.t(label)}}p{code{"{id}"}}p{{i18n.t("tenant_responses.owner")} " {owner}"}p{{i18n.t("tenant_responses.revision")} " " {revision.map(|v|v.to_string()).unwrap_or_else(||"—".into())}}
+    rsx! {div{class:"modal-backdrop",tabindex:"-1",onclick:move |_|if !busy(){on_close.call(())},div{class:"modal resource-editor",role:"dialog",aria_modal:"true",aria_label:i18n.t(label),tabindex:"-1",onclick:move|e|e.stop_propagation(),onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();on_close.call(());}else{ui::components::modal::contain_modal_focus(&e)}},
+        div{class:"modal-header",h2{class:"modal-title",{i18n.t(label)}}button{class:"modal-close btn btn-ghost btn-sm",r#type:"button",aria_label:i18n.t("common.close"),disabled:busy(),onclick:move |_|on_close.call(()),"✕"}}
+        div{class:"modal-body",p{code{"{id}"}}p{{i18n.t("tenant_responses.owner")} " {owner}"}p{{i18n.t("tenant_responses.revision")} " " {revision.map(|v|v.to_string()).unwrap_or_else(||"—".into())}}
         p{{i18n.t("tenant_responses.mode")} " {family}"}
         if let Some(item)=item_id{p{{i18n.t("tenant_responses.item_id")} " " code{"{item}"}}}
         if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}}
         if editing{label{class:"form-label",r#for:"resource-content-json",{i18n.t("tenant_responses.json")}}textarea{id:"resource-content-json",class:"input-field",rows:"10",value:"{text}",maxlength:"2097152",disabled:busy(),oninput:move|e|text.set(e.value())}p{class:"text-secondary",{i18n.t(if label=="tenant_responses.metadata"{"tenant_responses.metadata_hint"}else{"tenant_responses.items_hint"})}}}
-        p{class:"alert alert-info",{i18n.t("tenant_responses.owner_preserved")}}
+        p{class:"alert alert-info",role:"status",{i18n.t("tenant_responses.owner_preserved")}}
         p{class:"text-secondary",{i18n.t("tenant.command_hint")}}
-        div{class:"modal-actions",button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}button{class:"btn btn-primary",disabled:busy()||(revision.is_none()&&!native_op),onclick:submit,{i18n.t("tenant.confirm")}}}
+        div{class:"modal-footer",button{class:"btn btn-secondary",r#type:"button",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}button{class:"btn btn-primary",r#type:"button",disabled:busy()||(revision.is_none()&&!native_op),onclick:submit,{i18n.t("tenant.confirm")}}}
+        }
     }}}
 }

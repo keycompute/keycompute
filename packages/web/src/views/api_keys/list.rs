@@ -309,7 +309,7 @@ fn ApiKeyWorkspace(scope: WorkspaceScope) -> Element {
                         div { class: "loading-state", {i18n.t("table.loading")} }
                     },
                     Some(Err(e)) => rsx! {
-                        div { class: "alert alert-error",
+                        div { class: "alert alert-error", role: "alert",
                             {format!("{}：{}", i18n.t("api_keys.loading_failed"), crate::services::api_client::user_error_message(i18n, &e))}
                         }
                     },

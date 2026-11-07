@@ -52,8 +52,8 @@ pub fn TenantAdminLayout() -> Element {
     let route = use_route::<Route>();
     let scope = common::WorkspaceScope::from_stores(auth, users);
     if scope.is_none() {
-        return rsx! { div { class:"page-container", role:"alert",
-            p { class: "alert alert-info", {i18n.t("tenant.selection_required")} }
+        return rsx! { div { class:"page-container",
+            p { class: "alert alert-info", role: "status", {i18n.t("tenant.selection_required")} }
             Link { to:Route::TenantWorkspace {}, {i18n.t("tenant.workspace")} }
         }};
     }
@@ -63,8 +63,8 @@ pub fn TenantAdminLayout() -> Element {
         .as_ref()
         .is_some_and(|user| can_access_admin_route(user, &route))
     {
-        return rsx! { div { class:"page-container", role:"alert",
-            p { {i18n.t("tenant.admin_required")} }
+        return rsx! { div { class:"page-container",
+            p { class: "alert alert-error", role: "alert", {i18n.t("tenant.admin_required")} }
             Link { to:Route::TenantWorkspace {}, {i18n.t("tenant.workspace")} }
         }};
     }

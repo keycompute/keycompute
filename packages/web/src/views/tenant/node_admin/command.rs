@@ -53,6 +53,7 @@ pub(super) fn CommandDialog(
     on_success: EventHandler<String>,
 ) -> Element {
     super::super::workspace_switcher::use_workspace_blocker();
+    ui::components::modal::use_dialog_focus_return(true);
     let i18n = use_i18n();
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
@@ -101,9 +102,11 @@ pub(super) fn CommandDialog(
             }
         });
     };
-    rsx! {div {class:"modal-backdrop",
-        div {class:"modal",role:"dialog",aria_modal:"true",aria_label:title,
-            div {class:"modal-header",h2 {"{title}"}}
+    rsx! {div {class:"modal-backdrop", tabindex:"-1", onclick:move |_| if !busy(){on_close.call(())}, onkeydown:move |event| { if event.key()==Key::Escape && !busy() { event.stop_propagation(); on_close.call(()); } else { ui::components::modal::contain_modal_focus(&event); } },
+        div {class:"modal",role:"dialog",aria_modal:"true",aria_label:title,onclick:move |event| event.stop_propagation(),
+            div {class:"modal-header",h2 {class:"modal-title","{title}"}
+                button {class:"modal-close btn btn-ghost btn-sm",r#type:"button",autofocus:true,aria_label:i18n.t("common.close"),disabled:busy(),onclick:move |_|on_close.call(()),"✕"}
+            }
             div {class:"modal-body",
                 p {"{resource}"} p {{i18n.t("tenant_nodes.owner_short")} " {owner}"}
                 p {class:"text-secondary",{i18n.t("tenant_nodes.revision")} " {version}"}
@@ -120,8 +123,8 @@ pub(super) fn CommandDialog(
                 p {{i18n.t("tenant.command_hint")}}
             }
             div {class:"modal-footer",
-                button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}
-                button {class:"btn btn-primary",disabled:busy()||!allowed,onclick:confirm,{i18n.t("tenant.confirm")}}
+                button {class:"btn btn-secondary",r#type:"button",disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}
+                button {class:"btn btn-primary",r#type:"button",disabled:busy()||!allowed,onclick:confirm,{i18n.t("tenant.confirm")}}
             }
         }
     }}

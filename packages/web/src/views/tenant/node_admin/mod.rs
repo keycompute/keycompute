@@ -173,7 +173,7 @@ pub(crate) fn NodeResourceConsole(scope: NodeAdminScope) -> Element {
     let mut kind = use_signal(|| Kind::Nodes);
     rsx! {div {class:"node-resource-console",
         nav {class:"toolbar",aria_label:i18n.t("tenant_nodes.title"),
-            for selected in Kind::ALL {button {class:"btn btn-secondary",aria_pressed:kind()==selected,onclick:move |_|kind.set(selected),{i18n.t(selected.label())}}}
+            for selected in Kind::ALL {button {class:"btn btn-secondary",r#type:"button",aria_pressed:kind()==selected,onclick:move |_|kind.set(selected),{i18n.t(selected.label())}}}
         }
         for key in [format!("{:?}",kind())] {table::ResourceTable {key:"{key}",scope,kind:kind()}}
     }}

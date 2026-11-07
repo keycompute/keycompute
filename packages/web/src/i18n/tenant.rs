@@ -328,6 +328,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("tenant.previous", "上一页", "Previous"),
     ("tenant.next", "下一页", "Next"),
     ("tenant.records", "条记录", "records"),
+    (
+        "tenant.pagination",
+        "租户列表分页",
+        "Tenant list pagination",
+    ),
     ("tenant.confirm", "确认操作", "Confirm"),
     (
         "tenant.command_hint",

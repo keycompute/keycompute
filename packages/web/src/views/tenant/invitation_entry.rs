@@ -247,7 +247,7 @@ fn InvitationAcceptPage() -> Element {
     };
     rsx! {main {class:"page-container tenant-invitation-accept",
         ui::PageHeader {title:i18n.t("tenant.accept_title").to_string(),description:i18n.t("tenant.accept_hint").to_string()}
-        if !message().is_empty(){div {class:if failed(){"alert alert-error"}else{"alert alert-success"},role:"status","{message}"}}
+        if !message().is_empty(){div {class:if failed(){"alert alert-error"}else{"alert alert-success"},role:if failed(){"alert"}else{"status"},"{message}"}}
         if invitation.0.read().invalid {p {role:"alert",{i18n.t("tenant.invalid_invitation")}}}
         match preview() {
             None => rsx! { p { role:"status", {i18n.t("common.loading")} } },
@@ -274,12 +274,12 @@ fn InvitationAcceptPage() -> Element {
         else {
             if let Some(user)=user {p {{i18n.t("tenant.accept_as")} ": {user.email}"}}
             if accepted_tenant().is_some() {
-                button {class:"btn btn-primary",disabled:busy(),onclick:enter,{i18n.t("tenant.enter_workspace")}}
+                button {class:"btn btn-primary",r#type:"button",disabled:busy(),onclick:enter,{i18n.t("tenant.enter_workspace")}}
             } else {
-                button {class:"btn btn-primary",disabled:busy()||!invitation.0.read().has_token(),onclick:accept,{i18n.t("tenant.accept")}}
+                button {class:"btn btn-primary",r#type:"button",disabled:busy()||!invitation.0.read().has_token(),onclick:accept,{i18n.t("tenant.accept")}}
             }
             Link {class:"btn btn-secondary",to:Route::TenantWorkspace {},{i18n.t("tenant.workspace")}}
-            button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|bootstrap.0.restart(),{i18n.t("tenant.reload_memberships")}}
+            button {class:"btn btn-secondary",r#type:"button",disabled:busy(),onclick:move |_|bootstrap.0.restart(),{i18n.t("tenant.reload_memberships")}}
         }
         p {class:"text-secondary",{i18n.t("tenant.accept_no_retry")}}
     }}

@@ -34,6 +34,7 @@ fn OwnerWorkspace(scope: WorkspaceScope) -> Element {
     let mut page = use_signal(|| 1u32);
     let mut generation = use_signal(|| 0u64);
     let mut choice = use_signal(|| None::<Choice>);
+    ui::components::modal::use_dialog_focus_return(choice().is_some());
     let mut busy = use_signal(|| false);
     let mut error = use_signal(String::new);
     let mut notice = use_signal(String::new);
@@ -104,7 +105,7 @@ fn OwnerWorkspace(scope: WorkspaceScope) -> Element {
         if secret.read().is_some(){SecretPanel{scope,secret,on_close:move |_|secret.set(None)}}
         if !notice().is_empty(){p{class:"alert alert-success",role:"status","{notice}"}}
         if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}p{class:"text-secondary",{i18n.t("tenant_keys.claim_uncertain")}}}
-        button{class:"btn btn-secondary",disabled:busy(),onclick:move |_|{choice.set(None);data.restart();},{i18n.t("tenant.reload")}}
+        button{class:"btn btn-secondary",r#type:"button",disabled:busy(),onclick:move |_|{choice.set(None);data.restart();},{i18n.t("tenant.reload")}}
         match loaded{
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
             Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
@@ -129,17 +130,17 @@ fn OwnerWorkspace(scope: WorkspaceScope) -> Element {
             }
 
         }
-        if let Some(selected)=choice(){div{class:"modal-overlay",div{class:"modal tenant-key-editor",tabindex:"-1",onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();choice.set(None);}},role:"dialog",aria_modal:"true",aria_label:i18n.t(if selected.claim{"tenant_keys.claim"}else{"tenant_keys.decline"}),
-            div{class:"modal-header",div{h2{class:"modal-title",{i18n.t(if selected.claim{"tenant_keys.claim"}else{"tenant_keys.decline"})}}p{class:"modal-context","{selected.intent.requested_name}"}}button{class:"modal-close",r#type:"button",aria_label:i18n.t("common.close"),disabled:busy(),onclick:move |_|choice.set(None),"×"}}
+        if let Some(selected)=choice(){div{class:"modal-backdrop",tabindex:"-1",onclick:move |_|if !busy(){choice.set(None)},div{class:"modal tenant-key-editor",tabindex:"-1",onclick:move|e|e.stop_propagation(),onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();choice.set(None);}else{ui::components::modal::contain_modal_focus(&e)}},role:"dialog",aria_modal:"true",aria_label:i18n.t(if selected.claim{"tenant_keys.claim"}else{"tenant_keys.decline"}),
+            div{class:"modal-header",div{h2{class:"modal-title",{i18n.t(if selected.claim{"tenant_keys.claim"}else{"tenant_keys.decline"})}}p{class:"modal-context","{selected.intent.requested_name}"}}button{class:"modal-close btn btn-ghost btn-sm",r#type:"button",aria_label:i18n.t("common.close"),disabled:busy(),onclick:move |_|choice.set(None),"✕"}}
             div{class:"modal-body",
                 details{class:"technical-details",summary{{i18n.t("tenant_keys.request_identity")}}code{"{selected.intent.id}"}}
                 p{{i18n.t("tenant_keys.owner_hint")}}
-                if selected.intent.replaces_key_id.is_some(){p{class:"alert alert-info",{i18n.t("tenant_keys.rotation_hint")}}}
+                if selected.intent.replaces_key_id.is_some(){p{class:"alert alert-info",role:"status",{i18n.t("tenant_keys.rotation_hint")}}}
                 p{class:"command-note",{i18n.t("tenant.command_hint")}}
             }
             div{class:"modal-footer",
-                button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|choice.set(None),{i18n.t("form.cancel")}}
-                button{class:"btn btn-primary",disabled:busy(),onclick:confirm,{i18n.t("tenant.confirm")}}
+                button{class:"btn btn-secondary",r#type:"button",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|choice.set(None),{i18n.t("form.cancel")}}
+                button{class:"btn btn-primary",r#type:"button",disabled:busy(),onclick:confirm,{i18n.t("tenant.confirm")}}
             }
         }}}
     }}
@@ -198,9 +199,9 @@ fn SecretPanel(
     rsx! {section{class:"kc-api-success-panel owner-issued-secret",
         h2{{i18n.t("tenant_keys.secret_title")}}p{{i18n.t("tenant_keys.secret_hint")}}p{TechnicalId{value:key.key_id.to_string()}}
         pre{class:"kc-api-example",style:"white-space:pre-wrap;overflow-wrap:anywhere",if revealed(){"{key.key.expose()}"}else{"••••••••••••••••••••"}}
-        button{class:"btn btn-secondary",onclick:move |_|revealed.toggle(),{i18n.t(if revealed(){"tenant_keys.hide_secret"}else{"tenant_keys.reveal_secret"})}}
-        button{class:"btn btn-secondary",disabled:copying() || !revealed(),onclick:copy,{i18n.t("tenant_keys.copy")}}
-        button{class:"btn btn-secondary",onclick:move |_|on_close.call(()),{i18n.t("tenant_keys.clear_secret")}}
+        button{class:"btn btn-secondary",r#type:"button",onclick:move |_|revealed.toggle(),{i18n.t(if revealed(){"tenant_keys.hide_secret"}else{"tenant_keys.reveal_secret"})}}
+        button{class:"btn btn-secondary",r#type:"button",disabled:copying() || !revealed(),onclick:copy,{i18n.t("tenant_keys.copy")}}
+        button{class:"btn btn-secondary",r#type:"button",onclick:move |_|on_close.call(()),{i18n.t("tenant_keys.clear_secret")}}
         if copied(){p{role:"status",{i18n.t("tenant_keys.copied")}}}
         if copy_failed(){p{role:"alert",{i18n.t("tenant_keys.copy_failed")}}}
     }}
@@ -240,8 +241,8 @@ fn PendingRow(intent: IssuanceIntent, blocked: bool, on_choice: EventHandler<Cho
         td {{format_time(&intent.expires_at)}}
         td {{intent.requested_expires_at.as_deref().map(format_time).unwrap_or_else(||i18n.t("tenant_keys.never").into())}}
         td {div {class:"action-buttons",style:"display:flex;flex-wrap:wrap;gap:8px",
-            button {class:"btn btn-primary btn-sm",disabled:blocked,onclick:move |_|on_choice.call(Choice{intent:claim.clone(),claim:true}),{i18n.t("tenant_keys.claim")}}
-            button {class:"btn btn-secondary btn-sm",disabled:blocked,onclick:move |_|on_choice.call(Choice{intent:decline.clone(),claim:false}),{i18n.t("tenant_keys.decline")}}
+            button {class:"btn btn-primary btn-sm",r#type:"button",disabled:blocked,onclick:move |_|on_choice.call(Choice{intent:claim.clone(),claim:true}),{i18n.t("tenant_keys.claim")}}
+            button {class:"btn btn-secondary btn-sm",r#type:"button",disabled:blocked,onclick:move |_|on_choice.call(Choice{intent:decline.clone(),claim:false}),{i18n.t("tenant_keys.decline")}}
         }}
     }}
 }

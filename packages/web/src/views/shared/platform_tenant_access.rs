@@ -149,7 +149,7 @@ fn PlatformTenantRoutePage(tenant_id: String, section: PlatformTenantSection) ->
         return rsx! { NoPermissionView { resource: i18n.t("tenants.access_title").to_string() } };
     }
     let Ok(target) = Uuid::parse_str(&tenant_id) else {
-        return rsx! { div { class: "page-container", div { class: "alert alert-error", {i18n.t("common.invalid_request")} } } };
+        return rsx! { div { class: "page-container", div { class: "alert alert-error", role: "alert", {i18n.t("common.invalid_request")} } } };
     };
     let Some(scope) = WorkspaceScope::platform(auth, users, target) else {
         return rsx! { NoPermissionView { resource: i18n.t("tenants.access_title").to_string() } };
@@ -523,9 +523,9 @@ fn PlatformTenantAccessPanel(
                                             td { {user_status_label(i18n, member.user_status)} }
                                             td { div { class: "table-actions",
                                                 if !removed {
-                                                    button { class: "btn btn-secondary btn-sm", disabled: busy(), onclick: move |_| pending_member.set(Some((role_member.clone(), MemberAction::Role))), {i18n.t("tenant.change_role")} }
-                                                    button { class: "btn btn-secondary btn-sm", disabled: busy(), onclick: move |_| pending_member.set(Some((status_member.clone(), MemberAction::Status))), {i18n.t("tenant.change_status")} }
-                                                    button { class: "btn btn-danger btn-sm", disabled: busy(), onclick: move |_| pending_member.set(Some((remove_member.clone(), MemberAction::Remove))), {i18n.t("tenant.remove")} }
+                                                    button { class: "btn btn-secondary btn-sm", r#type: "button", disabled: busy(), onclick: move |_| pending_member.set(Some((role_member.clone(), MemberAction::Role))), {i18n.t("tenant.change_role")} }
+                                                    button { class: "btn btn-secondary btn-sm", r#type: "button", disabled: busy(), onclick: move |_| pending_member.set(Some((status_member.clone(), MemberAction::Status))), {i18n.t("tenant.change_status")} }
+                                                    button { class: "btn btn-danger btn-sm", r#type: "button", disabled: busy(), onclick: move |_| pending_member.set(Some((remove_member.clone(), MemberAction::Remove))), {i18n.t("tenant.remove")} }
                                                 }
                                             } }
                                         }

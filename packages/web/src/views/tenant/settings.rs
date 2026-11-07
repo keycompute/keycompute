@@ -259,16 +259,16 @@ fn TenantSettingsPage(
                             }
                         }
                         div { class: "tenant-settings-actions",
-                            button { class: "btn btn-primary", disabled: saving() || !dirty(), onclick: save, {i18n.t("tenant.save")} }
-                            button { class: "btn btn-secondary", disabled: saving(), onclick: move |_| { pending.set(None); error.set(String::new()); dirty.set(false); shared_dirty.set(draft_owner, false); draft.set(ConfigDraft::from_context(&value)); }, {i18n.t("form.cancel")} }
-                            button { class: "btn btn-ghost", disabled: saving(), onclick: reload, {i18n.t("tenant.reload")} }
+                            button { class: "btn btn-primary", r#type: "button", disabled: saving() || !dirty(), onclick: save, {i18n.t("tenant.save")} }
+                            button { class: "btn btn-secondary", r#type: "button", disabled: saving(), onclick: move |_| { pending.set(None); error.set(String::new()); dirty.set(false); shared_dirty.set(draft_owner, false); draft.set(ConfigDraft::from_context(&value)); }, {i18n.t("form.cancel")} }
+                            button { class: "btn btn-ghost", r#type: "button", disabled: saving(), onclick: reload, {i18n.t("tenant.reload")} }
                         }
                     }
                 }
             } else if let Some(Err(value)) = loaded {
                 div { class: "alert alert-error", role: "alert",
                     p { {user_error_message(i18n, &value)} }
-                    button { class: "btn btn-secondary", onclick: move |_| { context.restart(); if let Some(handler) = on_context_changed { handler.call(()); } }, {i18n.t("tenant.reload")} }
+                    button { class: "btn btn-secondary", r#type: "button", onclick: move |_| { context.restart(); if let Some(handler) = on_context_changed { handler.call(()); } }, {i18n.t("tenant.reload")} }
                 }
             } else {
                 p { role: "status", {i18n.t("common.loading")} }

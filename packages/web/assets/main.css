@@ -8009,12 +8009,29 @@ tbody tr:last-child .row-action-menu-popover {
   gap: 15px;
 }
 
-.modal-overlay .modal.tenant-key-editor,
-.modal-overlay .modal.tenant-pricing-editor,
-.modal-overlay .modal.tenant-distribution-editor {
+.modal-backdrop .modal.tenant-key-editor,
+.modal-backdrop .modal.tenant-pricing-editor,
+.modal-backdrop .modal.tenant-distribution-editor {
   width: min(760px, 100%);
   max-width: 760px;
   padding: 0;
+}
+
+.modal-backdrop .modal.finance-inspector,
+.modal-backdrop .modal.resource-inspector {
+  width: min(950px, 100%);
+  max-width: 950px;
+  max-height: calc(100dvh - 36px);
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.modal-backdrop .modal.resource-editor {
+  width: min(800px, 100%);
+  max-width: 800px;
+  max-height: calc(100dvh - 36px);
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .modal-context {

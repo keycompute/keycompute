@@ -19,6 +19,7 @@ pub(super) fn Editor(
     on_changed: EventHandler<()>,
 ) -> Element {
     super::super::workspace_switcher::use_workspace_blocker();
+    ui::components::modal::use_dialog_focus_return(true);
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let mut ui = use_context::<UiStore>();
@@ -128,8 +129,8 @@ pub(super) fn Editor(
         });
     };
     let workspace = common::workspace_name(users, scope);
-    rsx! {div{class:"modal-overlay",div{class:"modal tenant-distribution-editor",role:"dialog",aria_modal:"true",aria_label:i.t(label),tabindex:"-1",onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();on_close.call(())}},
-     div{class:"modal-header",div{h2{class:"modal-title",{i.t(label)}}p{class:"modal-context","{i.t(\"tenant.current\")} · {workspace}"}}button{class:"modal-close",r#type:"button",aria_label:i.t("common.close"),disabled:busy(),onclick:move |_|on_close.call(()),"×"}}
+    rsx! {div{class:"modal-backdrop",tabindex:"-1",onclick:move |_|if !busy(){on_close.call(())},div{class:"modal tenant-distribution-editor",role:"dialog",aria_modal:"true",aria_label:i.t(label),tabindex:"-1",onclick:move|e|e.stop_propagation(),onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();on_close.call(())}else{ui::components::modal::contain_modal_focus(&e)}},
+     div{class:"modal-header",div{h2{class:"modal-title",{i.t(label)}}p{class:"modal-context","{i.t(\"tenant.current\")} · {workspace}"}}button{class:"modal-close btn btn-ghost btn-sm",r#type:"button",aria_label:i.t("common.close"),disabled:busy(),onclick:move |_|on_close.call(()),"✕"}}
      div{class:"modal-body",
      if let Some(policy_id)=policy_id.as_ref(){p{class:"text-secondary",{i.t("tenant_distribution.policy_id")} " {policy_id}"}}
      if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}}
@@ -150,6 +151,6 @@ pub(super) fn Editor(
      label{class:"form-label",r#for:"distribution-reason",{i.t("tenant_distribution.reason")}}textarea{id:"distribution-reason",class:"input-field",maxlength:"500",value:"{draft().reason}",disabled:busy(),oninput:move|e|draft.write().reason=e.value()}
      p{class:"command-note",{i.t("tenant_distribution.effect_hint")}}
      }
-     div{class:"modal-footer",button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i.t("form.cancel")}}button{class:"btn btn-primary",disabled:busy(),onclick:submit,{i.t("tenant.confirm")}}}
+     div{class:"modal-footer",button{class:"btn btn-secondary",r#type:"button",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i.t("form.cancel")}}button{class:"btn btn-primary",r#type:"button",disabled:busy(),onclick:submit,{i.t("tenant.confirm")}}}
     }}}
 }

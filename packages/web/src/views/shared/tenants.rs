@@ -252,7 +252,7 @@ pub fn Tenants() -> Element {
                                         td {
                                             details { class: "row-action-menu",
                                                 summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), title: i18n.t("common.more"), "⋯" }
-                                                div { class: "btn-group row-action-menu-popover",
+                                                div { class: "btn-group row-action-menu-popover", onclick: move |_| crate::utils::close_row_action_menus(),
                                                     if t.is_active {
                                                         Link {
                                                             class: "btn btn-secondary btn-sm",
@@ -337,7 +337,7 @@ pub fn Tenants() -> Element {
                 }
             }
             if !operation_error().is_empty() {
-                div { class: "alert alert-error", "{operation_error}" }
+                div { class: "alert alert-error", role: "alert", "{operation_error}" }
             }
             if show_create() {
                 TenantCreateModal {
@@ -486,6 +486,7 @@ fn TenantCreateModal(
 ) -> Element {
     let i18n = use_i18n();
     crate::views::tenant::workspace_switcher::use_workspace_blocker();
+    ui::components::modal::use_dialog_focus_return(true);
     let opened_session = use_hook(|| auth_store.state.peek().session_id);
 
     let mut name = use_signal(String::new);
@@ -533,7 +534,18 @@ fn TenantCreateModal(
     };
 
     rsx! {
-        div { class: "modal-backdrop", onclick: move |_| if !saving() { on_close.call(()) },
+        div {
+            class: "modal-backdrop",
+            tabindex: "-1",
+            onclick: move |_| if !saving() { on_close.call(()) },
+            onkeydown: move |event| {
+                if event.key() == Key::Escape && !saving() {
+                    event.stop_propagation();
+                    on_close.call(());
+                } else {
+                    ui::components::modal::contain_modal_focus(&event);
+                }
+            },
             div {
                 class: "modal",
                 role: "dialog",
@@ -545,6 +557,7 @@ fn TenantCreateModal(
                     button {
                         class: "modal-close btn btn-ghost btn-sm",
                         r#type: "button",
+                        autofocus: true,
                         aria_label: i18n.t("common.close"),
                         disabled: saving(),
                         onclick: move |_| if !saving() { on_close.call(()) },
@@ -557,7 +570,7 @@ fn TenantCreateModal(
                         p { class: "text-secondary", {i18n.t("tenants.create_intro_hint")} }
                     }
                     if !error().is_empty() {
-                        div { class: "alert alert-error", "{error}" }
+                        div { class: "alert alert-error", role: "alert", "{error}" }
                     }
                     div { class: "form-group",
                         label { class: "form-label", r#for: "tenant-create-name",

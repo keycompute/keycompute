@@ -214,10 +214,10 @@ fn TenantMembersPage() -> Element {
                                         td {{status_label(i18n, member.user_status.as_str())}}
                                         td {
                                             if manageable {
-                                                button {class:"btn btn-secondary btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:suspend_member.clone(),action:Action::Suspend})),
+                                                button {class:"btn btn-secondary btn-sm",r#type:"button",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:suspend_member.clone(),action:Action::Suspend})),
                                                     {i18n.t(if member.membership_status == MembershipStatus::Active {"tenant.suspend_member"} else {"tenant.resume_member"})}
                                                 }
-                                                button {class:"btn btn-danger btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:remove_member.clone(),action:Action::Remove})),{i18n.t("tenant.remove")}}
+                                                button {class:"btn btn-danger btn-sm",r#type:"button",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:remove_member.clone(),action:Action::Remove})),{i18n.t("tenant.remove")}}
                                             }
                                             if member.tenant_role == TenantRole::Admin {span {class:"text-secondary",{i18n.t("tenant.peer_admin_protected")}}}
                                             else if removed {span {class:"text-secondary",{i18n.t("tenant.reinvite_required")}}}

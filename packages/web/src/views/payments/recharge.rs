@@ -335,7 +335,7 @@ fn RechargeContent() -> Element {
                         div { class: "card-body",
                             // 失败提示
                             if let OrderState::Failed { ref reason } = order_state() {
-                                div { class: "alert alert-error",
+                                div { class: "alert alert-error", role: "alert",
                                     span { class: "alert-icon", "✕" }
                                     div { class: "alert-content",
                                         p { class: "alert-body", "{reason}" }
@@ -455,7 +455,7 @@ fn RechargeContent() -> Element {
                             }
 
                             // 说明
-                            div { class: "alert alert-info", style: "margin-top: 16px",
+                            div { class: "alert alert-info", role: "status", style: "margin-top: 16px",
                                 span { class: "alert-icon", "ℹ" }
                                 div { class: "alert-content",
                                     p { class: "alert-body", {i18n.t("recharge.hint")} }
@@ -478,7 +478,7 @@ fn RechargeContent() -> Element {
                             h3 { class: "card-title", {i18n.t("recharge.pay_title")} }
                         }
                         div { class: "card-body",
-                            div { class: "alert alert-warning",
+                            div { class: "alert alert-warning", role: "alert",
                                 span { class: "alert-icon", "⏳" }
                                 div { class: "alert-content",
                                     p { class: "alert-title", {i18n.t("recharge.order_created")} }

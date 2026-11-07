@@ -1258,6 +1258,12 @@ fn AdminUsersView() -> Element {
     let mut release_reason = use_signal(String::new);
     let mut release_saving = use_signal(|| false);
     let mut balance_reservation_pagination = use_signal(BalanceReservationPagination::default);
+    ui::components::modal::use_dialog_focus_return(
+        edit_user().is_some()
+            || delete_user().is_some()
+            || balance_user().is_some()
+            || release_request_id().is_some(),
+    );
     let mut balance_reservation_page_size = use_signal(|| BALANCE_RESERVATION_PAGE_SIZE);
 
     use_effect(move || {
@@ -1970,7 +1976,7 @@ fn AdminUsersView() -> Element {
                                         td {
                                             details { class: "row-action-menu",
                                                 summary { class: "btn btn-ghost btn-sm", aria_label: i18n.t("common.more"), title: i18n.t("common.more"), "⋯" }
-                                                div { class: "btn-group row-action-menu-popover",
+                                                div { class: "btn-group row-action-menu-popover", onclick: move |_| crate::utils::close_row_action_menus(),
                                                 // root/operator identities are protected from operator edits.
                                                 if !matches!(u.platform_role, Some(PlatformRole::Root | PlatformRole::Operator))
                                                     || can_current_user_manage_roles
@@ -2198,7 +2204,16 @@ fn AdminUsersView() -> Element {
             if let Some(ref editing) = edit_user() {
                 div {
                     class: "modal-backdrop",
-                    onclick: move |_| edit_user.set(None),
+                    tabindex: "-1",
+                    onclick: move |_| if !edit_saving() { edit_user.set(None) },
+                    onkeydown: move |event| {
+                        if event.key() == Key::Escape && !edit_saving() {
+                            event.stop_propagation();
+                            edit_user.set(None);
+                        } else {
+                            ui::components::modal::contain_modal_focus(&event);
+                        }
+                    },
                     div {
                         class: "modal",
                         role: "dialog",
@@ -2210,8 +2225,10 @@ fn AdminUsersView() -> Element {
                             button {
                                 class: "btn btn-ghost btn-sm",
                                 r#type: "button",
+                                autofocus: true,
                                 aria_label: i18n.t("common.close"),
-                                onclick: move |_| edit_user.set(None),
+                                disabled: edit_saving(),
+                                onclick: move |_| if !edit_saving() { edit_user.set(None) },
                                 "✕"
                             }
                         }
@@ -2270,7 +2287,8 @@ fn AdminUsersView() -> Element {
                         div { class: "modal-footer",
                             Button {
                                 variant: ButtonVariant::Ghost,
-                                onclick: move |_| edit_user.set(None),
+                                disabled: edit_saving(),
+                                onclick: move |_| if !edit_saving() { edit_user.set(None) },
                                 {i18n.t("form.cancel")}
                             }
                             Button {
@@ -2288,7 +2306,16 @@ fn AdminUsersView() -> Element {
             if let Some(ref du) = delete_user() {
                 div {
                     class: "modal-backdrop",
-                    onclick: move |_| delete_user.set(None),
+                    tabindex: "-1",
+                    onclick: move |_| if !delete_saving() { delete_user.set(None) },
+                    onkeydown: move |event| {
+                        if event.key() == Key::Escape && !delete_saving() {
+                            event.stop_propagation();
+                            delete_user.set(None);
+                        } else {
+                            ui::components::modal::contain_modal_focus(&event);
+                        }
+                    },
                     div {
                         class: "modal",
                         role: "alertdialog",
@@ -2308,7 +2335,9 @@ fn AdminUsersView() -> Element {
                         div { class: "modal-footer",
                             Button {
                                 variant: ButtonVariant::Ghost,
-                                onclick: move |_| delete_user.set(None),
+                                autofocus: true,
+                                disabled: delete_saving(),
+                                onclick: move |_| if !delete_saving() { delete_user.set(None) },
                                 {i18n.t("form.cancel")}
                             }
                             Button {
@@ -2326,6 +2355,7 @@ fn AdminUsersView() -> Element {
             if let Some(ref bu) = balance_user() {
                 div {
                     class: "modal-backdrop",
+                    tabindex: "-1",
                     onclick: move |_| {
                         if balance_operation_tracker.read().is_active() || release_saving() {
                             return;
@@ -2337,6 +2367,20 @@ fn AdminUsersView() -> Element {
                         balance_operation_tracker.write().advance_modal();
                         balance_reservation_pagination.write().reset();
                         balance_user.set(None);
+                    },
+                    onkeydown: move |event| {
+                        if event.key() == Key::Escape && !balance_modal_busy {
+                            event.stop_propagation();
+                            balance_error.set(String::new());
+                            release_request_id.set(None);
+                            release_expected_version.set(None);
+                            release_reason.set(String::new());
+                            balance_operation_tracker.write().advance_modal();
+                            balance_reservation_pagination.write().reset();
+                            balance_user.set(None);
+                        } else {
+                            ui::components::modal::contain_modal_focus(&event);
+                        }
                     },
                     div {
                         class: "modal",
@@ -2351,6 +2395,7 @@ fn AdminUsersView() -> Element {
                             button {
                                 class: "btn btn-ghost btn-sm",
                                 r#type: "button",
+                                autofocus: true,
                                 aria_label: i18n.t("common.close"),
                                 disabled: balance_modal_busy,
                                 onclick: move |_| {
@@ -2392,7 +2437,7 @@ fn AdminUsersView() -> Element {
                                 div { class: "modal-inline-error", "{balance_error}" }
                             }
                             if balance_repeat_confirmation {
-                                div { class: "alert alert-warning",
+                                div { class: "alert alert-warning", role: "alert",
                                     {i18n.t("users.balance_repeat_operation_warning")}
                                 }
                             }
@@ -2407,7 +2452,7 @@ fn AdminUsersView() -> Element {
                                         balance_reservation_pagination.read().page_number();
                                     let can_go_back = balance_reservation_pagination.read().can_go_back();
                                     rsx! {
-                                        div { class: "alert alert-warning", "{i18n.t(\"users.balance_details_load_failed\")}: {message}" }
+                                        div { class: "alert alert-warning", role: "alert", "{i18n.t(\"users.balance_details_load_failed\")}: {message}" }
                                         if can_go_back {
                                             div { style: "margin-top: 12px;",
                                                 CursorPagination {
@@ -2484,7 +2529,7 @@ fn AdminUsersView() -> Element {
                                         if !details.reservations.is_empty() {
                                             div { style: "margin: 16px 0; display: flex; flex-direction: column; gap: 10px;",
                                                 h3 { style: "margin: 0; font-size: 14px;", {i18n.t("users.balance_active_reservations")} }
-                                                div { class: "alert alert-warning", {i18n.t("users.balance_release_warning")} }
+                                                div { class: "alert alert-warning", role: "alert", {i18n.t("users.balance_release_warning")} }
                                                 for reservation in details.reservations.iter() {
                                                     div {
                                                         key: "{reservation.request_id}",

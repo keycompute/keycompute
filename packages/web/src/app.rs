@@ -754,7 +754,7 @@ pub fn AdminLayout() -> Element {
     // 用户信息尚未加载完成，显示等待占位符
     if !info_loaded && info_load_failed {
         return rsx! {
-            div { class: "admin-guard-error alert alert-error",
+            div { class: "admin-guard-error alert alert-error", role: "alert",
                 p { {i18n.t("common.user_info_load_failed")} }
                 button {
                     class: "btn btn-secondary btn-sm",
